@@ -26,6 +26,7 @@ from ..engine import pages as P
 from ..engine.document import Document, DocumentError, NeedsPassword
 from . import dialogs as D
 from . import dlg_organize as O
+from . import dlg_split as DS
 from . import icons, theme
 from . import shortcuts as K
 from .organize import OrganizeView
@@ -872,8 +873,10 @@ class MainWindow(QMainWindow):
             elif key.split("_")[0] in DECO_KEYS:   # 워터마크·배경·머리글·쪽 번호·베이츠의 추가·업데이트·삭제
                 self.decorate(t, DECO_KEYS[key.split("_")[0]], key.partition("_")[2] or "add")
             elif key == "pagelabel":
-                dlg = D.PageLabelDialog(self, d.page_count, v.current)
-                if dlg.exec(): P.set_labels(d, **dlg.values()); t.changed(None, structural=True)
+                sel = t.organize.selected_pages() if t.view_stack.currentWidget() is t.organize else []
+                if not sel and t.side.isVisible() and t.side_key == "thumbs":
+                    sel = t.thumbs.selected_pages()
+                DS.run_page_label(self, t, sel)
             # 구성
             elif key in ("thumb_in", "thumb_out"): t.organize.set_width(t.organize.thumb_w + (30 if key == "thumb_in" else -30))
             elif key in ("rotate_left", "rotate_right", "delete_pages", "extract", "insert_blank", "insert_pdf", "insert_images", "crop_pages",
@@ -1019,11 +1022,7 @@ class MainWindow(QMainWindow):
                 if dlg.exec():
                     vals = dlg.values(); m = P.split_grid(d, vals["pages"], vals["cols"], vals["rows"])
                     t.changed(None, structural=True, mapping=m); self.say(f"쪽 {len(vals['pages'])}장을 나눠 모두 {d.page_count}쪽이 됐습니다")
-            elif key == "split":
-                dlg = D.SplitDialog(self, d.page_count, os.path.dirname(d.path) if d.path else os.path.expanduser("~"))
-                if dlg.exec():
-                    vals = dlg.values(); outs = P.split(d, vals["out_dir"], vals["mode"], vals["value"], vals["ranges"])
-                    self.say(f"{len(outs)}개 파일로 나눴습니다"); self._offer_open(vals["out_dir"])
+            elif key == "split": DS.run_split(self, t)
         except ValueError as e:
             QMessageBox.warning(self, "페이지", str(e))
         except RuntimeError as e:

@@ -341,17 +341,102 @@ def extract(doc: Document, pages: Iterable[int], out_path: str, creator: str = "
     return out_path
 
 
+SPLIT_PART = "파트"       # <이름>_파트N.pdf
+SPLIT_HEAD = "머리글"     # 첫 책갈피 앞쪽들
+NO_TOP_BOOKMARK = "문서에 최상위 북마크 있지 않으므로 분할할 수 없습니다. 옵션을 변경하고 다시 시도하십시오."
+_BAD_NAME = re.compile(r'[\/:*?"<>|\x00-\x1f]')
+
+
+def split_folder(out_dir: str, stem: str) -> str:
+    """분할 결과는 저장 폴더 아래 원본 이름 하위 폴더에 모인다. 파일 이름 자리(40자)를 남기게 폴더 이름을 자른다."""
+    name = _BAD_NAME.sub("_", stem).strip() or "문서"
+    room = 255 - 40 - len(os.path.join(out_dir, ""))
+    return os.path.join(out_dir, name[:max(1, room)].rstrip(" .") or "문서")
+
+
+def _fit_name(folder: str, name: str, ext: str = ".pdf", limit: int = 255) -> str:
+    """전체 경로가 limit 자를 넘으면 이름 뒤를 잘라 맞춘다."""
+    room = limit - len(os.path.join(folder, "")) - len(ext)
+    return os.path.join(folder, (name[:max(1, room)] if len(name) > room else name) + ext)
+
+
+def _bookmark_groups(doc: Document, total: int, stem: str) -> list[tuple[str, list[int]]]:
+    tops = sorted((max(0, min(total - 1, t[2] - 1)), t[1]) for t in doc.flat_toc() if t[0] == 1 and t[2] > 0)
+    if not tops:
+        raise ValueError(NO_TOP_BOOKMARK)
+    out = []
+    if tops[0][0] > 0:
+        out.append((f"{stem}_{SPLIT_HEAD}", list(range(0, tops[0][0]))))
+    seen: dict[str, int] = {}
+    for k, (a, title) in enumerate(tops):
+        b = tops[k + 1][0] if k + 1 < len(tops) else total
+        name = f"{stem}_{_BAD_NAME.sub('_', title).strip().rstrip('.') or '북마크'}"
+        seen[name] = seen.get(name, 0) + 1
+        if seen[name] > 1:
+            name += f" ({seen[name]})"
+        out.append((name, list(range(a, max(a + 1, b)))))   # 같은 쪽 책갈피 둘이면 앞것도 그 쪽 하나
+    return out
+
+
+def _part(doc: Document, pages: list[int], meta: dict) -> fitz.Document:
+    new = fitz.open()
+    for i in pages:
+        new.insert_pdf(doc.fitz, from_page=i, to_page=i)
+    new.set_metadata(meta)
+    return new
+
+
+def _size_groups(doc: Document, total: int, limit: int, meta: dict, progress=None) -> list[list[int]]:
+    """앞에서부터 한도 안에 드는 가장 긴 구간을 찾는다(두 배씩 늘려 본 뒤 이분 찾기). 한 쪽만으로 넘치면 그 쪽 하나."""
+    def size(a: int, n: int) -> int:
+        f = _part(doc, list(range(a, a + n)), meta)
+        try:
+            return len(f.tobytes(garbage=3, deflate=True))
+        finally:
+            f.close()
+
+    groups, s = [], 0
+    while s < total:
+        if progress:
+            progress(s, total, f"{s + 1}쪽부터 나누는 중")
+        lo, hi = 1, 1                       # lo: 들어간다고 확인한 쪽 수
+        if size(s, 1) <= limit:
+            hi = 2
+            while s + hi <= total and size(s, hi) <= limit:
+                lo, hi = hi, hi * 2
+            hi = min(hi, total - s + 1)     # hi: 안 들어가는(또는 끝을 넘는) 쪽 수
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if size(s, mid) <= limit:
+                    lo = mid
+                else:
+                    hi = mid
+        groups.append(list(range(s, s + lo)))
+        s += lo
+    return groups
+
+
 def split(doc: Document, out_dir: str, mode: str = "count", value=1, ranges: list[str] | None = None,
-          stem: str | None = None) -> list[str]:
-    """mode: count(몇 쪽씩) · parts(몇 덩어리로) · ranges(범위 목록) · bookmarks(1단계 책갈피마다) · each(한 쪽씩)."""
+          stem: str | None = None, progress=None) -> list[str]:
+    """mode: count(파일 당 쪽 수) · size(파일 당 MB) · bookmarks(최상위 책갈피마다) · parts(몇 덩어리로) · ranges(범위 목록) · each(한 쪽씩).
+
+    out_dir 아래 원본 이름 하위 폴더를 만들고 <이름>_파트N.pdf(책갈피는 <이름>_<제목>.pdf)로 저장한다.
+    """
     total = doc.page_count
     stem = stem or os.path.splitext(doc.name)[0]
+    folder = split_folder(out_dir, stem)
+    md = doc.fitz.metadata or {}
+    meta = {k: md.get(k) or "" for k in ("title", "author", "subject", "keywords", "creator", "producer", "creationDate", "modDate")}
+    named: list[tuple[str, list[int]]] | None = None
     groups: list[list[int]] = []
     if mode == "each":
         groups = [[i] for i in range(total)]
     elif mode == "count":
         n = max(1, int(value))
         groups = [list(range(i, min(i + n, total))) for i in range(0, total, n)]
+    elif mode == "size":
+        limit = int(float(value) * 1024 * 1024)
+        groups = _size_groups(doc, total, limit, meta, progress)
     elif mode == "parts":
         k = max(1, min(int(value), total))
         base, extra = divmod(total, k)
@@ -363,25 +448,23 @@ def split(doc: Document, out_dir: str, mode: str = "count", value=1, ranges: lis
     elif mode == "ranges":
         groups = [parse_range(r, total) for r in (ranges or []) if r.strip()]
     elif mode == "bookmarks":
-        toc = [t for t in doc.flat_toc() if t[0] == 1]
-        starts = sorted({max(0, t[2] - 1) for t in toc}) or [0]
-        if starts[0] != 0:
-            starts.insert(0, 0)
-        for a, b in zip(starts, starts[1:] + [total]):
-            groups.append(list(range(a, b)))
+        named = _bookmark_groups(doc, total, stem)
     else:
         raise ValueError(f"모르는 나누기 방식: {mode}")
-    os.makedirs(out_dir, exist_ok=True)
+    groups = [g for g in groups if g]
+    if named is None:
+        if len(groups) == 1 and len(groups[0]) == total:
+            named = [(stem, groups[0])]      # 쪽 수가 한 파일 몫 이하면 통째로 <이름>.pdf
+        else:
+            named = [(f"{stem}_{SPLIT_PART}{n}", g) for n, g in enumerate(groups, 1)]
+    os.makedirs(folder, exist_ok=True)
     outs = []
     with doc.lock:
-        for n, g in enumerate(groups, 1):
-            if not g:
-                continue
-            new = fitz.open()
-            for i in g:
-                new.insert_pdf(doc.fitz, from_page=i, to_page=i)
-            name = f"{stem}_{n:02d}.pdf" if len(groups) > 1 else f"{stem}_나눔.pdf"
-            out = os.path.join(out_dir, name)
+        for k, (name, g) in enumerate(named):
+            if progress:
+                progress(k, len(named), f"{k + 1} / {len(named)} 저장 중")
+            new = _part(doc, g, meta)
+            out = _fit_name(folder, name)
             new.save(out, garbage=3, deflate=True)
             new.close()
             outs.append(out)
@@ -667,6 +750,91 @@ def set_labels(doc: Document, start_page: int, style: str = "D", prefix: str = "
         labels = [l for l in read_page_labels(doc.fitz) if l.get("startpage") != start_page]
         labels.append({"startpage": start_page, "prefix": prefix, "style": style, "firstpagenum": first})
         write_page_labels(doc.fitz, labels)
+
+
+LABEL_STYLES = [("D", "1,2,3,..."), ("r", "i,ii,iii,..."), ("R", "I,II,III,..."), ("a", "a,b,c,..."), ("A", "A,B,C,..."), ("", "없음")]
+_ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+
+
+def label_number(text: str, style: str) -> int | None:
+    """시작 칸 글자를 번호로. 숫자는 늘 받고, 로마자·알파벳은 그 스타일일 때 받는다(iv → 4, aa → 27)."""
+    t = (text or "").strip()
+    if t.isdigit():
+        return int(t)
+    if style in ("r", "R") and t and all(c in _ROMAN for c in t.lower()):
+        v = [_ROMAN[c] for c in t.lower()]
+        n = sum(-x if i + 1 < len(v) and x < v[i + 1] else x for i, x in enumerate(v))
+        return n if _roman(n) == t.lower() and (t.islower() if style == "r" else t.isupper()) else None
+    if style in ("a", "A") and t and len(set(t)) == 1 and t.isalpha() and t.isascii() \
+            and (t.islower() if style == "a" else t.isupper()):
+        return (len(t) - 1) * 26 + ord(t[0].lower()) - 96
+    return None
+
+
+def label_preview(style: str, prefix: str, start: int) -> str:
+    rule = {"style": style, "prefix": prefix}
+    return ",".join(_label(rule, start + k) for k in range(3)) + ",..."
+
+
+def page_of_label(f: fitz.Document, text: str, after: int = 0) -> int | None:
+    """레이블 글자(또는 쪽 번호)로 쪽을 찾는다. after 쪽부터 처음 맞는 레이블, 없으면 쪽 번호로 읽는다."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    labs = page_label_strings(f)
+    for i in list(range(after, f.page_count)) + list(range(0, after)):
+        if labs[i] and labs[i] == t:
+            return i
+    return int(t) - 1 if t.isdigit() and 1 <= int(t) <= f.page_count else None
+
+
+def label_at(f: fitz.Document, page: int) -> dict:
+    """그 쪽에 걸린 스타일·접두사·번호. 레이블이 없으면 1,2,3 / 빈칸 / 1."""
+    rule = next((r for r in reversed(read_page_labels(f)) if r["startpage"] <= page), None)
+    if not rule:
+        return {"style": "D", "prefix": "", "start": 1}
+    return {"style": rule.get("style", ""), "prefix": rule.get("prefix", ""),
+            "start": int(rule.get("firstpagenum", 1) or 1) + page - rule["startpage"]}
+
+
+def _rule_for(rules: list[dict], page: int) -> dict | None:
+    return next((r for r in reversed(rules) if r["startpage"] <= page), None)
+
+
+def apply_labels(doc: Document, first: int, last: int, style: str = "D", prefix: str = "", start: int = 1,
+                 extend: bool = False):
+    """first~last 쪽(0부터)에 레이블 섹션. 안쪽 섹션은 걷고, last 다음 쪽은 원래 번호를 잇는다.
+    extend 면 바로 앞 섹션의 스타일·접두사·번호를 범위까지 늘린다."""
+    doc.snapshot()
+    with doc.lock:
+        f = doc.fitz
+        total = f.page_count
+        rules = read_page_labels(f) or [{"startpage": 0, "style": "D", "prefix": "", "firstpagenum": 1}]
+        for r in rules:
+            r["firstpagenum"] = int(r.get("firstpagenum", 1) or 1)
+        nxt = None
+        if last + 1 < total and not any(r["startpage"] == last + 1 for r in rules):
+            r = _rule_for(rules, last + 1)
+            if r:
+                nxt = {"startpage": last + 1, "style": r.get("style", ""), "prefix": r.get("prefix", ""),
+                       "firstpagenum": r["firstpagenum"] + last + 1 - r["startpage"]}
+        head = rules[0] if rules[0]["startpage"] == 0 else None
+        rules = [r for r in rules if not first <= r["startpage"] <= last]
+        if not extend:
+            rules.append({"startpage": first, "style": style, "prefix": prefix, "firstpagenum": int(start)})
+        elif first == 0:   # 1쪽부터 늘리면 앞 섹션이 없다: 1쪽 섹션을 그대로 둔다
+            rules.append(head or {"startpage": 0, "style": "D", "prefix": "", "firstpagenum": 1})
+        if nxt:
+            rules.append(nxt)
+        rules.sort(key=lambda r: r["startpage"])
+        merged: list[dict] = []
+        for r in rules:   # 앞 섹션을 그대로 잇는 섹션은 합친다
+            p = merged[-1] if merged else None
+            if p and p.get("style", "") == r.get("style", "") and p.get("prefix", "") == r.get("prefix", "") \
+                    and (not r.get("style") or p["firstpagenum"] + r["startpage"] - p["startpage"] == r["firstpagenum"]):
+                continue
+            merged.append(r)
+        write_page_labels(f, merged)
 
 
 def labels(doc: Document) -> list[str]:
