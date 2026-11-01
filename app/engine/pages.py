@@ -147,33 +147,103 @@ def reorder(doc: Document, new_order: list[int]):
         doc.fitz.select(new_order)
 
 
+def insert_index(place: str, page: int, before: bool, total: int) -> int:
+    """삽입 장소 → 끼울 자리(0-based). place: first(첫 쪽) · last(마지막 쪽) · page(page 쪽).
+    「뒤에」면 그 쪽 다음 자리라서 「첫 쪽 뒤」는 2쪽 자리다."""
+    if total <= 0:
+        return 0
+    target = 0 if place == "first" else total - 1 if place == "last" else max(0, min(int(page), total - 1))
+    return target if before else target + 1
+
+
+_BOXES = ("MediaBox", "CropBox", "BleedBox", "TrimBox", "ArtBox")
+
+
+def _inherited(f: fitz.Document, xref: int, key: str) -> tuple[str, str]:
+    """쪽 열쇠 값(물려받은 것까지). 없으면 ("null", "null")."""
+    for _ in range(64):
+        t, v = f.xref_get_key(xref, key)
+        if t != "null":
+            return t, v
+        t, v = f.xref_get_key(xref, "Parent")
+        if t != "xref":
+            break
+        xref = int(v.split()[0])
+    return "null", "null"
+
+
 def insert_blank(doc: Document, at: int, width: float | None = None, height: float | None = None, count: int = 1):
+    """빈 쪽 count 장을 at 자리에. 크기를 안 주면 끼울 자리 바로 앞 쪽(맨 앞이면 1쪽)의 상자 다섯과 회전을 따른다."""
     doc.snapshot()
     with doc.lock:
-        if width is None or height is None:
-            ref = doc.fitz[min(max(at - 1, 0), doc.page_count - 1)].rect
-            width, height = ref.width, ref.height
+        f = doc.fitz
+        ref = min(max(at - 1, 0), f.page_count - 1) if f.page_count else -1
+        follow = (width is None or height is None) and ref >= 0
+        if not follow and (width is None or height is None):
+            width, height = 595, 842
         for k in range(count):
-            doc.fitz.new_page(pno=at + k, width=width, height=height)
+            if not follow:
+                f.new_page(pno=at + k, width=width, height=height)
+                continue
+            rx = f[ref].xref
+            mb = _box(f, rx, "MediaBox") or [0, 0, 595, 842]
+            f.new_page(pno=at + k, width=mb[2] - mb[0], height=mb[3] - mb[1])
+            nx = f[at + k].xref
+            for key in _BOXES:
+                t, v = _inherited(f, rx, key)
+                if t == "array":
+                    f.xref_set_key(nx, key, v)
+            t, v = _inherited(f, rx, "Rotate")
+            if t == "int" and int(v) % 360:
+                f.xref_set_key(nx, "Rotate", str(int(v) % 360))
+
+
+def is_xfa(src: fitz.Document) -> bool:
+    """XFA 양식 문서인가(쪽 끼우기가 그 양식을 옮기지 못한다)."""
+    try:
+        return src.is_pdf and src.xref_get_key(src.pdf_catalog(), "AcroForm/XFA")[0] != "null"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def open_source(path: str, password: str | None = None) -> fitz.Document:
+    """끼우거나 바꿀 때 쓸 원본을 연다. 암호가 맞지 않으면 ValueError."""
+    src = fitz.open(path)
+    if src.needs_pass and (not password or not src.authenticate(password)):
+        src.close()
+        raise ValueError(f"「{os.path.basename(path)}」 의 암호가 맞지 않습니다")
+    if not src.is_pdf:
+        src = fitz.open("pdf", src.convert_to_pdf())
+    return src
+
+
+def insert_pdfs(doc: Document, at: int, items: list[tuple]) -> int:
+    """여러 문서를 고른 차례대로 at 자리부터 이어 끼운다. items: (경로, 암호, 가져올 쪽 또는 None).
+    되돌리기 한 걸음으로 묶는다. 끼운 쪽 수를 돌려준다."""
+    srcs = [(open_source(p, pw), pg) for p, pw, pg in items]   # 다 열어 본 뒤에 바꾼다(실패해도 되돌리기 걸음이 남지 않게)
+    for src, pg in srcs:
+        if pg is not None and any(not 0 <= i < src.page_count for i in pg):
+            for s, _ in srcs:
+                s.close()
+            raise ValueError(f"가져올 쪽이 원본에 없습니다(1~{src.page_count}쪽)")
+    doc.snapshot()
+    doc.dedupe = True  # 끼운 문서와 같은 글꼴·그림이 겹칠 수 있어 저장 때 합친다
+    n = 0
+    with doc.lock:
+        for src, pg in srcs:
+            if pg is None:
+                doc.fitz.insert_pdf(src, start_at=at + n)
+                n += src.page_count
+            else:
+                for i in pg:
+                    doc.fitz.insert_pdf(src, from_page=i, to_page=i, start_at=at + n)
+                    n += 1
+            src.close()
+    return n
 
 
 def insert_from_pdf(doc: Document, at: int, path: str, pages: Iterable[int] | None = None, password: str | None = None):
-    src = fitz.open(path)
-    if src.needs_pass:
-        if not password or not src.authenticate(password):
-            src.close()
-            raise ValueError("끼울 문서에 암호가 걸려 있습니다")
-    if not src.is_pdf:
-        src = fitz.open("pdf", src.convert_to_pdf())
-    doc.snapshot()  # 확인을 마친 뒤에(실패해도 되돌리기 걸음이 남지 않게)
-    doc.dedupe = True  # 끼운 문서와 같은 글꼴·그림이 겹칠 수 있어 저장 때 합친다
-    with doc.lock:
-        if pages is None:
-            doc.fitz.insert_pdf(src, start_at=at)
-        else:
-            for k, i in enumerate(pages):
-                doc.fitz.insert_pdf(src, from_page=i, to_page=i, start_at=at + k)
-        src.close()
+    insert_pdfs(doc, at, [(path, password, None if pages is None else list(pages))])
 
 
 def insert_images(doc: Document, at: int, paths: list[str]):
@@ -269,32 +339,66 @@ def merge(paths: list[str], out_path: str, progress=None) -> str:
     return out_path
 
 
-def replace(doc: Document, pages: list[int], path: str, src_pages: list[int] | None = None):
-    """고른 쪽들을 다른 PDF 의 쪽들로 바꾼다(지우고 그 자리에 끼움)."""
+_CONTENT_KEYS = ("Contents", "Resources", *_BOXES, "Rotate", "UserUnit", "Group")
+
+
+def _swap_content(f: fitz.Document, dst: int, src: int):
+    """dst 쪽(xref)의 내용·자원·상자·회전만 src 쪽 것으로 바꾼다. 주석(/Annots)은 그대로 남는다."""
+    gone = []
+    for key in _CONTENT_KEYS:
+        t, v = _inherited(f, src, key)
+        if t == "null":
+            gone.append(key)
+        else:
+            f.xref_set_key(dst, key, v)
+    if "Rotate" in gone:   # 부모에게서 물려받은 회전이 남지 않게 0 으로 못박는다
+        gone.remove("Rotate")
+        f.xref_set_key(dst, "Rotate", "0")
+    if gone:
+        del_keys(f, dst, gone)
+
+
+def replace(doc: Document, pages: list[int], path: str, src_pages: list[int] | None = None,
+            keep_annots: bool = False, password: str | None = None):
+    """고른 쪽들을 다른 PDF 의 쪽들로 바꾼다. 두 쪽 수는 달라도 된다.
+    keep_annots 가 거짓이면 대상 쪽을 지우고 그 첫 자리에 원본 쪽을 끼운다.
+    참이면 앞에서부터 짧은 쪽 수만큼 쪽 내용만 갈아 끼워 주석을 남기고, 원본이 많으면 남은 쪽을 뒤에 끼우고
+    대상이 많으면 남은 대상 쪽을 지운다."""
     pages = sorted(set(pages))
     if not pages:
         return
     # 원본을 먼저 열어 본다. 전에는 쪽을 먼저 지운 뒤 암호 문서에서 깨진 쪽을 끼우고 멈췄다.
-    src = fitz.open(path)
-    if src.needs_pass:
-        src.close()
-        raise ValueError("암호가 걸린 PDF 로는 바꿀 수 없습니다")
-    if not src.is_pdf:
-        src = fitz.open("pdf", src.convert_to_pdf())
+    src = open_source(path, password)
     n = src.page_count
     if src_pages is not None and any(not 0 <= i < n for i in src_pages):
         src.close()
         raise ValueError(f"가져올 쪽이 원본에 없습니다(1~{n}쪽)")
+    sp = list(range(n)) if src_pages is None else list(src_pages)
+    if len(pages) >= doc.page_count and not sp:
+        src.close()
+        raise ValueError("쪽을 전부 지울 수는 없습니다")
     doc.snapshot()
     doc.dedupe = True
     with doc.lock:
-        at = pages[0]
-        doc.fitz.delete_pages(pages)
-        if src_pages is None:
-            doc.fitz.insert_pdf(src, start_at=at)
+        f = doc.fitz
+        if not keep_annots:
+            at = pages[0]
+            f.delete_pages(pages)
+            for k, i in enumerate(sp):
+                f.insert_pdf(src, from_page=i, to_page=i, start_at=at + k)
         else:
-            for k, i in enumerate(src_pages):
-                doc.fitz.insert_pdf(src, from_page=i, to_page=i, start_at=at + k)
+            k = min(len(pages), len(sp))
+            for j, i in enumerate(sp[k:]):   # 남는 원본 쪽은 마지막 대상 쪽 뒤에
+                f.insert_pdf(src, from_page=i, to_page=i, start_at=pages[-1] + 1 + j)
+            base = f.page_count
+            for i in sp[:k]:   # 갈아 끼울 원본은 잠깐 맨 뒤에 붙였다가 내용만 옮기고 걷는다
+                f.insert_pdf(src, from_page=i, to_page=i)
+            for j in range(k):
+                _swap_content(f, f[pages[j]].xref, f[base + j].xref)
+            if f.page_count > base:
+                f.delete_pages(list(range(base, f.page_count)))
+            if len(pages) > k:
+                f.delete_pages(pages[k:])
         src.close()
 
 
