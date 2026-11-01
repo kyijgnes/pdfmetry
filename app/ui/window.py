@@ -121,6 +121,8 @@ class DocTab(QWidget):
         self.organize.reordered.connect(self.reorder)
         self.organize.pagesAction.connect(self.win.pages_action)
         self.organize.openPage.connect(lambda i: (self.win.ribbon.set_tab("home"), self.viewer.goto(i)))
+        self.organize.selectionChanged.connect(lambda pg: self.win.cur() is self and self.win.ribbon.show_range(pg, doc.page_count, P.labels(doc)))
+        self.organize.zoomChanged.connect(self.win.sync_thumb_zoom)
         self.bookmarks.gotoPage.connect(self.viewer.goto)
         self.bookmarks.changed.connect(lambda: self.win.mark_modified())
         self.annots.gotoAnnot.connect(lambda pg, r: self.viewer.goto(pg, r.y0))
@@ -285,6 +287,7 @@ class MainWindow(QMainWindow):
         self.ribbon = Ribbon()
         self.ribbon.action.connect(self.on_action); self.ribbon.tool.connect(self.on_tool); self.ribbon.toggled.connect(self.on_toggle)
         self.ribbon.tabChanged.connect(self.on_ribbon_tab); self.ribbon.searchRequested.connect(self.quick_search)
+        self.ribbon.rangePicked.connect(self.pick_range)
         self.ribbon.fileMenu.connect(self.show_file_menu)
         root.addWidget(self.ribbon)
         # 본문
@@ -413,6 +416,28 @@ class MainWindow(QMainWindow):
         self.ribbon.set_toggle("edit_all", t.viewer.edit_mode); self.ribbon.set_toggle("form_edit", t.viewer.form_mode)
         self.ribbon.set_toggle("show_annots", t.viewer.show_annots)
         self.ribbon.set_enabled("undo", t.doc.can_undo()); self.ribbon.set_enabled("redo", t.doc.can_redo())
+        self.sync_thumb_zoom(*t.organize.can_zoom())
+        self.ribbon.show_range(t.organize.selected_pages(), t.doc.page_count, P.labels(t.doc))
+
+    def sync_thumb_zoom(self, can_out: bool, can_in: bool):
+        self.ribbon.set_enabled("thumb_out", can_out); self.ribbon.set_enabled("thumb_in", can_in)
+
+    def pick_range(self, spec: str):
+        """구성 탭 범위 콤보: 짝수·홀수·모든 쪽이나 넣은 범위(레이블로 읽음)를 썸네일에서 고른다."""
+        t = self.cur()
+        if not t:
+            return
+        n = t.doc.page_count
+        try:
+            pages = P.subset(range(n), spec) if spec in ("all", "even", "odd") else                 P.parse_range(spec, n, strict=True, labels=P.labels(t.doc))
+        except ValueError:
+            pages = []
+        if not pages:
+            QMessageBox.warning(self, "페이지 범위", P.RANGE_ERROR)
+            self.ribbon.range_combo.setFocus(); self.ribbon.range_combo.lineEdit().selectAll()
+            return
+        t.organize.select_pages(pages)
+        t.organize.list.setFocus()
 
     def _tab_moved(self, a: int, b: int):
         self.tabs.insert(b, self.tabs.pop(a))
@@ -878,7 +903,7 @@ class MainWindow(QMainWindow):
                     sel = t.thumbs.selected_pages()
                 DS.run_page_label(self, t, sel)
             # 구성
-            elif key in ("thumb_in", "thumb_out"): t.organize.set_width(t.organize.thumb_w + (30 if key == "thumb_in" else -30))
+            elif key in ("thumb_in", "thumb_out"): t.organize.zoom(1 if key == "thumb_in" else -1)
             elif key in ("rotate_left", "rotate_right", "delete_pages", "extract", "insert_blank", "insert_pdf", "insert_images", "crop_pages",
                          "resize", "replace", "duplicate", "pagebox", "delete_blank", "reverse", "rotate_pages", "split", "split_page"):
                 pages = t.organize.selected_pages() if t.view_stack.currentWidget() is t.organize else []

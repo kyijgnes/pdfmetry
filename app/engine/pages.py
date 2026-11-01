@@ -21,7 +21,7 @@ def parse_range(spec: str, total: int, strict: bool = False, labels: list[str] |
 
     strict: 쪽 범위 칸(PageRangeEdit)의 엄격한 방식. 쉼표로만 나누고, 겹친 것을 합쳐 작은 쪽부터 정렬하며,
     빈 글은 0쪽, 열린 범위(「8-」)·빈 조각·거꾸로·없는 쪽이 한 조각이라도 있으면 전체를 버린다(ValueError).
-    labels: 쪽마다의 레이블(엄격한 방식에서만). 주면 레이블과 같은 조각을 그 쪽으로 읽는다."""
+    labels: 쪽마다의 레이블(엄격한 방식에서만). 주면 조각을 레이블로 먼저 찾고, 없으면 쪽 번호로 읽는다."""
     if strict:
         return _parse_strict(spec, total, labels)
     # 「1 - 3」 을 띄어 쓰면 홀로 남은 「-」 가 「처음~끝」 으로 읽혀 모든 쪽이 골라졌다
@@ -65,28 +65,54 @@ def _parse_strict(spec: str, total: int, labels: list[str] | None) -> list[int]:
         tok = tok.strip()
         if not tok:
             raise ValueError(RANGE_ERROR)
-        if labels:   # 범위 끝은 시작 쪽부터 처음 맞는 레이블
-            for i in range(start, min(total, len(labels))):
-                if labels[i] == tok:
-                    return i
+        i = _find_label(tok, labels, start, total) if labels else None
+        if i is not None:
+            return i
         if not tok.isdigit() or not 1 <= int(tok) <= total:
             raise ValueError(RANGE_ERROR)
         return int(tok) - 1
 
+    def piece(part: str) -> range:
+        part = part.strip()
+        if labels:   # 「A-3」 처럼 「-」 가 든 레이블은 통째로 먼저 찾는다
+            i = _find_label(part, labels, 0, total)
+            if i is not None:
+                return range(i, i + 1)
+        cuts = [k for k, c in enumerate(part) if c == "-"]
+        if not cuts:
+            i = page_of(part)
+            return range(i, i + 1)
+        if not labels and len(cuts) > 1:
+            raise ValueError(RANGE_ERROR)
+        for k in cuts:   # 「A-1-A-3」: 양쪽이 다 쪽으로 읽히는 자리에서 나눈다
+            try:
+                a = page_of(part[:k])
+                b = page_of(part[k + 1:], a)   # 범위 끝은 시작 쪽부터 처음 맞는 레이블
+            except ValueError:
+                continue
+            if a <= b:
+                return range(a, b + 1)
+        raise ValueError(RANGE_ERROR)
+
     out: set[int] = set()
     for part in spec.split(","):
-        ends = part.split("-")
-        if len(ends) == 1:
-            out.add(page_of(ends[0]))
-        elif len(ends) == 2:
-            a = page_of(ends[0])
-            b = page_of(ends[1], a)
-            if a > b:
-                raise ValueError(RANGE_ERROR)
-            out.update(range(a, b + 1))
-        else:
-            raise ValueError(RANGE_ERROR)
+        out.update(piece(part))
     return sorted(out)
+
+
+def _find_label(tok: str, labels: list[str], start: int, total: int) -> int | None:
+    """레이블 글자로 쪽을 찾는다(start 쪽부터). 똑같은 레이블이 없으면 접두사가 같고 끝 숫자 값이 같은 것(「A-03」 → 「A-3」)."""
+    n = min(total, len(labels))
+    for i in range(start, n):
+        if labels[i] == tok:
+            return i
+    m = re.fullmatch(r"(.*?)(\d+)", tok)
+    if m:
+        for i in range(start, n):
+            lm = re.fullmatch(r"(.*?)(\d+)", labels[i] or "")
+            if lm and lm.group(1) == m.group(1) and int(lm.group(2)) == int(m.group(2)):
+                return i
+    return None
 
 
 def subset(pages: Iterable[int], how: str = "all") -> list[int]:

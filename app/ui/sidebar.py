@@ -304,15 +304,18 @@ class ThumbnailPanel(QWidget):
     reordered = Signal(list)       # 새 순서
     pagesAction = Signal(str, list)  # 'rotate_left' 'rotate_right' 'delete' 'extract' 'insert_blank' 'insert_pdf' 'duplicate'
 
-    def __init__(self, doc: Document, thumb_w: int = 150, parent=None):
+    STEPS = (60, 90, 120, 150, 180)   # 썸네일 폭(px) 다섯 단계, 처음은 120
+
+    def __init__(self, doc: Document, thumb_w: int = 120, parent=None):
         super().__init__(parent)
         self.doc = doc
         self.thumb_w = thumb_w
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        lay.addWidget(panel_head("썸네일", (("zoomout", "작게", lambda: self.set_width(max(70, self.thumb_w - 30))),
-                                            ("zoomin", "크게", lambda: self.set_width(min(260, self.thumb_w + 30))))))
+        head = panel_head("썸네일", (("zoomout", "작게", lambda: self.zoom(-1)), ("zoomin", "크게", lambda: self.zoom(1))))
+        self.zoom_out, self.zoom_in = head.findChildren(QToolButton)
+        lay.addWidget(head)
         self.list = PageGrid(3)
         self.list.itemClicked.connect(lambda it: self.pageClicked.emit(it.data(Qt.ItemDataRole.UserRole)))
         self.list.reordered.connect(self.reordered)
@@ -327,11 +330,17 @@ class ThumbnailPanel(QWidget):
         self.thumb_w = w
         self.reload()
 
+    def zoom(self, step: int):
+        """다음·앞 단계로. 양 끝에 닿으면 그쪽 단추가 꺼진다."""
+        k = min(range(len(self.STEPS)), key=lambda i: abs(self.STEPS[i] - self.thumb_w))
+        self.set_width(self.STEPS[max(0, min(len(self.STEPS) - 1, k + step))])
+
     def selected_pages(self) -> list[int]:
         return sorted(it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems())
 
     def reload(self, mapping: list[int | None] | None = None, dirty=()):
         keep = kept_thumbs(self.thumbs, mapping, dirty)
+        self.zoom_out.setEnabled(self.thumb_w > self.STEPS[0]); self.zoom_in.setEnabled(self.thumb_w < self.STEPS[-1])
         fill_grid(self.list, self.doc, self.thumb_w, 12, 27)
         self._fit_items()
         self.thumbs.start(self.thumb_w, self.devicePixelRatioF(), keep)
