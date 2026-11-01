@@ -939,28 +939,53 @@ def apply_redactions(doc: Document, pages: Sequence[int] | None = None, images: 
 
 
 # ── 텍스트·이미지 편집(원문 내용) ─────────────────────────────────
+ITALIC_SLANT = 0.2   # 기울임: 글 방향으로 기울이는 정도(맑은 고딕에는 기울임 글꼴 파일이 없다)
+TEXT_PAD = 2         # 쪽에 넣는 글 상자의 여유(화면 글 상자와 줄바꿈이 어긋나지 않게)
+
+
 def _insert_box(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, color: Color, bold: bool, align: int,
-                rotate: int | None = None):
+                rotate: int | None = None, italic: bool = False):
     """맑은 고딕으로 상자에 글을 넣는다. 방향은 기본이 쪽 회전(화면에 바로 섬), 넘치면 글 방향의 아래로 늘린다."""
     rot = p.rotation if rotate is None else rotate
     name = korean_font_name(p, bold)  # 굵기마다 이름을 나누고, 저장 때 줄인 글꼴은 피한다
     p.insert_font(fontname=name, fontfile=korean_fontfile(bold))
-    rc = p.insert_textbox(r, text, fontsize=fontsize, fontname=name, color=color, align=align, rotate=rot)
+
+    def put(box: fitz.Rect) -> float:
+        morph = None
+        if italic:  # 글 방향 기준 가로 기울이기를 쪽 좌표로 옮긴다. 상자 가운데를 축으로 해서 위아래가 고르게 기운다
+            m = fitz.Matrix(rot) * fitz.Matrix(1, 0, ITALIC_SLANT, 1, 0, 0) * fitz.Matrix(-rot)
+            morph = (fitz.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2), m)
+        return p.insert_textbox(box, text, fontsize=fontsize, fontname=name, color=color, align=align, rotate=rot,
+                                morph=morph)
+
+    rc = put(r)
     if rc < 0:  # 상자가 작으면 아래로 늘려 다시
         lr = fitz.Rect(r) * fitz.Matrix(rot)
         lr.normalize()
         lr.y1 += -rc + 4
         r2 = lr * fitz.Matrix(-rot)
         r2.normalize()
-        p.insert_textbox(r2, text, fontsize=fontsize, fontname=name, color=color, align=align, rotate=rot)
+        put(r2)
 
 
-def add_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float = 11, color: Color = (0, 0, 0),
-             bold: bool = False, align: int = 0):
-    """쪽 내용에 글자를 직접 넣는다(주석 아님)."""
+def text_box_size(text: str, fontsize: float, bold: bool = False, min_width: float = 0) -> tuple[float, float]:
+    """글을 줄바꿈 없이 넣을 상자 크기(pt, 글 방향 기준). 너비는 가장 긴 줄, 높이는 줄 수만큼."""
+    f = fitz.Font(fontfile=korean_fontfile(bold))
+    lines = text.split("\n")
+    w = max(f.text_length(ln, fontsize) for ln in lines) + TEXT_PAD
+    lh = fontsize * (f.ascender - f.descender)
+    return max(w, min_width), lh * len(lines) + TEXT_PAD
+
+
+def add_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float = 10, color: Color = (0, 0, 0),
+             bold: bool = False, align: int = 0, italic: bool = False) -> bool:
+    """쪽 내용에 글자를 직접 넣는다(주석 아님). 빈 글이면 아무것도 안 하고 False(실행 취소 자리도 안 만듦)."""
+    if not text.strip():
+        return False
     doc.snapshot()
     with doc.lock:
-        _insert_box(doc.fitz[page], r, text, fontsize, color, bold, align)
+        _insert_box(doc.fitz[page], r, text, fontsize, color, bold, align, italic=italic)
+    return True
 
 
 def add_image(doc: Document, page: int, r: fitz.Rect, path: str, keep_proportion: bool = True):
