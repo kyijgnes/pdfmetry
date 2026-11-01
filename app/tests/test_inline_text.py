@@ -147,7 +147,7 @@ def test_click_type_and_bake(win, pdf):
     type_text(v, "Hello 한글 입력")
     assert ed.text() == "Hello 한글 입력"
     click_away(v)
-    assert editor(v) is None and v.tool == "select"
+    assert editor(v) is None and v.edit_mode and v.tool == "edit"   # 텍스트 추가는 편집을 켠다
     out = os.path.join(tempfile.mkdtemp(), "저장.pdf")
     t.doc.save(out)
     with fitz.open(out) as d:

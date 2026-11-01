@@ -291,33 +291,6 @@ def fill_field(parent, widget: fitz.Widget):
     return None
 
 
-# ── 링크 ───────────────────────────────────────────────────────
-class LinkDialog(FormDialog):
-    def __init__(self, parent, total: int):
-        super().__init__("링크", parent)
-        self.kind = self.add("종류", QComboBox()); self.kind.addItems(["페이지 보기로 이동", "웹 페이지 열기", "파일 열기"])
-        self.page = self.add("쪽", QSpinBox()); self.page.setRange(1, total)
-        self.uri = self.add("주소", QLineEdit("https://"))
-        row = QWidget(); hl = QHBoxLayout(row); hl.setContentsMargins(0, 0, 0, 0)
-        self.file = QLineEdit(); b = QPushButton("찾기"); b.clicked.connect(self._pick)
-        hl.addWidget(self.file); hl.addWidget(b)
-        self.add("파일", row)
-        self.kind.currentIndexChanged.connect(self._sync); self._sync()
-
-    def _sync(self):
-        k = self.kind.currentIndex()
-        self.page.setEnabled(k == 0); self.uri.setEnabled(k == 1); self.file.setEnabled(k == 2)
-
-    def _pick(self):
-        p, _ = QFileDialog.getOpenFileName(self, "열 파일")
-        if p:
-            self.file.setText(p)
-
-    def values(self) -> dict:
-        k = self.kind.currentIndex()
-        return {"to_page": self.page.value() - 1} if k == 0 else {"uri": self.uri.text()} if k == 1 else {"file": self.file.text()}
-
-
 # ── 페이지 ─────────────────────────────────────────────────────
 class InsertBlankDialog(FormDialog):
     def __init__(self, parent, total: int, current: int):
