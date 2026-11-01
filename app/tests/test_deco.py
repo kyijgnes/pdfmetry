@@ -186,6 +186,8 @@ def test_dialogs_on_frame_roundtrip(qapp, pdoc, kind):
 def test_apply_follows_required_fields(qapp, pdoc):
     from app.ui.dlg_deco import dialog_class
     wm = dialog_class("watermark")(None, pdoc, 0)
+    assert not wm.ok.isEnabled()   # 처음엔 글이 비어 있다
+    wm.text.setPlainText("대외비")
     assert wm.ok.isEnabled()
     wm.text.setPlainText("  ")
     assert not wm.ok.isEnabled()
