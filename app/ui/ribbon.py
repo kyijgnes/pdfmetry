@@ -14,7 +14,16 @@ from ..engine import pages as P
 from . import icons, theme
 
 # (key, icon, label, kind, menu_items)  menu_items: [(key, label)] 또는 None. label 이 "|" 면 구분선.
+# 메뉴 항목 (key, label, [하위 항목]) 은 하위 메뉴, ("|", "|") 는 메뉴 안 구분선.
 SEP = ("|",)
+MENU_SEP = ("|", "|")
+
+
+def DECO_MENU(prefix: str) -> list:
+    """꾸미기 메뉴 넷: 추가 · 템플릿에서 추가 | 업데이트 · 삭제."""
+    return [(prefix, "추가"), (f"{prefix}_template", "템플릿에서 추가"), MENU_SEP,
+            (f"{prefix}_update", "업데이트"), (f"{prefix}_remove", "삭제")]
+
 TABS: list[tuple[str, str, list]] = [
     ("home", "홈", [
         ("zoomout", "zoomout", "", "action", None), ("zoomin", "zoomin", "", "action", None), SEP,
@@ -29,11 +38,11 @@ TABS: list[tuple[str, str, list]] = [
         ("edit_all", "edit", "모두 편집", "toggle", None), ("addtext", "addtext", "텍스트 추가", "tool", None),
         ("addimage", "addimage", "이미지 추가", "tool", None),
         ("link", "link", "링크 추가", "tool", None), SEP,
-        ("watermark", "watermark", "워터마크", "action", [("watermark", "추가"), ("watermark_update", "업데이트"), ("watermark_remove", "삭제")]),
-        ("background", "background", "배경화면", "action", [("background", "추가"), ("background_update", "업데이트"), ("background_remove", "삭제")]),
-        ("headerfooter", "headerfooter", "머리글·바닥글", "action", [("headerfooter", "추가"), ("headerfooter_update", "업데이트"), ("headerfooter_remove", "삭제")]),
-        ("pagenumber", "bates", "쪽 번호", "action", [("pagenumber", "추가"), ("pagenumber_update", "업데이트"), ("pagenumber_remove", "삭제")]),
-        ("edit_more", "more", "더보기", "menu", [("bates", "베이츠 번호 추가"), ("bates_update", "베이츠 번호 업데이트"), ("bates_remove", "베이츠 번호 삭제"), ("pagelabel", "페이지 레이블"),
+        ("watermark", "watermark", "워터마크", "action", DECO_MENU("watermark")),
+        ("background", "background", "배경화면", "action", DECO_MENU("background")),
+        ("headerfooter", "headerfooter", "머리글·바닥글", "action", DECO_MENU("headerfooter")),
+        ("edit_more", "more", "더보기", "menu", [("bates_menu", "베이츠 번호", DECO_MENU("bates")),
+                                                 ("pagenumber_menu", "페이지 번호", DECO_MENU("pagenumber")), ("pagelabel", "페이지 레이블"),
                                                  ("replace_image", "이미지 바꾸기(고른 것)"), ("delete_sel", "고른 것 삭제")]),
     ]),
     ("comment", "주석", [
@@ -247,8 +256,7 @@ class Ribbon(QWidget):
                 b.setCheckable(True)
             if menu_items:
                 m = QMenu(b)
-                for mk, ml in menu_items:
-                    m.addAction(ml, lambda k=mk, btn=b: self._menu_pick(k, btn))
+                self._fill_menu(m, menu_items, b)
                 b.setMenu(m)
                 b.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup if kind == "tool" else QToolButton.ToolButtonPopupMode.InstantPopup)
                 # 화살표 자리를 QSS 가 단추 모양마다 맞춘다(split: 눌러 쓰고 옆 화살표로 고름, drop: 눌러서 메뉴)
@@ -292,6 +300,15 @@ class Ribbon(QWidget):
         if k < 0:
             c.setEditText(P.format_range(pages, labels))
         c.blockSignals(False)
+
+    def _fill_menu(self, m: QMenu, items: list, btn: QToolButton):
+        for it in items:
+            if it == MENU_SEP:
+                m.addSeparator()
+            elif len(it) == 3:
+                self._fill_menu(m.addMenu(it[1]), it[2], btn)
+            else:
+                m.addAction(it[1], lambda k=it[0]: self._menu_pick(k, btn))
 
     def _menu_pick(self, key: str, btn: QToolButton):
         if key in TOOL_KEYS and btn.property("kind") == "tool":

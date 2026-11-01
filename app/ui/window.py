@@ -26,6 +26,7 @@ from ..engine import pages as P
 from ..engine.document import Document, DocumentError, NeedsPassword
 from . import dialogs as D
 from . import dlg_organize as O
+from .dlg_deco import run_decorate
 from . import dlg_pagebox as PB
 from . import dlg_split as DS
 from . import icons, theme
@@ -897,7 +898,7 @@ class MainWindow(QMainWindow):
                 else: self.say("편집 모드에서 이미지를 먼저 고르세요")
             # 편집 꾸미기
             elif key.split("_")[0] in DECO_KEYS:   # 워터마크·배경·머리글·쪽 번호·베이츠의 추가·업데이트·삭제
-                self.decorate(t, DECO_KEYS[key.split("_")[0]], key.partition("_")[2] or "add")
+                run_decorate(self, t, DECO_KEYS[key.split("_")[0]], key.partition("_")[2] or "add")
             elif key == "pagelabel":
                 sel = t.organize.selected_pages() if t.view_stack.currentWidget() is t.organize else []
                 if not sel and t.side.isVisible() and t.side_key == "thumbs":
@@ -1382,70 +1383,6 @@ class MainWindow(QMainWindow):
             self.say(f"변환했습니다: {path}")
             if vals["open_after"]:
                 self._offer_open(path if isinstance(res, str) else out)
-
-    def _deco_dialog(self, t: DocTab, kind: str, update: bool):
-        n, cur = t.doc.page_count, t.viewer.current
-        return {"watermark": lambda: D.WatermarkDialog(self, n, cur, t.viewer.props, update=update),
-                "background": lambda: D.BackgroundDialog(self, n, cur, update=update),
-                "header_footer": lambda: D.HeaderFooterDialog(self, n, cur, update=update),
-                "page_number": lambda: D.PageNumberDialog(self, n, cur, update=update),
-                "bates": lambda: D.BatesDialog(self, n, cur, update=update)}[kind]()
-
-    def decorate(self, t: DocTab, kind: str, how: str):
-        """꾸미기 추가(add)·업데이트(update)·삭제(remove). 넣은 것은 문서 안에 표시가 남아 다시 찾는다."""
-        T = _engine("tools")
-        d = t.doc
-        name = T.DECO_KINDS[kind]
-        groups = T.decorations(d.fitz, kind)
-        if how == "remove":
-            if not groups:
-                self.say(f"이 문서에는 {name}이(가) 없습니다"); return
-            if QMessageBox.question(self, f"{name} 삭제", f"이 문서의 {name}을(를) 모두 지울까요?") != QMessageBox.StandardButton.Yes:
-                return
-            d.snapshot(); T.remove_decorations(d.fitz, kind); t.changed(None); return
-        pick = None
-        if how == "add" and groups:
-            box = QMessageBox(QMessageBox.Icon.Question, name, f"이 문서에 {name}이(가) 이미 있습니다.", parent=self)
-            more = box.addButton("하나 더 넣기", QMessageBox.ButtonRole.AcceptRole)
-            edit = box.addButton("있는 것 고치기", QMessageBox.ButtonRole.ActionRole)
-            box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            if box.clickedButton() is edit: how = "update"
-            elif box.clickedButton() is not more: return
-        if how == "update":
-            if not groups:
-                self.say(f"이 문서에는 {name}이(가) 없습니다"); return
-            pick = 0
-            if len(groups) > 1:
-                items = [f"{k + 1}. {self._deco_desc(g)}" for k, g in enumerate(groups)]
-                it, ok = QInputDialog.getItem(self, f"{name} 업데이트", "고칠 것", items, 0, False)
-                if not ok: return
-                pick = items.index(it)
-        dlg = self._deco_dialog(t, kind, pick is not None)
-        if pick is not None:
-            dlg.load(groups[pick]["settings"], groups[pick]["pages"])
-        if not dlg.exec():
-            return
-        vals = dlg.values()
-        pages = vals.pop("pages")
-        d.snapshot()
-        if pick is None:
-            T.add_decoration(d.fitz, kind, pages=pages, file_name=os.path.splitext(d.name)[0] if kind == "header_footer" else None, **vals)
-        else:
-            if kind == "header_footer":
-                vals["file_name"] = groups[pick]["settings"].get("file_name")
-            groups[pick] = {"settings": vals, "pages": pages}
-            T.replace_decorations(d.fitz, kind, groups)
-        t.changed(None)
-
-    @staticmethod
-    def _deco_desc(g: dict) -> str:
-        s = g["settings"]
-        what = (s.get("text") or os.path.basename(s.get("image_path") or "") or s.get("style")
-                or next((s.get(k) for k in ("left", "center", "right", "footer_left", "footer_center", "footer_right") if s.get(k)), "")
-                or (f"{s.get('prefix', '')}{int(s.get('start', 1)):0{int(s.get('digits', 1))}d}" if "digits" in s else "")
-                or ("색" if s.get("color") else ""))
-        return f"{P.format_range(g['pages'])}쪽 · {what}"
 
     def run_tool(self, t: DocTab, fn_name: str, dlg):
         """워터마크·배경·머리글·베이츠처럼 문서를 바로 고치는 도구."""
