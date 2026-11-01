@@ -1,5 +1,6 @@
 """문서 탭 옮기기 시험(창을 offscreen 으로 띄움): 새 창으로 분리 · 다른 창에 합치기 · 마지막 탭이면 원래 창 닫힘 ·
-고친 문서·실행 취소 기록 유지 · 신호가 새 창으로 · 끌면 창이 따라오고 다른 탭 줄에 닿으면 붙기 · 넘겨 온 파일은 마지막 창.
+고친 문서·실행 취소 기록 유지 · 신호가 새 창으로 · 끌면 창이 따라오고 다른 탭 줄에 닿으면 붙기 · 넘겨 온 파일은 마지막 창 ·
+화면 끝에 대면 절반·최대화로 붙기(여러 모니터 포함), 다시 끌어내면 원래 크기.
 
 python -m pytest app/tests/test_tab_detach.py
 """
@@ -15,7 +16,7 @@ os.environ["APPDATA"] = tempfile.mkdtemp(prefix="rpdf_tab_detach_test_")   # 사
 
 import fitz  # noqa: E402
 import pytest  # noqa: E402
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
 
@@ -23,7 +24,7 @@ app = QApplication.instance() or QApplication(sys.argv[:1])
 
 from app.engine import pages as P  # noqa: E402
 from app.ui import tab_detach  # noqa: E402
-from app.ui.tab_detach import TabDrag  # noqa: E402
+from app.ui.tab_detach import TabDrag, snap_target  # noqa: E402
 from app.ui.window import MainWindow  # noqa: E402
 
 
@@ -244,3 +245,89 @@ def test_receiver_moves_to_remaining_window(wins, pdfs):
     r.on_paths([pdfs[0]]); pump(0.05)
     assert [t.doc.name for t in w2.tabs] == ["가.pdf"]
     w2._receiver = None
+
+
+# 가짜 모니터: (화면 전체, 작업 영역). 오른쪽에 하나 더, 왼쪽 모니터는 아래 40 이 작업 표시줄
+MAIN = (QRect(0, 0, 4000, 2000), QRect(0, 0, 4000, 1960))
+SIDE = (QRect(4000, 0, 3000, 2000), QRect(4000, 0, 3000, 2000))
+
+
+def test_snap_target_single_screen():
+    one = [MAIN]
+    assert snap_target(QPoint(0, 900), one) == ("left", QRect(0, 0, 2000, 1960))
+    assert snap_target(QPoint(2, 900), one)[0] == "left"
+    assert snap_target(QPoint(3999, 900), one) == ("right", QRect(2000, 0, 2000, 1960))
+    assert snap_target(QPoint(1500, 0), one) == ("max", QRect(0, 0, 4000, 1960))
+    assert snap_target(QPoint(0, 0), one)[0] == "left"     # 모서리는 왼쪽·오른쪽이 먼저
+    assert snap_target(QPoint(1500, 900), one) is None
+    assert snap_target(QPoint(5, 900), one) is None
+    assert snap_target(QPoint(1500, 1999), one) is None    # 아래 끝은 붙이지 않는다
+    assert snap_target(QPoint(-50, 900), one) is None      # 어느 모니터에도 없음
+
+
+def test_snap_target_two_screens_skips_shared_edge():
+    two = [MAIN, SIDE]
+    assert snap_target(QPoint(0, 900), two)[0] == "left"
+    assert snap_target(QPoint(3999, 900), two) is None     # 오른쪽 모니터로 넘어가는 경계
+    assert snap_target(QPoint(4000, 900), two) is None
+    assert snap_target(QPoint(6999, 900), two) == ("right", QRect(5500, 0, 1500, 2000))
+    assert snap_target(QPoint(5000, 0), two) == ("max", QRect(4000, 0, 3000, 2000))   # 마우스가 있는 모니터를 최대화
+    low = (QRect(4000, 1000, 3000, 2000), QRect(4000, 1000, 3000, 2000))   # 어긋나게 놓인 모니터: 겹치는 높이만 경계
+    assert snap_target(QPoint(3999, 500), [MAIN, low])[0] == "right"
+    assert snap_target(QPoint(3999, 1500), [MAIN, low]) is None
+    top = (QRect(0, -1200, 2000, 1200), QRect(0, -1200, 2000, 1200))       # 위에 모니터가 있으면 그 밑 끝은 최대화 안 함
+    assert snap_target(QPoint(1000, 0), [MAIN, top]) is None
+    assert snap_target(QPoint(3000, 0), [MAIN, top])[0] == "max"
+
+
+def test_drag_to_screen_edge_snaps_half_and_drag_out_restores(wins, pdfs):
+    w = wins()
+    w.move(300, 300)
+    w.open_path(pdfs[0]); w.open_path(pdfs[1]); pump(0.1)
+    t = w.tabs[1]
+    screens = lambda: [MAIN, SIDE]
+    m = FakeMouse(bar_point(w, 1) + QPoint(0, 200))
+    d = TabDrag(t, cursor=lambda: m.pos, pressed=lambda: m.down, screens=screens)
+    d.start(); pump(0.05)
+    w3 = t.win
+    size = w3.size()
+    m.at(QPoint(1500, 900), d)
+    assert d.snap is None and (d.preview is None or not d.preview.isVisible())
+    m.at(QPoint(0, 900), d)   # 왼쪽 끝: 붙을 자리 틀
+    assert d.snap[0] == "left" and d.preview.isVisible() and d.preview.geometry() == QRect(0, 0, 2000, 1960)
+    m.at(QPoint(1500, 900), d)   # 떨어지면 틀이 사라진다
+    assert d.snap is None and not d.preview.isVisible()
+    m.at(QPoint(3999, 900), d)   # 오른쪽 모니터로 가는 경계: 안 붙음
+    assert d.snap is None
+    m.at(QPoint(0, 900), d)
+    m.down = False; d.step(); pump(0.05)
+    assert tab_detach._drag is None and not d.preview.isVisible()
+    assert w3.frameGeometry() == QRect(0, 0, 2000, 1960) and not w3.isMaximized()
+    assert tab_detach.snapped_size(w3) == size
+    # 붙은 창을 다시 끌어내면 붙이기 전 크기로 돌아오고 탭은 마우스 밑
+    m = FakeMouse(bar_point(w3, 0) + QPoint(0, 200))
+    d = TabDrag(t, cursor=lambda: m.pos, pressed=lambda: m.down, screens=screens)
+    d.start(); pump(0.05)
+    assert t.win is w3 and w3.size() == size and tab_detach.snapped_size(w3) is None
+    m.at(QPoint(1200, 800), d)
+    assert (bar_point(w3, 0) - QPoint(1200, 800)).manhattanLength() <= 2
+    m.at(QPoint(5000, 0), d)   # 오른쪽 모니터 위쪽 끝: 최대화
+    assert d.snap[0] == "max"
+    m.down = False; d.step(); pump(0.05)
+    assert w3.isMaximized()
+
+
+def test_other_bar_wins_over_screen_edge_and_hides_preview(wins, pdfs):
+    w = wins(); w2 = wins()
+    w.move(300, 300); w2.move(0, 0)   # w2 탭 줄이 화면 위쪽 끝에 붙어 있다
+    w.open_path(pdfs[0]); w.open_path(pdfs[1]); w2.open_path(pdfs[2]); pump(0.1)
+    t = w.tabs[1]
+    m = FakeMouse(bar_point(w, 1) + QPoint(0, 200))
+    d = TabDrag(t, cursor=lambda: m.pos, pressed=lambda: m.down, screens=lambda: [MAIN])
+    d.start(); pump(0.05)
+    m.at(QPoint(3000, 0), d)
+    assert d.snap[0] == "max" and d.preview.isVisible()
+    m.at(bar_point(w2, 0), d)
+    assert t.win is w2 and not d.floating and d.snap is None and not d.preview.isVisible()
+    m.down = False; d.step(); pump(0.05)
+    assert not w2.isMaximized() and tab_detach._drag is None
