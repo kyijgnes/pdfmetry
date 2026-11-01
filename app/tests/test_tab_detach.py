@@ -1,5 +1,5 @@
 """문서 탭 옮기기 시험(창을 offscreen 으로 띄움): 새 창으로 분리 · 다른 창에 합치기 · 마지막 탭이면 원래 창 닫힘 ·
-고친 문서·실행 취소 기록 유지 · 신호가 새 창으로 · 끌어서 떼기 · 넘겨 온 파일은 마지막 창.
+고친 문서·실행 취소 기록 유지 · 신호가 새 창으로 · 끌면 창이 따라오고 다른 탭 줄에 닿으면 붙기 · 넘겨 온 파일은 마지막 창.
 
 python -m pytest app/tests/test_tab_detach.py
 """
@@ -15,7 +15,7 @@ os.environ["APPDATA"] = tempfile.mkdtemp(prefix="rpdf_tab_detach_test_")   # 사
 
 import fitz  # noqa: E402
 import pytest  # noqa: E402
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
 
@@ -23,6 +23,7 @@ app = QApplication.instance() or QApplication(sys.argv[:1])
 
 from app.engine import pages as P  # noqa: E402
 from app.ui import tab_detach  # noqa: E402
+from app.ui.tab_detach import TabDrag  # noqa: E402
 from app.ui.window import MainWindow  # noqa: E402
 
 
@@ -111,25 +112,64 @@ def test_last_tab_closes_source_without_asking(wins, pdfs):
     assert w2.cur() is t
 
 
-def test_drop_on_other_tab_bar_merges_at_that_place(wins, pdfs):
+class FakeMouse:
+    """TabDrag 에 넣는 가짜 마우스: 자리와 왼쪽 단추."""
+    def __init__(self, pos):
+        self.pos = QPoint(pos); self.down = True
+
+    def at(self, p, d: TabDrag):
+        self.pos = QPoint(p); d.step(); pump(0.03)
+
+
+def bar_point(w, i=None) -> QPoint:
+    """w 탭 줄의 i 번 탭 가운데(없으면 탭 줄 오른쪽 빈자리) 화면 좌표."""
+    if i is None:
+        return w.tabrow.mapToGlobal(QPoint(w.tabrow.width() - 60, w.tabrow.height() // 2))
+    return w.doctabs.mapToGlobal(w.doctabs.tabRect(i).center())
+
+
+def test_live_drag_follows_mouse_and_snaps_to_other_bar(wins, pdfs):
     w = wins(); w2 = wins()
-    w.open_path(pdfs[0]); w.open_path(pdfs[1])
-    w2.open_path(pdfs[2]); pump(0.1)
+    w.move(0, 0); w2.move(2000, 0)   # 창 최소 폭이 넓어서 겹치지 않게 띄운다
+    w.open_path(pdfs[0]); w.open_path(pdfs[1]); w2.open_path(pdfs[2]); pump(0.1)
     t = w.tabs[1]
-    bar = w2.doctabs
-    at = bar.mapTo(w2, bar.tabRect(0).center())
-    tab_detach._dragging = t
-    try:
-        assert tab_detach.drop_target_ok(w2, at)
-        assert tab_detach.drop_target_ok(w, w.tabrow.geometry().center())       # 제 탭 줄 위: 놓을 수 있음(그대로)
-        assert not tab_detach.drop_target_ok(w, w.body.geometry().center())     # 제 창 본문: 놓지 않음 → 떼어 새 창
-    finally:
-        tab_detach._dragging = None
-    assert tab_detach.drop(w2, at, t)
-    pump(0.05)
-    assert [x.doc.name for x in w2.tabs] == ["나.pdf", "다.pdf"] and w2.cur() is t
-    assert [x.doc.name for x in w.tabs] == ["가.pdf"]
-    assert [w2.doctabs.tabText(i) for i in range(2)] == ["나.pdf", "다.pdf"]
+    m = FakeMouse(bar_point(w, 1) + QPoint(0, 200))
+    d = TabDrag(t, cursor=lambda: m.pos, pressed=lambda: m.down)
+    d.start(); pump(0.05)
+    w3 = t.win
+    assert w3 not in (w, w2) and d.floating and len(w.tabs) == 1 and w3.isVisible()
+    for p in (QPoint(500, 450), QPoint(700, 520)):   # 떠 있는 창이 탭을 마우스 밑에 둔 채 따라온다
+        m.at(p, d)
+        assert (bar_point(w3, 0) - p).manhattanLength() <= 2, (bar_point(w3, 0), p)
+    m.at(bar_point(w2, 0) + QPoint(-5, 2), d)   # 다른 창 탭 줄에 닿으면 놓기 전에 바로 붙는다
+    assert t.win is w2 and not d.floating and not w3.isVisible() and w3 not in tab_detach.windows
+    assert [x.doc.name for x in w2.tabs] == ["나.pdf", "다.pdf"]
+    m.at(bar_point(w2, 1) + QPoint(10, 0), d)   # 붙은 줄 안에서 자리 옮기기
+    assert [x.doc.name for x in w2.tabs] == ["다.pdf", "나.pdf"] and w2.doctabs.tabText(1) == "나.pdf"
+    m.at(QPoint(600, 600), d)   # 줄 아래로 벗어나면 다시 떼어 새 창
+    w4 = t.win
+    assert w4 not in (w, w2, w3) and d.floating and len(w2.tabs) == 1
+    m.at(bar_point(w, None), d)   # 원래 창 탭 줄 빈자리: 끝에 붙는다
+    assert t.win is w and [x.doc.name for x in w.tabs] == ["가.pdf", "나.pdf"] and not w4.isVisible()
+    m.down = False; d.step()
+    assert not d.timer.isActive() and tab_detach._drag is None
+
+
+def test_live_drag_of_only_tab_moves_its_window(wins, pdfs):
+    w = wins(); w2 = wins()
+    w.move(0, 0); w2.move(2000, 0)   # 창 최소 폭이 넓어서 겹치지 않게 띄운다
+    w.open_path(pdfs[0]); w2.open_path(pdfs[1]); pump(0.1)
+    t = w.tabs[0]
+    m = FakeMouse(bar_point(w, 0) + QPoint(0, 200))
+    d = TabDrag(t, cursor=lambda: m.pos, pressed=lambda: m.down)
+    d.start(); pump(0.05)
+    assert t.win is w and d.floating   # 새 창을 만들지 않고 그 창이 따라온다
+    m.at(QPoint(400, 600), d)
+    assert (bar_point(w, 0) - QPoint(400, 600)).manhattanLength() <= 2
+    m.at(bar_point(w2, 0), d)
+    assert t.win is w2 and not w.isVisible() and len(w2.tabs) == 2
+    m.down = False; d.step()
+    assert tab_detach._drag is None
 
 
 def test_tab_menu_detach_entry(wins, pdfs):

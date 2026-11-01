@@ -712,32 +712,12 @@ class MainWindow(QMainWindow):
         e.accept()
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasFormat(tab_detach.MIME):
-            e.accept() if tab_detach.dragging() is not None else e.ignore()
-        elif e.mimeData().hasUrls():
+        if e.mimeData().hasUrls():
             e.acceptProposedAction()
-
-    def dragMoveEvent(self, e):
-        if e.mimeData().hasFormat(tab_detach.MIME):
-            if tab_detach.drop_target_ok(self, e.position().toPoint()):
-                e.acceptProposedAction()
-            else:
-                e.ignore()
-            return
-        super().dragMoveEvent(e)
 
     IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp")
 
     def dropEvent(self, e):
-        if e.mimeData().hasFormat(tab_detach.MIME):
-            pos = e.position().toPoint()
-            if tab_detach.drop_target_ok(self, pos):
-                e.acceptProposedAction()
-                t = tab_detach.dragging()
-                QTimer.singleShot(0, lambda: tab_detach.drop(self, pos, t))   # 끌기가 끝난 뒤에 옮긴다
-            else:
-                e.ignore()
-            return
         paths = [u.toLocalFile() for u in e.mimeData().urls() if os.path.isfile(u.toLocalFile())]
         images = [p for p in paths if p.lower().endswith(self.IMAGE_EXTS)]
         if self.cur() and len(paths) == 1 and images:
