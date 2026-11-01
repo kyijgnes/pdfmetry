@@ -4,6 +4,7 @@
 load(settings, pages), can_apply(). 칸이 바뀌면 self.changed() 한 번만 부르면 틀이 「적용」 켜고 끄기와
 미리보기 다시 그리기를 맡는다. 미리보기는 엔진 render_preview 하나로 그려 실제 결과와 늘 같다.
 길이 칸은 환경 설정의 단위(prefs["unit"], 기본 cm)로 보이고 settings() 에는 pt 로 낸다.
+「템플릿에 추가」 를 켜고 적용하면 지금 설정과 쪽 범위를 그 종류의 템플릿으로 저장한다(engine.deco_store).
 """
 from __future__ import annotations
 
@@ -13,11 +14,12 @@ import fitz
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QDoubleValidator, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QButtonGroup, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+                               QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSlider, QSpinBox,
                                QToolButton, QVBoxLayout, QWidget)
 
 from ..engine import deco as E
+from ..engine import deco_store as S
 from ..engine import fonts as F
 from ..engine import pages as P
 from ..engine.document import Document
@@ -314,8 +316,24 @@ def _warn(parent, text: str):
     QMessageBox.warning(parent, "PDF메트리", text)
 
 
+def range_of(rng: PageRangeEdit) -> dict:
+    """범위 칸 → 템플릿에 적는 범위(다른 문서에도 맞게 쪽 목록이 아니라 고른 꼴 그대로)."""
+    return S.norm_range({"how": rng.which.currentData() or "all",
+                         "custom": rng.edit.text() if rng.rng.isChecked() else None})
+
+
+def set_range(rng: PageRangeEdit, r: dict):
+    """템플릿 범위로 범위 칸을 채운다."""
+    r = S.norm_range(r)
+    rng.which.setCurrentIndex(max(rng.which.findData(r["how"]), 0))
+    if r["custom"]:
+        rng._custom(r["custom"])
+    else:
+        rng.all.setChecked(True)
+
+
 class DecoDialog(QDialog):
-    """왼쪽 설정 묶음 · 오른쪽 미리보기 · 아래 「템플릿에 추가」(지금은 숨김) · 「적용」 · 「취소」."""
+    """왼쪽 설정 묶음 · 오른쪽 미리보기 · 아래 「템플릿에 추가」 · 「적용」 · 「취소」."""
     KIND = ""
 
     def __init__(self, parent, doc: Document, current: int = 0, update: bool = False, unit: str = "cm",
@@ -335,9 +353,14 @@ class DecoDialog(QDialog):
         self.left.addWidget(box); self.left.addStretch(1)
         _watch(self.rng, lambda *_: self.changed())
         bottom = QHBoxLayout()
-        self.to_template = QCheckBox("템플릿에 추가"); self.to_template.hide()
+        self.to_template = QCheckBox("템플릿에 추가")
+        self.tpl_name = QLineEdit(); self.tpl_name.setPlaceholderText("템플릿 이름"); self.tpl_name.setMaxLength(64)
+        self.tpl_name.setFixedWidth(180); self.tpl_name.setEnabled(False)
+        self.to_template.toggled.connect(self.tpl_name.setEnabled)
+        self.tpl_id: str | None = None   # 템플릿 창에서 고치는 템플릿
+        self.saved: dict | None = None   # 적용하며 저장한 템플릿
         self.bb = _buttons(self, "적용"); self.ok = self.bb.button(QDialogButtonBox.StandardButton.Ok)
-        bottom.addWidget(self.to_template); bottom.addStretch(1); bottom.addWidget(self.bb)
+        bottom.addWidget(self.to_template); bottom.addWidget(self.tpl_name); bottom.addStretch(1); bottom.addWidget(self.bb)
         outer.addLayout(bottom)
         self._timer = QTimer(self); self._timer.setSingleShot(True); self._timer.setInterval(120)
         self._timer.timeout.connect(self.refresh)
@@ -437,7 +460,40 @@ class DecoDialog(QDialog):
         err = self.check()
         if err:
             _warn(self, err); return
+        if self.to_template.isChecked() and not self._save_template():
+            return
         super().accept()
+
+    # 템플릿
+    def as_template(self, t: dict | None = None):
+        """템플릿 창의 「+」·고치기: 적용하면 넣지 않고 템플릿으로만 저장한다. t 는 고칠 템플릿."""
+        self.to_template.setChecked(True); self.to_template.hide()
+        self.setWindowTitle(f"{E.DECO_KINDS[self.KIND]} 템플릿")
+        self.ok.setText("저장")
+        if t:
+            self.tpl_id = t["id"]; self.tpl_name.setText(t.get("name") or "")
+            set_range(self.rng, t.get("range"))
+
+    def no_template(self):
+        """문서 안의 것을 고칠 때(템플릿 창의 편집 모드): 「템플릿에 추가」 를 뺀다."""
+        self.to_template.setChecked(False); self.to_template.hide(); self.tpl_name.hide()
+
+    def _save_template(self) -> bool:
+        s = self.settings()
+        name = self.tpl_name.text().strip() or S.summary(self.KIND, s)
+        tid = self.tpl_id
+        same = S.find_name(self.KIND, name)
+        if same and same["id"] != tid:
+            if QMessageBox.question(self, E.DECO_KINDS[self.KIND],
+                                    f'이름 "{name}"이(가) 이미 존재합니다. 내용을 바꾸시겠습니까?') != QMessageBox.StandardButton.Yes:
+                self.tpl_name.setFocus(); self.tpl_name.selectAll(); return False
+        try:
+            self.saved = S.save(self.KIND, name, s, range_of(self.rng), same["id"] if same else tid)
+        except OSError:
+            _warn(self, FILE_NOT_EXIST); return False
+        if same and tid and same["id"] != tid:   # 고치던 것을 같은 이름의 것에 덮었으니 고치던 것은 지운다
+            S.remove(self.KIND, tid)
+        return True
 
 
 # ── 흐름: 추가 · 템플릿에서 추가 · 업데이트 · 삭제 ────────────────
@@ -455,13 +511,7 @@ def related_kinds(kind: str) -> tuple[str, ...]:
 
 def describe(g: dict) -> str:
     """업데이트 목록 한 줄: 「1-3쪽 · 대외비」."""
-    s = E.upgrade_settings(g["kind"], g["settings"])
-    slots = s.get("slots") or {}
-    what = (s.get("text") or os.path.basename(s.get("file") or "") or s.get("style")
-            or next((v for v in slots.values() if v), "")
-            or (f"{s.get('prefix', '')}{int(s.get('start', 1)):0{int(s.get('digits', 1))}d}" if "digits" in s else "")
-            or ("색" if s.get("color") else ""))
-    return f"{P.format_range(g['pages'])}쪽 · {E.DECO_KINDS[g['kind']]} · {what}".replace("\n", " ")
+    return f"{P.format_range(g['pages'])}쪽 · {E.DECO_KINDS[g['kind']]} · {S.summary(g['kind'], g['settings'])}"
 
 
 def run_decorate(win, t, kind: str, how: str):
@@ -470,8 +520,6 @@ def run_decorate(win, t, kind: str, how: str):
     name = E.DECO_KINDS[kind]
     kinds = related_kinds(kind)
     groups = [g for k in kinds for g in E.decorations(d.fitz, k)]
-    if how == "template":   # 템플릿 창이 생기기 전까지는 「추가」 와 같다
-        how = "add"
     if how == "remove":
         if not groups:
             QMessageBox.information(win, name, f"이 문서에는 {name}이(가) 없습니다."); return
@@ -482,7 +530,7 @@ def run_decorate(win, t, kind: str, how: str):
             E.remove_decorations(d.fitz, k)
         t.changed(None); return
     pick = None
-    if how == "add" and groups:
+    if how in ("add", "template") and groups:
         box = QMessageBox(QMessageBox.Icon.Question, name,
                           f"이 파일에 {name}을(를) 이미 있습니다. 새로운 것을 추가하시겠습니까?", parent=win)
         yes = box.addButton("예", QMessageBox.ButtonRole.YesRole)
@@ -498,13 +546,22 @@ def run_decorate(win, t, kind: str, how: str):
         if not groups:
             QMessageBox.information(win, name, f"이 문서에는 {name}이(가) 없습니다."); return
         pick = 0
-        if len(groups) > 1:   # 둘 이상은 템플릿 창의 편집 모드로 바뀔 자리. 그 전까지 목록에서 하나
-            items = [f"{k + 1}. {describe(g)}" for k, g in enumerate(groups)]
-            it, ok = QInputDialog.getItem(win, f"{name} 업데이트", "고칠 것", items, 0, False)
-            if not ok:
-                return
-            pick = items.index(it)
     unit = getattr(win, "prefs", {}).get("unit", "cm")
+    if how == "template" or (how == "update" and len(groups) > 1):
+        from .dlg_deco_template import TemplateDialog
+        dlg = TemplateDialog(win, d, kind, t.viewer.current, unit=unit, groups=groups if how == "update" else None)
+        if not dlg.exec():
+            return
+        d.snapshot()
+        if how == "template":
+            stem = os.path.splitext(d.name)[0]
+            for s, pages in dlg.chosen():
+                E.add_decoration(d.fitz, kind, pages=pages, file_name=stem, **s)
+        else:   # 그 종류를 전부 지운 뒤 고친 목록을 다시 넣는다
+            left = dlg.groups
+            for k in kinds:
+                E.replace_decorations(d.fitz, k, [g for g in left if g["kind"] == k])
+        t.changed(None); return
     stem = os.path.splitext(d.name)[0]
     dlg = dialog_class(kind)(win, d, t.viewer.current, update=pick is not None, unit=unit,
                              hide=kinds if pick is not None else ())
