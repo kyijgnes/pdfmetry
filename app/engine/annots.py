@@ -13,6 +13,7 @@ from typing import Sequence
 import fitz
 
 from .document import Document, _text_rotation, del_keys, korean_font_name, redact_only
+from . import fonts as F
 from .fonts import korean_fontfile
 
 Color = tuple[float, float, float]
@@ -943,12 +944,47 @@ ITALIC_SLANT = 0.2   # 기울임: 글 방향으로 기울이는 정도(맑은 �
 TEXT_PAD = 2         # 쪽에 넣는 글 상자의 여유(화면 글 상자와 줄바꿈이 어긋나지 않게)
 
 
-def _insert_box(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, color: Color, bold: bool, align: int,
-                rotate: int | None = None, italic: bool = False):
-    """맑은 고딕으로 상자에 글을 넣는다. 방향은 기본이 쪽 회전(화면에 바로 섬), 넘치면 글 방향의 아래로 늘린다."""
-    rot = p.rotation if rotate is None else rotate
+def _font_res(p: fitz.Page, family: str, text: str, bold: bool, italic: bool) -> tuple[str, str, bool, bool]:
+    """글꼴 이름 → 쪽에 넣은 (글꼴 자원 이름, 글꼴 파일, 굵게를 흉내 낼지, 기울임을 흉내 낼지). 빈 이름이거나 글자를 못 그리는 글꼴이면 맑은 고딕."""
+    if family and family != F.DEFAULT_FAMILY:
+        path, fake_bold, fake_italic = F.font_file(family, bold, italic)
+        if F.covers(path, text):
+            base = re.sub(r"[^A-Za-z0-9]", "", os.path.splitext(os.path.basename(path))[0]) or "F"
+            fonts = {f[4]: f[3] for f in p.get_fonts()}
+            name, k = base, 1
+            while name in fonts and re.match(r"[A-Z]{6}\+", fonts[name] or ""):  # 저장 때 줄인 글꼴은 피한다
+                k += 1
+                name = f"{base}{k}"
+            p.insert_font(fontname=name, fontfile=path)
+            return name, path, fake_bold, fake_italic
     name = korean_font_name(p, bold)  # 굵기마다 이름을 나누고, 저장 때 줄인 글꼴은 피한다
     p.insert_font(fontname=name, fontfile=korean_fontfile(bold))
+    return name, korean_fontfile(bold), False, italic
+
+
+def _insert_box(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, color: Color, bold: bool, align: int,
+                rotate: int | None = None, italic: bool = False, family: str = "", grow: bool = False):
+    """상자에 글을 넣는다(글꼴 이름이 비면 맑은 고딕). 방향은 기본이 쪽 회전(화면에 바로 섬), 넘치면 글 방향의 아래로 늘린다.
+
+    grow=True 면 줄이 상자보다 길 때 줄바꿈하지 않고 상자를 글 방향으로 넓힌다(정렬 쪽을 붙박고)."""
+    rot = p.rotation if rotate is None else rotate
+    name, path, fake_bold, italic = _font_res(p, family, text, bold, italic)
+    extra = {"render_mode": 2, "border_width": 0.04, "fill": color} if fake_bold else {}
+    if grow:
+        fo = F.font_object(path)
+        need = max(fo.text_length(ln, fontsize) for ln in text.split("\n")) + TEXT_PAD + 1
+        lr = fitz.Rect(r) * fitz.Matrix(rot)
+        lr.normalize()
+        if lr.width < need:
+            if align == 1:
+                lr.x0 -= (need - lr.width) / 2
+                lr.x1 = lr.x0 + need
+            elif align == 2:
+                lr.x0 = lr.x1 - need
+            else:
+                lr.x1 = lr.x0 + need
+            r = lr * fitz.Matrix(-rot)
+            r.normalize()
 
     def put(box: fitz.Rect) -> float:
         morph = None
@@ -956,7 +992,7 @@ def _insert_box(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, color: C
             m = fitz.Matrix(rot) * fitz.Matrix(1, 0, ITALIC_SLANT, 1, 0, 0) * fitz.Matrix(-rot)
             morph = (fitz.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2), m)
         return p.insert_textbox(box, text, fontsize=fontsize, fontname=name, color=color, align=align, rotate=rot,
-                                morph=morph)
+                                morph=morph, **extra)
 
     rc = put(r)
     if rc < 0:  # 상자가 작으면 아래로 늘려 다시
@@ -995,9 +1031,29 @@ def add_image(doc: Document, page: int, r: fitz.Rect, path: str, keep_proportion
         p.insert_image(r, filename=path, keep_proportion=keep_proportion, overlay=True, rotate=p.rotation)
 
 
+def block_style(doc: Document, page: int, block_rect: fitz.Rect) -> dict:
+    """글자 덩어리 첫 글자의 모양: 크기·색·굵게·기울임·글꼴 이름(고를 수 있는 글꼴 가운데 맞는 것, 없으면 빈 이름)."""
+    with doc.lock:
+        spans = [s for b in doc.fitz[page].get_text("dict", clip=block_rect)["blocks"] if b.get("type") == 0
+                 for l in b["lines"] for s in l["spans"] if s["text"].strip()]
+    if not spans:
+        return {"fontsize": 11.0, "color": (0, 0, 0), "bold": False, "italic": False, "family": ""}
+    s = spans[0]
+    c = s["color"]
+    raw = s["font"].split("+", 1)[-1]
+    key = re.sub(r"[^a-z0-9]", "", re.sub(r"[-,](bold|italic|oblique|regular|bolditalic)$", "", raw, flags=re.I).lower())
+    family = next((f for f in F.font_families() if re.sub(r"[^a-z0-9]", "", f.lower()) == key), "")
+    if not family and key.startswith("malgun"):
+        family = F.DEFAULT_FAMILY
+    return {"fontsize": round(s["size"], 1), "color": ((c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255),
+            "bold": bool(s["flags"] & 16) or "bold" in raw.lower(), "italic": bool(s["flags"] & 2),
+            "family": family}
+
+
 def edit_block(doc: Document, page: int, block_rect: fitz.Rect, new_text: str, fontsize: float | None = None,
-               color: Color = (0, 0, 0), bold: bool = False, align: int = 0):
-    """원문 글자 덩어리를 고친다: 자리를 교정(흰 칠)하고 새 글자를 같은 자리에 넣는다."""
+               color: Color = (0, 0, 0), bold: bool = False, align: int = 0, *, italic: bool = False,
+               family: str = "", new_rect: fitz.Rect | None = None):
+    """원문 글자 덩어리를 고친다: 자리를 교정(흰 칠)하고 새 글자를 같은 자리(new_rect 면 그 자리)에 넣는다."""
     doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
@@ -1011,7 +1067,8 @@ def edit_block(doc: Document, page: int, block_rect: fitz.Rect, new_text: str, f
         rot = _text_rotation(p, block_rect)  # 원래 글 방향(지우기 전에)
         redact_only(p, [block_rect], fill=(1, 1, 1), images=fitz.PDF_REDACT_IMAGE_NONE)
         if new_text.strip():
-            _insert_box(p, fitz.Rect(block_rect), new_text, fontsize, color, bold, align, rotate=rot)
+            _insert_box(p, fitz.Rect(new_rect or block_rect), new_text, fontsize, color, bold, align, rotate=rot,
+                        italic=italic, family=family, grow=True)
 
 
 def delete_image(doc: Document, page: int, r: fitz.Rect):
@@ -1020,6 +1077,116 @@ def delete_image(doc: Document, page: int, r: fitz.Rect):
     with doc.lock:
         p = doc.fitz[page]
         redact_only(p, [r], fill=None, images=fitz.PDF_REDACT_IMAGE_REMOVE, text=fitz.PDF_REDACT_TEXT_NONE)
+
+
+# 그림 돌리기·뒤집기·불투명도·옮기기. 그림을 그리는 줄(/이름 Do)을 그 자리에서 「q 행렬 cm /상태 gs /이름 Do Q」 로 감싼다.
+# 지웠다 다시 넣지 않으니 겹친 다른 그림·글이 다치지 않고 앞뒤 차례도 그대로다. 다시 바꾸면 감싼 것을 통째로 새로 쓴다.
+_OP_GS = "RPDFA"  # 그림 불투명도 그래픽 상태 이름 머리(뒤에 백분율)
+_NUM = rb"[-+]?(?:\d+\.?\d*|\.\d+)"
+
+
+def _pdf_num(v: float) -> str:
+    t = f"{v:.6f}".rstrip("0").rstrip(".")
+    return "0" if t in ("", "-0") else t
+
+
+def _image_spot(p: fitz.Page, xref: int, rect: fitz.Rect) -> tuple[dict, tuple, list]:
+    """rect 자리에 그린 그림 xref 의 (그림 정보, 그리는 줄 자리, 그 쪽의 같은 그림 줄 전부).
+
+    줄 자리는 (내용 스트림 xref, 시작, 끝, 감싼 행렬 또는 None, 불투명도 백분율 또는 None)."""
+    infos = [i for i in p.get_image_info(xrefs=True) if i.get("xref") == xref]
+    names = [im[7] for im in p.get_images(full=True) if im[0] == xref and im[9] == 0]
+    if not infos or not names:
+        raise ValueError("이 그림은 쪽에 바로 놓인 그림이 아니라서 바꿀 수 없습니다")
+    alt = b"|".join(re.escape(n.encode("latin-1")) for n in names)
+    wrap = re.compile(rb"q\s+(" + _NUM + rb"(?:\s+" + _NUM + rb"){5})\s+cm\s+/" + _OP_GS.encode()
+                      + rb"(\d+)\s+gs\s+/(?:" + alt + rb")\s+Do\s+Q")
+    plain = re.compile(rb"/(?:" + alt + rb")\s+Do\b")
+    spots = []
+    for cx in p.get_contents():
+        data = p.parent.xref_stream(cx) or b""
+        taken = []
+        for m in wrap.finditer(data):
+            spots.append((cx, m.start(), m.end(), fitz.Matrix(*map(float, m.group(1).split())), int(m.group(2))))
+            taken.append((m.start(), m.end()))
+        for m in plain.finditer(data):
+            if not any(a <= m.start() < b for a, b in taken):
+                spots.append((cx, m.start(), m.end(), None, None))
+    order = {cx: n for n, cx in enumerate(p.get_contents())}
+    spots.sort(key=lambda t: (order[t[0]], t[1]))
+    if len(spots) != len(infos):
+        raise ValueError("이 그림은 다른 묶음 안에서도 그려져 있어 바꿀 수 없습니다")
+    k = min(range(len(infos)), key=lambda n: sum(abs(a - b) for a, b in zip(infos[n]["bbox"], rect)))
+    return infos[k], spots[k], spots
+
+
+def image_opacity(doc: Document, page: int, xref: int, rect: fitz.Rect) -> float:
+    """그림의 불투명도(0~1). 이 앱으로 바꾼 적 없으면 1."""
+    with doc.lock:
+        try:
+            spot = _image_spot(doc.fitz[page], xref, rect)[1]
+        except ValueError:
+            return 1.0
+    return 1.0 if spot[4] is None else spot[4] / 100
+
+
+def transform_image(doc: Document, page: int, xref: int, rect: fitz.Rect, *, rotate: int = 0, flip_h: bool = False,
+                    flip_v: bool = False, opacity: float | None = None, new_rect: fitz.Rect | None = None) -> fitz.Rect:
+    """rect 자리의 그림을 돌리고(rotate 도, 보이는 화면에서 시계 방향) · 뒤집고(보이는 화면의 좌우·상하) ·
+    불투명도를 바꾸고 · new_rect 로 옮기거나 늘린다(돌린 뒤의 바깥 상자 기준). 새 자리(회전 전 쪽 좌표)를 돌려준다."""
+    with doc.lock:
+        p = doc.fitz[page]
+        info, (cx, start, end, prev, prev_op), _ = _image_spot(p, xref, rect)
+    doc.snapshot()
+    with doc.lock:
+        f = doc.fitz
+        p = f[page]
+        m_old = fitz.Matrix(info["transform"])         # 그림 단위 네모 → 쪽(회전 전, 아래로 y)
+        box = fitz.Rect(info["bbox"])
+        c = (box.tl + box.br) / 2
+        lin = fitz.Matrix(rotate) if rotate % 360 else fitz.Matrix(1, 1)
+        if flip_h or flip_v:
+            rm = p.rotation_matrix
+            rl = fitz.Matrix(rm.a, rm.b, rm.c, rm.d, 0, 0)
+            lin = lin * rl * fitz.Matrix(-1 if flip_h else 1, -1 if flip_v else 1) * ~rl
+        m_new = m_old * fitz.Matrix(1, 0, 0, 1, -c.x, -c.y) * lin * fitz.Matrix(1, 0, 0, 1, c.x, c.y)
+        if new_rect is not None:
+            b = fitz.Rect(0, 0, 1, 1) * m_new
+            nr = fitz.Rect(new_rect)
+            nr.normalize()
+            sx, sy = nr.width / max(b.width, 1e-6), nr.height / max(b.height, 1e-6)
+            m_new = m_new * fitz.Matrix(1, 0, 0, 1, -b.x0, -b.y0) * fitz.Matrix(sx, sy) * fitz.Matrix(1, 0, 0, 1, nr.x0, nr.y0)
+        tm = p.transformation_matrix                  # PDF 좌표 → 쪽 좌표
+        flip = fitz.Matrix(1, 0, 0, -1, 0, 1)         # MuPDF 는 그림 단위 네모를 위아래 뒤집어 쓴다
+        old_total, new_total = flip * m_old * ~tm, flip * m_new * ~tm
+        outer = old_total if prev is None else ~prev * old_total   # 그림 줄 바깥의 좌표계
+        x = new_total * ~outer
+        op = (1.0 if prev_op is None else prev_op / 100) if opacity is None else opacity
+        pct = max(0, min(100, int(round(op * 100))))
+        gs = f"{_OP_GS}{pct}"
+        _own_xobjects(f, p.xref, inherit=True)        # 쪽 자원을 이 쪽 것으로(다른 쪽과 같이 쓰던 사전이면 사본)
+        t, v = f.xref_get_key(p.xref, "Resources/ExtGState")
+        if t == "xref":
+            f.xref_set_key(p.xref, "Resources/ExtGState", f.xref_object(int(v.split()[0]), compressed=True))
+        elif t != "dict":
+            f.xref_set_key(p.xref, "Resources/ExtGState", "<<>>")
+        # 불투명도는 /ca 대신 고른 밝기의 소프트 마스크로 건다. MuPDF 는 /ca 가 0.5 아래인 그림을 글 추출에서 빼서
+        # (워터마크로 보고) 편집에서 다시 고를 수 없게 된다. 마스크 좌표는 gs 를 거는 때의 그림 단위 네모다
+        if pct >= 100:
+            f.xref_set_key(p.xref, f"Resources/ExtGState/{gs}", "<</Type/ExtGState>>")
+        else:
+            mask = f.get_new_xref()
+            f.update_object(mask, "<</Type/XObject/Subtype/Form/BBox[-1 -1 2 2]"
+                                  "/Group<</Type/Group/S/Transparency/CS/DeviceGray>>>>")
+            f.update_stream(mask, f"{pct / 100:g} g -1 -1 3 3 re f".encode())
+            f.xref_set_key(p.xref, f"Resources/ExtGState/{gs}",
+                           f"<</Type/ExtGState/SMask<</Type/Mask/S/Luminosity/G {mask} 0 R>>>>")
+        data = f.xref_stream(cx)
+        name = re.search(rb"/(\S+?)\s+Do", data[start:end]).group(1)
+        new = (f"q {' '.join(_pdf_num(n) for n in tuple(x))} cm /{gs} gs /".encode() + name + b" Do Q")
+        f.update_stream(cx, data[:start] + new + data[end:])
+        p._image_info = None
+        return fitz.Rect(0, 0, 1, 1) * m_new
 
 
 def images_on_page(doc: Document, page: int) -> list[dict]:

@@ -742,7 +742,7 @@ class PageView(QGraphicsView):
             if t == "edit" and self._links_editable() and self._press_link(i, sp):
                 return
             if t == "edit":
-                if self._select_block_or_image(i, sp):
+                if self._press_content(i, sp) or self._select_block_or_image(i, sp):
                     return
             self._drag_start_scene = sp
             self._drag_end_scene = sp
@@ -784,7 +784,7 @@ class PageView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
             return
         sp = self.mapToScene(e.position().toPoint())
-        if self._moving_annot and self.sel and self.sel.kind in ("annot", "widget", "link"):
+        if self._moving_annot and self.sel and self.sel.kind in ("annot", "widget", "link", "block", "image"):
             i = self.sel.page
             pt = self.to_page(i, sp)
             if self._resize_corner >= 0:
@@ -1051,10 +1051,69 @@ class PageView(QGraphicsView):
                         if im["rect"].intersects(fitz.Rect(b["bbox"])):
                             self.sel.extra["xref"] = im["xref"]
                             break
+                self.sel.extra["rect"] = fitz.Rect(self.sel.rect)
                 self.selectionChanged.emit(self.sel)
+                self._moving_annot = True
+                self._resize_corner = -1
+                self._move_last = pt
                 self.viewport().update()
                 return True
         return False
+
+    def _press_content(self, i: int, sp: QPointF) -> bool:
+        """고른 글자 덩어리·그림의 모서리 손잡이를 누르면 크기 바꾸기, 몸통을 누르면 옮기기."""
+        s = self.sel
+        if not (s and s.kind in ("block", "image") and s.page == i and s.rect is not None):
+            return False
+        pt = self.to_page(i, sp)
+        tol = 5 / self.zoom
+        for n, c in enumerate((s.rect.tl, s.rect.tr, s.rect.bl, s.rect.br)):
+            if abs(c.x - pt.x) <= tol and abs(c.y - pt.y) <= tol:
+                self._resize_corner = n
+                self._moving_annot = True
+                return True
+        if not s.rect.contains(pt):
+            return False
+        self._moving_annot = True
+        self._resize_corner = -1
+        self._move_last = pt
+        return True
+
+    def place_content(self, new: fitz.Rect, **image_kw) -> bool:
+        """고른 글자 덩어리·그림을 new 자리(회전 전 쪽 좌표)로. 그림은 돌리기·뒤집기·불투명도도 같이 받는다."""
+        s = self.sel
+        if not s or s.kind not in ("block", "image"):
+            return False
+        old = fitz.Rect(s.extra.get("rect") or s.rect)
+        new = fitz.Rect(new); new.normalize()
+        if new.width < 2 or new.height < 2:
+            s.rect = old   # 너무 작게 줄인 것은 되돌린다
+            self.viewport().update()
+            return False
+        same = all(abs(a - b) < 0.01 for a, b in zip(old, new))
+        if s.kind == "block":
+            if same:
+                return False
+            st = s.extra.get("style") or A.block_style(self.doc, s.page, old)
+            A.edit_block(self.doc, s.page, old, s.text, st["fontsize"], st["color"], st["bold"], st.get("align", 0),
+                         italic=st["italic"], family=st["family"], new_rect=new)
+            s.extra["style"] = st
+        else:
+            if same and not image_kw:
+                return False
+            try:
+                new = A.transform_image(self.doc, s.page, s.extra.get("xref", 0), old,
+                                        new_rect=None if same else new, **image_kw)
+            except ValueError as e:
+                s.rect = old
+                self.status.emit(str(e))
+                self.viewport().update()
+                return False
+        s.rect = fitz.Rect(new)
+        s.extra["rect"] = fitz.Rect(new)
+        self.refresh_pages([s.page])
+        self.selectionChanged.emit(s)
+        return True
 
     def _select_words(self, i: int, pr: fitz.Rect, click: bool, scene_pt: QPointF | None):
         ws = [w for w in self.words(i) if fitz.Rect(w[:4]).intersects(pr)] if not click else []
@@ -1137,6 +1196,8 @@ class PageView(QGraphicsView):
                     w.rect = s.rect
                     A.save_widget(w)
             self.refresh_pages([s.page])
+        elif s.kind in ("block", "image"):
+            self.place_content(s.rect)
         self._move_last = None
 
     def _follow_link(self, sp: QPointF):

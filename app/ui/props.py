@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QFrame, Q
 from ..engine import annot_style as S
 from ..engine import annots as A
 from .dialogs import ColorButton, from_rgb01
+from .props_content import ContentProps
 from .sidebar import group_card, panel_head
 
 # 속성 패널 색 견본 여섯: 노랑·빨강·주황·파랑·초록·보라
@@ -59,6 +60,7 @@ class PropsPanel(QWidget):
         scroll.viewport().setAutoFillBackground(False)
         outer.addWidget(scroll, 1)
         self.kind = QLabel(""); self.kind.setObjectName("dim"); self.kind.setWordWrap(True); lay.addWidget(self.kind)
+        self.edit_props = ContentProps(viewer); lay.addWidget(self.edit_props)   # 편집: 고른 글자 덩어리·그림
 
         self.look_box, f = group_card("모양"); lay.addWidget(self.look_box); self.look = f
         sw = QWidget(); sl = QHBoxLayout(sw); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(4)
@@ -162,6 +164,7 @@ class PropsPanel(QWidget):
             else:
                 self.kind.setText({"words": "글자 선택", "widget": "양식 칸", "block": "글자 덩어리", "image": "이미지"}.get(
                     getattr(sel, "kind", ""), "고른 것 없음"))
+        self.edit_props.show_sel(sel if self.key is None else None)
         self._layout_rows()
 
     def _layout_rows(self):
