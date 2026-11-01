@@ -102,13 +102,14 @@ def page_number_as_header(settings: dict) -> dict:
 
 def bates_order(settings: dict, targets: list[int]) -> tuple[list[int], int]:
     """베이츠 번호를 셀 차례와 센 쪽 수. 기본은 범위 밖 쪽도 번호를 하나씩 먹는다(1·3쪽이면 0·2 차례, 셋).
-    「marked_only」면 넣는 쪽끼리만 센다(0·1 차례, 둘)."""
+    「marked_only」면 넣는 쪽끼리만 센다(0·1 차례, 둘). 차례는 targets 와 같은 줄 순서로 돌려준다."""
     if not targets:
         return [], 0
     if settings.get("marked_only"):
-        return list(range(len(targets))), len(targets)
-    first = targets[0]
-    return [p - first for p in targets], targets[-1] - first + 1
+        rank = {p: k for k, p in enumerate(sorted(set(targets)))}
+        return [rank[p] for p in targets], len(rank)
+    first = min(targets)
+    return [p - first for p in targets], max(targets) - first + 1
 
 
 def bates_text(settings: dict, number: int) -> str:

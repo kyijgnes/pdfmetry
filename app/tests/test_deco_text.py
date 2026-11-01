@@ -77,6 +77,28 @@ def test_bates_reverse_prefix_suffix_rotate():
     assert "AB009-Z" in _text(d, 0) and "AB007-Z" in _text(d, 2)
 
 
+@pytest.mark.parametrize("marked, rev, want", [(False, False, ("0001", "0003")), (True, False, ("0001", "0002")),
+                                              (False, True, ("0003", "0001"))])
+def test_bates_add_decoration_counts_like_engine(marked, rev, want):
+    """앱이 넣는 길(add_decoration · 업데이트)도 범위 밖 쪽을 센다."""
+    d = make_doc(3)
+    s = {"v": 2, "prefix": "", "suffix": "", "start": 1, "digits": 4, "position": "center", "marked_only": marked,
+         "reverse": rev}
+    E.add_decoration(d, "bates", pages=[0, 2], **s)
+    assert want[0] in _text(d, 0) and want[1] in _text(d, 2)
+    E.replace_decorations(d, "bates", E.decorations(d, "bates"))
+    assert want[0] in _text(d, 0) and want[1] in _text(d, 2) and "000" not in _text(d, 1)
+
+
+def test_bates_preview_counts_skipped_pages():
+    d = make_doc(3)
+    s = {"v": 2, "prefix": "", "suffix": "", "start": 1, "digits": 4, "position": "center"}
+    a = E.render_preview(d, 2, "bates", s, [0, 2], size_px=200)
+    three = E.render_preview(d, 2, "bates", {**s, "start": 3}, [2], size_px=200)        # 0003
+    two = E.render_preview(d, 2, "bates", {**s, "marked_only": True}, [0, 2], size_px=200)   # 0002
+    assert a.samples == three.samples and a.samples != two.samples
+
+
 def test_bates_order():
     assert X.bates_order({}, [1, 4, 5]) == ([0, 3, 4], 5)
     assert X.bates_order({"marked_only": True}, [1, 4, 5]) == ([0, 1, 2], 3)

@@ -678,7 +678,7 @@ def test_decorations_add_find_update_remove(doc, tmp_path):
     tools.add_decoration(doc, "watermark", text="대외비")
     tools.add_decoration(doc, "bates", prefix="A-", start=1, digits=4, reverse=True, pages=[0, 2])
     assert "3 / 5" in doc[0].get_text() and "5 / 5" in doc[2].get_text()   # n = 쪽 수 + 첫 번호 - 1
-    assert "A-0002" in doc[0].get_text() and "A-0001" in doc[2].get_text()   # 거꾸로
+    assert "A-0003" in doc[0].get_text() and "A-0001" in doc[2].get_text()   # 거꾸로, 범위 밖 2쪽도 셈
     # 돌린 쪽에서도 바닥글은 보이는 쪽 아래쪽에 선다
     r = doc[1].search_for("4 / 5")[0] * doc[1].rotation_matrix  # search_for 는 회전 전 좌표
     assert r.y0 > doc[1].rect.height * 0.8 and abs((r.x0 + r.x1) / 2 - doc[1].rect.width / 2) < 20
@@ -691,7 +691,7 @@ def test_decorations_add_find_update_remove(doc, tmp_path):
     tools.replace_decorations(d, "page_number", [g])
     assert "- 3 -" in d[0].get_text() and "3 / 5" not in d[0].get_text()
     assert tools.remove_decorations(d, "watermark") == 3
-    assert "대외비" not in d[0].get_text() and "Hello" in d[0].get_text() and "A-0002" in d[0].get_text()
+    assert "대외비" not in d[0].get_text() and "Hello" in d[0].get_text() and "A-0003" in d[0].get_text()
     assert {g["kind"] for g in tools.decorations(d)} == {"bates", "page_number"}
 
 
