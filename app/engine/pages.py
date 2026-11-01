@@ -10,11 +10,20 @@ from typing import Iterable
 
 import fitz
 
-from .document import Document, del_keys
+from .document import Document, del_keys, keep_copy
 
 
-def parse_range(spec: str, total: int) -> list[int]:
-    """'1-3,5,8-' → 0-based 목록. 빈 문자열이면 전부."""
+RANGE_ERROR = "유효한 페이지 범위를 입력하십시오."
+
+
+def parse_range(spec: str, total: int, strict: bool = False, labels: list[str] | None = None) -> list[int]:
+    """'1-3,5,8-' → 0-based 목록. 빈 문자열이면 전부.
+
+    strict: 쪽 범위 칸(PageRangeEdit)의 엄격한 방식. 쉼표로만 나누고, 겹친 것을 합쳐 작은 쪽부터 정렬하며,
+    빈 글은 0쪽, 열린 범위(「8-」)·빈 조각·거꾸로·없는 쪽이 한 조각이라도 있으면 전체를 버린다(ValueError).
+    labels: 쪽마다의 레이블(엄격한 방식에서만). 주면 레이블과 같은 조각을 그 쪽으로 읽는다."""
+    if strict:
+        return _parse_strict(spec, total, labels)
     # 「1 - 3」 을 띄어 쓰면 홀로 남은 「-」 가 「처음~끝」 으로 읽혀 모든 쪽이 골라졌다
     spec = re.sub(r"\s*-\s*", "-", (spec or "").strip())
     if not spec:
@@ -47,6 +56,39 @@ def parse_range(spec: str, total: int) -> list[int]:
     return res
 
 
+def _parse_strict(spec: str, total: int, labels: list[str] | None) -> list[int]:
+    spec = (spec or "").strip()
+    if not spec:
+        return []
+
+    def page_of(tok: str, start: int = 0) -> int:
+        tok = tok.strip()
+        if not tok:
+            raise ValueError(RANGE_ERROR)
+        if labels:   # 범위 끝은 시작 쪽부터 처음 맞는 레이블
+            for i in range(start, min(total, len(labels))):
+                if labels[i] == tok:
+                    return i
+        if not tok.isdigit() or not 1 <= int(tok) <= total:
+            raise ValueError(RANGE_ERROR)
+        return int(tok) - 1
+
+    out: set[int] = set()
+    for part in spec.split(","):
+        ends = part.split("-")
+        if len(ends) == 1:
+            out.add(page_of(ends[0]))
+        elif len(ends) == 2:
+            a = page_of(ends[0])
+            b = page_of(ends[1], a)
+            if a > b:
+                raise ValueError(RANGE_ERROR)
+            out.update(range(a, b + 1))
+        else:
+            raise ValueError(RANGE_ERROR)
+    return sorted(out)
+
+
 def subset(pages: Iterable[int], how: str = "all") -> list[int]:
     """홀수(odd)·짝수(even) 쪽만 거른다. 쪽 번호는 1부터 센 것 기준(0-based 0 = 1쪽 = 홀수). all 이면 그대로."""
     if how == "odd":
@@ -56,15 +98,19 @@ def subset(pages: Iterable[int], how: str = "all") -> list[int]:
     return list(pages)
 
 
-def format_range(pages: Iterable[int]) -> str:
-    """0-based 쪽 목록 → 「1,3-5」. 이어진 번호는 묶는다."""
-    nums = sorted({int(p) + 1 for p in pages})
+def format_range(pages: Iterable[int], labels: list[str] | None = None) -> str:
+    """0-based 쪽 목록 → 「1,3-5」. 이어진 번호는 묶는다. labels 를 주면 쪽 번호 대신 레이블로 쓴다."""
+    nums = sorted({int(p) for p in pages})
+
+    def name(i: int) -> str:
+        return labels[i] if labels and i < len(labels) and labels[i] else str(i + 1)
+
     out, k = [], 0
     while k < len(nums):
         j = k
         while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
             j += 1
-        out.append(str(nums[k]) if j == k else f"{nums[k]}-{nums[j]}")
+        out.append(name(nums[k]) if j == k else f"{name(nums[k])}-{name(nums[j])}")
         k = j + 1
     return ",".join(out)
 
@@ -187,14 +233,40 @@ def insert_images(doc: Document, at: int, paths: list[str]):
             img.close(); pdf.close()
 
 
-def extract(doc: Document, pages: Iterable[int], out_path: str) -> str:
-    """고른 쪽만 새 PDF 로 저장."""
-    pages = list(pages)
+EXTRACT_PREFIX = "페이지"
+
+
+def extract_name(folder: str, src_name: str) -> str:
+    """추출한 문서의 경로: 「페이지 <원본 이름>.pdf」. 원본 이름은 150자에서 자르고, 같은 이름이 있으면 「-1」 「-2」… 를 붙인다."""
+    stem = os.path.splitext(src_name or "문서")[0][:150]
+    base = f"{EXTRACT_PREFIX} {stem}"
+    path, k = os.path.join(folder, base + ".pdf"), 0
+    while os.path.exists(path):
+        k += 1
+        path = os.path.join(folder, f"{base}-{k}.pdf")
+    return path
+
+
+def extract(doc: Document, pages: Iterable[int], out_path: str, creator: str = "", progress=None) -> str:
+    """고른 쪽만 새 PDF 로 저장. 원본의 레이어·문서 정보·암호(보안 설정)는 그대로 두고,
+    작성자는 윈도 사용자, 만든·고친 날짜는 지금, 만든 프로그램은 creator 로 채운다."""
+    pages = sorted(set(pages))
+    if not pages:
+        raise ValueError(RANGE_ERROR)
+    if progress:
+        progress(0, 0, "페이지 내보내기 중…")
     with doc.lock:
-        new = fitz.open()
-        for i in pages:
-            new.insert_pdf(doc.fitz, from_page=i, to_page=i)
-        new.save(out_path, garbage=3, deflate=True)
+        new = keep_copy(doc.fitz, doc.password)   # 통째 사본에서 쪽을 고르면 레이어·문서 정보가 따라온다
+    try:
+        new.select(pages)
+        now = fitz.get_pdf_now()
+        meta = dict(new.metadata or {})
+        meta.update(author=os.environ.get("USERNAME") or meta.get("author") or "", creationDate=now, modDate=now)
+        if creator:
+            meta["creator"] = creator
+        new.set_metadata({k: v for k, v in meta.items() if k not in ("format", "encryption")})
+        new.save(out_path, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    finally:
         new.close()
     return out_path
 

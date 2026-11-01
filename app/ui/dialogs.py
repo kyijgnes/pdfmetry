@@ -7,8 +7,8 @@ from html import escape
 from typing import Callable
 
 import fitz
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPixmap
+from PySide6.QtCore import QEvent, QRegularExpression, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPixmap, QRegularExpressionValidator
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
@@ -73,45 +73,76 @@ class ColorButton(QToolButton):
 
 
 class PageRangeEdit(QWidget):
-    """전체 / 지금 쪽 / 범위. 홀수·짝수 거르기는 전체와 범위에 같이 걸린다(「짝수 쪽」 + 1-10 → 2·4·…·10쪽)."""
+    """쪽 범위 칸: 「모든·짝수·홀수 페이지」 / 「사용자 지정」 범위 글 + 「/ 전체 쪽 수」.
+
+    짝수·홀수 거르기는 사용자 지정 범위에도 걸린다(「짝수 페이지」 + 1-10 → 2·4·…·10쪽). 범위 글은 엄격하게 읽어
+    한 조각이라도 틀리거나 0쪽이면 오류다. odd_even 은 옛 호출부 호환용으로 받기만 한다(거르기 칸은 늘 보인다)."""
+    HOW = (("모든 페이지", "all"), ("짝수 페이지", "even"), ("홀수 페이지", "odd"))
+
     def __init__(self, total: int, current: int = 0, parent=None, odd_even: bool = False):
         super().__init__(parent)
-        self.total = total
+        self.total, self.current, self.odd_even = total, current, odd_even
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
-        self.all = QRadioButton("전체"); self.all.setChecked(True); top.addWidget(self.all)
-        self.which = QComboBox(); self.which.addItems(["모든 쪽", "홀수 쪽", "짝수 쪽"]); self.which.setVisible(odd_even); self.odd_even = odd_even
-        top.addWidget(self.which); top.addStretch(1)
-        self.cur = QRadioButton(f"지금 쪽({current + 1})")
+        self.all = QRadioButton(); self.all.setChecked(True); top.addWidget(self.all)
+        self.which = QComboBox()
+        for label, how in self.HOW:
+            self.which.addItem(label, how)
+        self.which.activated.connect(lambda: self.all.setChecked(True) if not self.rng.isChecked() else None)
+        top.addWidget(self.which, 1)
         row = QHBoxLayout()
-        self.rng = QRadioButton("범위"); self.edit = QLineEdit(); self.edit.setPlaceholderText("예: 1-3, 5, 8-")
-        self.edit.textEdited.connect(lambda: self.rng.setChecked(True))
-        row.addWidget(self.rng); row.addWidget(self.edit)
-        lay.addLayout(top); lay.addWidget(self.cur); lay.addLayout(row)
-        self.current = current
+        self.rng = QRadioButton("사용자 지정")
+        self.edit = QLineEdit("1"); self.edit.setMaxLength(200); self.edit.setPlaceholderText("예: 1,3,5,7-10")
+        self.edit.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9,\- ]*"), self.edit))
+        self.edit.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)   # 한글 입력기 끔
+        self.edit.installEventFilter(self)
+        self.edit.setEnabled(False)
+        self.rng.toggled.connect(self._toggled)
+        row.addWidget(self.rng); row.addWidget(self.edit, 1); row.addWidget(QLabel(f"/ {total}"))
+        lay.addLayout(top); lay.addLayout(row)
+        # 옛 호출부(「지금 쪽」 을 고르던 곳) 호환: 고르면 사용자 지정에 지금 쪽 번호를 넣는다
+        self.cur = QRadioButton(self); self.cur.hide()
+        self.cur.toggled.connect(lambda on: on and self._custom(str(current + 1)))
+
+    def eventFilter(self, obj, ev):
+        # 공백은 붙여넣기로만 들어온다(타자로는 숫자·「-」·「,」·지우기만)
+        if obj is self.edit and ev.type() == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Space:
+            return True
+        return super().eventFilter(obj, ev)
+
+    def _toggled(self, on: bool):
+        self.edit.setEnabled(on)
+        if on:
+            self.edit.setFocus(); self.edit.selectAll()
+
+    def _custom(self, text: str):
+        self.rng.setChecked(True); self.edit.setText(text)
 
     def set_pages(self, pages: list[int]):
-        """고른 쪽들로 채운다. 전체·홀수·짝수와 같으면 그것을, 아니면 범위 글로."""
+        """고른 쪽들로 채운다. 모든·짝수·홀수 쪽과 같으면 그것을, 아니면 사용자 지정 범위 글로."""
         pages = sorted(set(pages))
         every = list(range(self.total))
-        for k, how in enumerate(("all", "odd", "even")):
-            if pages == P.subset(every, how) and (k == 0 or self.odd_even):
+        for k, (_, how) in enumerate(self.HOW):
+            if pages == P.subset(every, how):
                 self.all.setChecked(True); self.which.setCurrentIndex(k); return
-        if pages == [self.current]:
-            self.cur.setChecked(True); return
-        self.rng.setChecked(True); self.edit.setText(P.format_range(pages))
+        self.which.setCurrentIndex(0)
+        self._custom(P.format_range(pages))
 
     def pages(self) -> list[int]:
-        how = ("all", "odd", "even")[self.which.currentIndex()] if self.odd_even else "all"
-        if self.all.isChecked():
-            got = P.subset(range(self.total), how)
-        elif self.cur.isChecked():
-            return [self.current]
-        else:
-            got = P.subset(P.parse_range(self.edit.text(), self.total), how)
+        how = self.which.currentData() or "all"
+        try:
+            got = P.subset(P.parse_range(self.edit.text(), self.total, strict=True) if self.rng.isChecked()
+                           else range(self.total), how)
+        except ValueError:
+            got = []
         if not got:
-            raise ValueError("고른 범위에 쪽이 없습니다")
+            raise ValueError(P.RANGE_ERROR)
         return got
+
+    def focus_error(self):
+        """오류 문구를 띄운 뒤 부른다: 사용자 지정이면 글 칸으로 커서를 옮긴다(pages() 는 미리보기 갱신에도 불려 커서를 안 옮김)."""
+        if self.rng.isChecked():
+            self.edit.setFocus(); self.edit.selectAll()
 
 
 def _buttons(dlg: QDialog, ok_text: str = "확인") -> QDialogButtonBox:
