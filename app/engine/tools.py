@@ -820,15 +820,6 @@ def resize_pages(doc: fitz.Document, size="A4", orientation: str | None = None,
         src.close()
 
 
-def set_page_labels(doc: fitz.Document, start_page: int = 0, style: str = "D",
-                    prefix: str = "", first_number: int = 1) -> None:
-    """쪽 라벨(D 숫자 · r/R 로마 · a/A 알파벳). in place. 한글 접두어 때문에 pages 의 읽기·쓰기를 쓴다."""
-    from .pages import read_page_labels, write_page_labels
-    labels = [l for l in read_page_labels(doc) if l.get("startpage") != start_page]
-    labels.append({"startpage": int(start_page), "prefix": prefix, "style": style, "firstpagenum": int(first_number)})
-    write_page_labels(doc, labels)
-
-
 # ── 보안 ────────────────────────────────────────────────────────────────
 # 암호화 방식(셋, 기본 128 bit AES)
 ENCRYPT_METHODS = {"aes128": fitz.PDF_ENCRYPT_AES_128, "aes256": fitz.PDF_ENCRYPT_AES_256, "rc4": fitz.PDF_ENCRYPT_RC4_128}

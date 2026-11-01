@@ -267,7 +267,7 @@ def test_deskew_image_page():
     d.close()
 
 
-def test_crop_resize_boxes_labels(doc):
+def test_crop_resize_boxes(doc):
     tools.crop_pages(doc, fitz.Rect(50, 50, 500, 700), pages=[0])
     assert abs(doc[0].rect.width - 450) < 0.5
     tools.set_page_boxes(doc, "trim", fitz.Rect(60, 60, 400, 600), pages=[1])
@@ -277,8 +277,6 @@ def test_crop_resize_boxes_labels(doc):
     tools.resize_pages(doc, size="A5", pages=[2])
     assert abs(doc[2].rect.width - 148 * tools.MM) < 0.5 and "셋째 쪽" in doc[2].get_text()
     assert doc.page_count == 3
-    tools.set_page_labels(doc, 0, style="r", prefix="", first_number=1)
-    assert doc[1].get_label() == "ii"
 
 
 def test_encrypt_decrypt(doc, tmp_path):
