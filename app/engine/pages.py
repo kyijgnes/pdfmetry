@@ -136,14 +136,25 @@ def delete(doc: Document, pages: Iterable[int]):
         doc.fitz.delete_pages(pages)
 
 
-def split_grid(doc: Document, pages: Iterable[int], cols: int = 2, rows: int = 1) -> list[int]:
-    """쪽 하나를 가로 cols × 세로 rows 칸으로 나눠 여러 쪽으로(「페이지 분할」, 스캔한 두 쪽 펼침 나누기).
+def split_grid(doc: Document, pages: Iterable[int], cols: int = 2, rows: int = 1, *,
+               xs: Iterable[float] | None = None, ys: Iterable[float] | None = None, progress=None) -> list[int]:
+    """쪽 하나를 분할선으로 나눠 여러 쪽으로(「페이지 분할」, 스캔한 두 쪽 펼침 나누기).
 
-    칸마다 쪽을 통째로 복사하고 보이는 영역(CropBox)만 그 칸으로 줄인다. 글·주석·링크가 그대로 남는다.
-    칸 차례는 보이는 화면 기준 왼쪽 위 → 오른쪽 → 다음 줄. 돌려주는 값은 새 쪽마다 원래 쪽 번호(되돌리기·썸네일용)."""
-    cols, rows = int(cols), int(rows)
-    if not (1 <= cols <= 10 and 1 <= rows <= 10) or cols * rows == 1:
-        raise ValueError("가로·세로 칸 수는 1~10 이고, 둘 다 1 이면 나눌 게 없습니다")
+    xs 는 세로 분할선, ys 는 가로 분할선 자리이고 보이는 쪽 너비·높이에 대한 비율(0~1 사이)이다. 안 주면
+    cols × rows 칸으로 고르게 나눈다. 칸마다 쪽을 통째로 복사하고 보이는 영역(CropBox)만 그 칸으로 줄인다.
+    글·주석·링크가 그대로 남는다. 칸 차례는 보이는 화면 기준 왼쪽 위 → 오른쪽 → 다음 줄.
+    돌려주는 값은 새 쪽마다 원래 쪽 번호(되돌리기·썸네일용)."""
+    if xs is None and ys is None:
+        cols, rows = int(cols), int(rows)
+        if not (1 <= cols <= 10 and 1 <= rows <= 10) or cols * rows == 1:
+            raise ValueError("가로·세로 칸 수는 1~10 이고, 둘 다 1 이면 나눌 게 없습니다")
+        xs = [c / cols for c in range(1, cols)]
+        ys = [r / rows for r in range(1, rows)]
+    xs = sorted({float(x) for x in xs or ()})
+    ys = sorted({float(y) for y in ys or ()})
+    if not (xs or ys) or len(xs) > 10 or len(ys) > 10 or any(not 0 < t < 1 for t in xs + ys):
+        raise ValueError("분할선은 방향마다 1~10개, 쪽 안쪽(0~1 사이)에 있어야 합니다")
+    xe, ye = [0.0] + xs + [1.0], [0.0] + ys + [1.0]
     targets = sorted({p for p in pages if 0 <= p < doc.page_count})
     doc.snapshot()
     mapping = []
@@ -151,13 +162,15 @@ def split_grid(doc: Document, pages: Iterable[int], cols: int = 2, rows: int = 1
         f = doc.fitz
         for src in range(f.page_count):
             mapping.append(src)
-        for pno in reversed(targets):   # 뒤에서부터 끼워 앞 번호가 밀리지 않게
+        for n, pno in enumerate(reversed(targets)):   # 뒤에서부터 끼워 앞 번호가 밀리지 않게
+            if progress:
+                progress(n, len(targets), "분할 중")
             page = f[pno]
             vis = page.rect
             cb = page.cropbox
-            w, h = vis.width / cols, vis.height / rows
-            cells = [fitz.Rect(vis.x0 + c * w, vis.y0 + r * h, vis.x0 + (c + 1) * w, vis.y0 + (r + 1) * h)
-                     for r in range(rows) for c in range(cols)]
+            w, h = vis.width, vis.height
+            cells = [fitz.Rect(vis.x0 + xe[c] * w, vis.y0 + ye[r] * h, vis.x0 + xe[c + 1] * w, vis.y0 + ye[r + 1] * h)
+                     for r in range(len(ye) - 1) for c in range(len(xe) - 1)]
             dm = page.derotation_matrix
             boxes = []
             for cell in cells:   # 보이는 좌표 → 회전 전 좌표(CropBox 원점 기준) → MediaBox 기준

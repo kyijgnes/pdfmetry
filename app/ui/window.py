@@ -1018,10 +1018,8 @@ class MainWindow(QMainWindow):
             elif key == "reverse":
                 rev = list(range(d.page_count - 1, -1, -1)); P.reorder(d, rev); t.changed(None, structural=True, mapping=rev)
             elif key == "split_page":
-                dlg = D.SplitGridDialog(self, d.page_count, cur, pages)
-                if dlg.exec():
-                    vals = dlg.values(); m = P.split_grid(d, vals["pages"], vals["cols"], vals["rows"])
-                    t.changed(None, structural=True, mapping=m); self.say(f"쪽 {len(vals['pages'])}장을 나눠 모두 {d.page_count}쪽이 됐습니다")
+                from .dlg_splitpage import run_split_page
+                run_split_page(self, t, pages)
             elif key == "split": DS.run_split(self, t)
         except ValueError as e:
             QMessageBox.warning(self, "페이지", str(e))
