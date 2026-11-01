@@ -24,18 +24,21 @@ def DECO_MENU(prefix: str) -> list:
     return [(prefix, "추가"), (f"{prefix}_template", "템플릿에서 추가"), MENU_SEP,
             (f"{prefix}_update", "업데이트"), (f"{prefix}_remove", "삭제")]
 
+EDIT_TARGETS = (("all", "모두"), ("text", "텍스트"), ("image", "이미지"), ("link", "링크"))
+EDIT_MENU = [(f"edit_target_{k}", lbl) for k, lbl in EDIT_TARGETS]
+
 TABS: list[tuple[str, str, list]] = [
     ("home", "홈", [
         ("zoomout", "zoomout", "", "action", None), ("zoomin", "zoomin", "", "action", None), SEP,
         ("hand", "hand", "", "tool", None), ("select", "select", "", "tool", None), SEP,
-        ("edit_all", "edit", "모두 편집", "toggle", None), ("addtext", "addtext", "텍스트 추가", "tool", None), SEP,
+        ("edit_all", "edit", "모두 편집", "toggle", EDIT_MENU), ("addtext", "addtext", "텍스트 추가", "tool", None), SEP,
         ("ocr", "ocr", "OCR", "action", None), ("crop", "crop", "자르기", "tool", None), SEP,
         ("search", "search", "검색", "action", None),
         ("home_more", "more", "더보기", "menu", [("snapshot", "스크린샷"), ("m_distance", "측정: 거리"), ("print", "인쇄"),
                                                  ("properties", "파일 속성")]),
     ]),
     ("edit", "편집", [
-        ("edit_all", "edit", "모두 편집", "toggle", None), ("addtext", "addtext", "텍스트 추가", "tool", None),
+        ("edit_all", "edit", "모두 편집", "toggle", EDIT_MENU), ("addtext", "addtext", "텍스트 추가", "tool", None),
         ("addimage", "addimage", "이미지 추가", "tool", None),
         ("link", "link", "링크 추가", "tool", None), SEP,
         ("watermark", "watermark", "워터마크", "action", DECO_MENU("watermark")),
@@ -200,6 +203,7 @@ class Ribbon(QWidget):
         shade.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True); lay.addWidget(shade)
         self._widths: dict[str, tuple[int, int, list[QToolButton]]] = {}
         self.current_tab = "home"
+        self.set_edit_target("all")
         self.set_tab("home")
 
     # 창이 좁으면 단추 이름을 접고(아이콘만) 넓으면 편다. 이름을 늘 다 보이면 창을 1300px 아래로 못 줄였다.
@@ -258,9 +262,10 @@ class Ribbon(QWidget):
                 m = QMenu(b)
                 self._fill_menu(m, menu_items, b)
                 b.setMenu(m)
-                b.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup if kind == "tool" else QToolButton.ToolButtonPopupMode.InstantPopup)
+                split = kind == "tool" or key == "edit_all"
+                b.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup if split else QToolButton.ToolButtonPopupMode.InstantPopup)
                 # 화살표 자리를 QSS 가 단추 모양마다 맞춘다(split: 눌러 쓰고 옆 화살표로 고름, drop: 눌러서 메뉴)
-                b.setProperty("split" if kind == "tool" else "drop", True)
+                b.setProperty("split" if split else "drop", True)
             if kind == "tool":
                 b.setProperty("toolkey", menu_items[0][0] if menu_items else key)
                 b.clicked.connect(lambda checked, btn=b: self._tool_clicked(btn, checked))
@@ -308,7 +313,11 @@ class Ribbon(QWidget):
             elif len(it) == 3:
                 self._fill_menu(m.addMenu(it[1]), it[2], btn)
             else:
-                m.addAction(it[1], lambda k=it[0]: self._menu_pick(k, btn))
+                if it[0].startswith("edit_target_"):
+                    a = m.addAction(it[1], lambda k=it[0]: self._menu_pick(k, btn))
+                    a.setCheckable(True); a.setData(it[0][len("edit_target_"):])
+                else:
+                    m.addAction(it[1], lambda k=it[0]: self._menu_pick(k, btn))
 
     def _menu_pick(self, key: str, btn: QToolButton):
         if key in TOOL_KEYS and btn.property("kind") == "tool":
@@ -345,6 +354,17 @@ class Ribbon(QWidget):
     def set_toggle(self, key: str, on: bool):
         for b in self.buttons.get(key, []):
             b.blockSignals(True); b.setChecked(on); b.blockSignals(False)
+
+    def set_edit_target(self, target: str):
+        """「편집」 분할 단추: 글자를 대상 이름으로, 메뉴 체크를 대상에 맞춘다."""
+        name = dict(EDIT_TARGETS).get(target, "모두")
+        for b in self.buttons.get("edit_all", []):
+            b.setText(f"{name} 편집")
+            m = b.menu()
+            for a in (m.actions() if m else []):
+                a.setChecked(a.data() == target)
+        if self._widths:
+            self._measure()
 
     def set_enabled_all(self, on: bool):
         for btns in self.buttons.values():

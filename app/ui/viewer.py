@@ -188,6 +188,10 @@ class PageView(QGraphicsView):
         self.items: list[PageItem] = []
         self.tool = "hand"
         self.edit_mode = False      # 텍스트·이미지 편집(원문)
+        self.edit_target = "all"    # 편집 대상: all · text · image · link
+        self._tool_before_edit = "hand"   # 편집을 끄면 돌아갈 도구
+        self._img_hover = None      # 이미지 추가 미리보기: (쪽, 장면 사각형)
+        self._img_pm: tuple[str, QPixmap | None] = ("", None)
         self.form_mode = False      # 양식 칸 만들기·편집
         self.read_mode = False
         self.show_annots = True
@@ -629,6 +633,7 @@ class PageView(QGraphicsView):
     # ── 도구 ──────────────────────────────────────────────────
     def set_tool(self, tool: str):
         self.tool = tool
+        self._img_hover = None
         self._poly.clear()
         self._ink.clear()
         self._drag_rect = None
@@ -647,14 +652,37 @@ class PageView(QGraphicsView):
         self.viewport().update()
         self.toolChanged.emit(tool)
 
-    def set_edit_mode(self, on: bool):
-        self.edit_mode = on
+    def set_edit_mode(self, on: bool, target: str | None = None):
+        if target:
+            self.edit_target = target
         if on:
+            self._remember_tool_before_edit()
+            self.edit_mode = True
             self.form_mode = False
             self.set_tool("edit")
         else:
-            self.set_tool("hand")
+            self.edit_mode = False
+            self.set_tool(self._tool_before_edit)
+        self._hover_block = None
         self.clear_selection()
+
+    def _remember_tool_before_edit(self):
+        if not self.edit_mode:
+            self._tool_before_edit = self.tool if self.tool not in ("edit", "form") else "hand"
+
+    def begin_edit_tool(self, kinds: tuple[str, ...]):
+        """텍스트·이미지 추가가 편집을 켠다. 지금 대상이 kinds 에 없으면 「모두」로 맞춘다."""
+        self._remember_tool_before_edit()
+        self.edit_mode = True
+        self.form_mode = False
+        if self.edit_target not in kinds:
+            self.edit_target = "all"
+        self.clear_selection()
+
+    def _edit_blocks(self, i: int) -> list[dict]:
+        """편집 대상에 맞는 덩어리만: 텍스트는 글 덩어리, 이미지는 그림 자리, 링크는 없음."""
+        want = {"text": (0,), "image": (1,), "all": (0, 1)}.get(self.edit_target, ())
+        return [b for b in self.blocks(i) if b.get("type") in want]
 
     def set_form_mode(self, on: bool):
         self.form_mode = on
@@ -804,12 +832,20 @@ class PageView(QGraphicsView):
             hb = None
             if i >= 0:
                 pt = self.to_page(i, sp)
-                for b in self.blocks(i):
+                for b in self._edit_blocks(i):
                     if fitz.Rect(b["bbox"]).contains(pt):
                         hb = (i, fitz.Rect(b["bbox"]))
                         break
             if hb != self._hover_block:
                 self._hover_block = hb
+                self.viewport().update()
+        if self.tool == "addimage":
+            i = self.page_at(sp)
+            hv = (i, self._image_scene_rect(i, sp)) if i >= 0 else None
+            if hv is None or hv[1] is None:
+                hv = None
+            if hv != self._img_hover:
+                self._img_hover = hv
                 self.viewport().update()
         # 손 도구에서 링크 위면 손가락
         if self.tool == "hand":
@@ -864,6 +900,11 @@ class PageView(QGraphicsView):
                 # 누른 자리에 바로 치는 글 상자. 끌어 그렸으면 그 왼쪽 위에서 그린 너비로
                 self.requestDialog.emit("addtext", {"page": i, "scene_pt": r.topLeft(),
                                                     "width": None if small else r.width() / self.zoom})
+            elif t == "addimage" and small:
+                # 한 번 누르면 미리보기 자리(원래 크기, 쪽보다 크면 줄임)에 바로 넣는다
+                ir = self._image_scene_rect(i, sp)
+                if ir is not None:
+                    self.requestDialog.emit("addimage", {"page": i, "rect": self._scene_rect_to_page(i, ir)})
             elif not small:
                 self._shape_done(i, pr, r)
             self.viewport().update()
@@ -996,7 +1037,7 @@ class PageView(QGraphicsView):
 
     def _select_block_or_image(self, i: int, sp: QPointF) -> bool:
         pt = self.to_page(i, sp)
-        for b in self.blocks(i):
+        for b in self._edit_blocks(i):
             if fitz.Rect(b["bbox"]).contains(pt):
                 if b.get("type") == 0:
                     text = "\n".join("".join(s["text"] for s in l["spans"]) for l in b["lines"])
@@ -1380,11 +1421,22 @@ class PageView(QGraphicsView):
         if self.edit_mode:
             p.setPen(QPen(QColor(120, 120, 220, 160), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            for b in self.blocks(i):
+            for b in self._edit_blocks(i):
                 p.drawRect(self.from_page_rect(i, fitz.Rect(b["bbox"])))
             if self._hover_block and self._hover_block[0] == i:
                 p.setPen(QPen(accent, 1.5))
                 p.drawRect(self.from_page_rect(i, self._hover_block[1]))
+        if self.tool == "addimage" and self._img_hover and self._img_hover[0] == i:
+            pm = self.image_pixmap()
+            if pm is not None:
+                p.save()
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                p.setOpacity(0.6)
+                p.drawPixmap(self._img_hover[1], pm, QRectF(pm.rect()))
+                p.restore()
+                p.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(self._img_hover[1])
         # 링크: MuPDF 는 링크 테두리를 그리지 않아 여기서 그린다. 고를 수 있을 때는 안 보이는 링크 자리도 점선으로
         if self.show_annots:
             self._paint_links(p, i)
@@ -1451,6 +1503,28 @@ class PageView(QGraphicsView):
                 p.setBrush(Qt.GlobalColor.white)
                 p.drawEllipse(q, 3, 3)
         p.restore()
+
+    def image_pixmap(self) -> QPixmap | None:
+        """이미지 추가로 고른 파일의 그림(미리보기용, 파일이 바뀌어야 다시 읽는다)."""
+        path = self.props.get("image_path") or ""
+        if self._img_pm[0] != path:
+            pm = QPixmap(path) if path else None
+            self._img_pm = (path, pm if pm is not None and not pm.isNull() else None)
+        return self._img_pm[1]
+
+    def _image_scene_rect(self, i: int, sp: QPointF) -> QRectF | None:
+        """누른 자리가 가운데인 그림 자리. 원래 크기는 픽셀 x 0.75 pt(96dpi), 쪽보다 크면 비율대로 줄이고 쪽 안으로 밀어 넣는다."""
+        pm = self.image_pixmap()
+        if pm is None or i < 0:
+            return None
+        it = self.items[i]
+        page = it.mapRectToScene(it.page_rect())
+        w, h = pm.width() * 0.75 * self.zoom, pm.height() * 0.75 * self.zoom
+        f = min(1.0, page.width() / w, page.height() / h)
+        w, h = w * f, h * f
+        x = min(max(sp.x() - w / 2, page.left()), page.right() - w)
+        y = min(max(sp.y() - h / 2, page.top()), page.bottom() - h)
+        return QRectF(x, y, w, h)
 
     def _paint_links(self, p: QPainter, i: int):
         editable = self._links_editable()

@@ -15,7 +15,7 @@ import webbrowser
 
 import fitz
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QFont, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtPrintSupport import QPrinterInfo
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
                                QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter, QStackedWidget,
@@ -213,6 +213,7 @@ class MainWindow(QMainWindow):
         self.resize(1360, 820)
         self.setWindowIcon(QIcon(ICON) if os.path.isfile(ICON) else icons.icon("thumbs", 32, theme.ACCENT))
         self.tabs: list[DocTab] = []
+        self._drop_image = ""   # 끌어 놓은 이미지 파일(이미지 추가가 파일 고르기 없이 받는다)
         self._receiver = None   # 다른 데서 켠 PDF메트리가 파일을 넘겨 오는 곳(single.Receiver)
         self._closing = False   # 창을 닫는 중(탭마다 설정을 쓰지 않고 끝에 한 번)
         self._build()
@@ -416,7 +417,8 @@ class MainWindow(QMainWindow):
         self.rightbtns["props"].setChecked(t.props.isVisible())
         self._sync_status(t)
         self.ribbon.reflect_tool(t.viewer.tool)
-        self.ribbon.set_toggle("edit_all", t.viewer.edit_mode); self.ribbon.set_toggle("form_edit", t.viewer.form_mode)
+        self.ribbon.set_toggle("edit_all", t.viewer.edit_mode); self.ribbon.set_edit_target(t.viewer.edit_target)
+        self.ribbon.set_toggle("form_edit", t.viewer.form_mode)
         self.ribbon.set_toggle("show_annots", t.viewer.show_annots)
         self.ribbon.set_enabled("undo", t.doc.can_undo()); self.ribbon.set_enabled("redo", t.doc.can_redo())
         self.sync_thumb_zoom(*t.organize.can_zoom())
@@ -618,11 +620,23 @@ class MainWindow(QMainWindow):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
 
+    IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp")
+
     def dropEvent(self, e):
-        for u in e.mimeData().urls():
-            p = u.toLocalFile()
-            if os.path.isfile(p):
-                self.open_path(p)
+        paths = [u.toLocalFile() for u in e.mimeData().urls() if os.path.isfile(u.toLocalFile())]
+        images = [p for p in paths if p.lower().endswith(self.IMAGE_EXTS)]
+        if self.cur() and len(paths) == 1 and images:
+            # 열린 문서에 이미지 파일을 놓으면 어떻게 쓸지 묻는다
+            m = QMenu(self)
+            add = m.addAction("이미지로 추가"); new = m.addAction("새 PDF 파일로 만들기")
+            pick = m.exec(self.mapToGlobal(e.position().toPoint()))
+            if pick is add:
+                self._drop_image = images[0]; self.on_tool("addimage")
+            elif pick is new:
+                self.create_from_paths(images)
+            return
+        for p in paths:
+            self.open_path(p)
 
     def mark_modified(self):
         t = self.cur()
@@ -743,7 +757,7 @@ class MainWindow(QMainWindow):
         if key != "form" and t.viewer.form_mode:
             t.viewer.set_form_mode(False); self.ribbon.set_toggle("form_edit", False)
         if key != "edit" and key != "home" and t.viewer.edit_mode:
-            t.viewer.set_edit_mode(False); self.ribbon.set_toggle("edit_all", False)
+            t.viewer.set_edit_mode(False); self.ribbon.set_toggle("edit_all", False); self.ribbon.reflect_tool(t.viewer.tool)
 
     def on_tool(self, key: str):
         t = self.cur()
@@ -760,8 +774,14 @@ class MainWindow(QMainWindow):
                 return
             t.viewer.props["stamp_image"] = p; key = "stamp"
         elif key == "addimage":
-            p, _ = QFileDialog.getOpenFileName(self, "넣을 이미지", "", "이미지 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.webp)")
+            p, self._drop_image = self._drop_image, ""
             if not p:
+                p, _ = QFileDialog.getOpenFileName(self, "넣을 이미지", "", "이미지 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.webp)")
+            if not p:
+                return
+            rd = QImageReader(p)
+            if not rd.canRead() or not rd.size().isValid():
+                QMessageBox.warning(self, "이미지 추가", "읽을 수 없는 사진 파일입니다.")
                 return
             t.viewer.props["image_path"] = p
         elif key == "signature":
@@ -777,16 +797,34 @@ class MainWindow(QMainWindow):
         if key in ("hand", "select") and t.viewer.form_mode:
             t.viewer.set_form_mode(False); self.ribbon.set_toggle("form_edit", False)
         if key in ("hand", "select") and t.viewer.edit_mode:
-            t.viewer.set_edit_mode(False); self.ribbon.set_toggle("edit_all", False)
+            t.viewer.set_edit_mode(False); self.ribbon.set_toggle("edit_all", False); self.ribbon.reflect_tool(t.viewer.tool)
+        if key in ("addtext", "addimage"):
+            t.viewer.begin_edit_tool(("text", "all") if key == "addtext" else ("image", "all"))
+            self.ribbon.set_toggle("edit_all", True); self.ribbon.set_edit_target(t.viewer.edit_target)
         t.viewer.set_tool(key)
         self.ribbon.reflect_tool(key)
         self._sync_status(t)
         if key in ("hand", "select"):
             self.say("")
+        elif key == "addimage":
+            self.say("이미지 추가: 넣을 자리를 누르세요. 끌면 그 크기로 넣습니다. Esc 로 그만둡니다.")
         elif key in ("note", "caret", "attach", "addtext"):   # 한 번 누르면 바로 넣는 도구
             self.say(f"{LABELS[key]}: 넣을 자리를 누르세요. Esc 로 그만둡니다.")
         elif key in LABELS and key not in ("form", "edit"):
             self.say(f"{LABELS[key]}: 문서 위에서 끌어 그리세요. Esc 로 그만둡니다.")
+
+    EDIT_HINTS = {"all": "글자 덩어리를 두 번 눌러 고치고, 그림은 눌러 고른 뒤 Delete 로 지웁니다.",
+                  "text": "글자 덩어리를 두 번 눌러 고칩니다.",
+                  "image": "그림을 눌러 고른 뒤 Delete 로 지웁니다.",
+                  "link": "링크를 눌러 고르고, 두 번 눌러 고칩니다."}
+
+    def _set_edit(self, t, on: bool, target: str | None = None):
+        """편집 켜기·끄기와 대상 고르기. 대상을 고르면 편집이 켜진다."""
+        v = t.viewer
+        v.set_edit_mode(on, target)
+        self.ribbon.set_toggle("edit_all", on); self.ribbon.set_edit_target(v.edit_target)
+        self.ribbon.reflect_tool(v.tool)
+        self.say(self.EDIT_HINTS.get(v.edit_target, "") if on else "")
 
     def on_toggle(self, key: str, on: bool):
         t = self.cur()
@@ -795,8 +833,7 @@ class MainWindow(QMainWindow):
         if not t:
             return
         if key == "edit_all":
-            t.viewer.set_edit_mode(on); self.ribbon.reflect_tool(t.viewer.tool)
-            self.say("글자 덩어리를 두 번 눌러 고치고, 그림은 눌러 고른 뒤 Delete 로 지웁니다." if on else "")
+            self._set_edit(t, on)
         elif key == "form_edit":
             t.viewer.set_form_mode(on); self.ribbon.reflect_tool(t.viewer.tool)
         elif key == "show_annots":
@@ -889,7 +926,8 @@ class MainWindow(QMainWindow):
                 if not t.bookmarks.tree.currentItem(): self.say("이름을 바꿀 북마크를 먼저 고르세요"); return
                 if not (t.side.isVisible() and t.side_key == "bookmark"): t.show_side("bookmark")
                 t.bookmarks.rename_current()
-            elif key == "edit_all_toggle": on = not v.edit_mode; v.set_edit_mode(on); self.ribbon.set_toggle("edit_all", on)
+            elif key == "edit_all_toggle": self._set_edit(t, not v.edit_mode)
+            elif key.startswith("edit_target_"): self._set_edit(t, True, key[len("edit_target_"):])
             elif key == "tool_hand": self.on_tool("hand")
             elif key == "tool_select": self.on_tool("select")
             elif key == "snapshot_tool": self.on_tool("snapshot")
@@ -1337,7 +1375,9 @@ class MainWindow(QMainWindow):
                                "문서·이미지 (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif *.webp *.docx *.doc *.xlsx *.xls *.pptx *.ppt *.hwp *.hwpx *.txt *.html *.htm *.rtf *.epub *.xps);;모든 파일 (*)")
         if not dlg.exec() or not dlg.paths():
             return
-        paths = dlg.paths()
+        self.create_from_paths(dlg.paths())
+
+    def create_from_paths(self, paths: list[str]):
         out, _ = QFileDialog.getSaveFileName(self, "만들 PDF", os.path.splitext(paths[0])[0] + ".pdf", PDF_FILTER)
         if not out:
             return
