@@ -1,6 +1,7 @@
 """리본: 윗줄(파일 · 빠른 단추 · 탭 · 검색칸) + 아랫줄(그 탭의 단추들, 가운데 정렬).
 
-단추 정의는 TABS 자료로. kind: action(누르면 한 번) · tool(켜짐 유지, 뷰어 도구) · toggle(켜고 끄기) · menu(메뉴).
+단추 정의는 TABS 자료로. kind: action(누르면 한 번) · tool(켜짐 유지, 뷰어 도구) · toggle(켜고 끄기) · menu(메뉴)
+· range(구성 탭 쪽 범위 콤보).
 """
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from PySide6.QtGui import QAction, QFont, QFontMetrics
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QSizePolicy,
                                QSpinBox, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
+from ..engine import pages as P
 from . import icons, theme
 
 # (key, icon, label, kind, menu_items)  menu_items: [(key, label)] 또는 None. label 이 "|" 면 구분선.
@@ -75,7 +77,7 @@ TABS: list[tuple[str, str, list]] = [
     ("page", "구성", [
         ("thumb_out", "zoomout", "", "action", None), ("thumb_in", "zoomin", "", "action", None), SEP,
         ("rotate_left", "rotateleft", "", "action", None), ("rotate_right", "rotateright", "", "action", None),
-        ("delete_pages", "delete", "", "action", None), SEP,
+        ("delete_pages", "delete", "", "action", None), ("page_range", "", "", "range", None), SEP,
         ("extract", "extract", "추출", "action", None),
         ("split", "split", "분할", "action", None),
         ("insert", "insert", "삽입", "menu", [("insert_blank", "빈 페이지"), ("insert_pdf", "PDF에서"), ("insert_images", "이미지에서")]), SEP,
@@ -141,6 +143,8 @@ class Ribbon(QWidget):
     tabChanged = Signal(str)
     searchRequested = Signal(str)
     fileMenu = Signal()
+    rangePicked = Signal(str)     # 구성 탭 범위 콤보: all·even·odd 또는 넣은 범위 글
+    RANGE_ITEMS = (("짝수 페이지", "even"), ("홀수 페이지", "odd"), ("모든 페이지", "all"))
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -231,6 +235,9 @@ class Ribbon(QWidget):
                 f = QFrame(); f.setObjectName("vsep"); f.setFrameShape(QFrame.Shape.VLine); f.setFixedHeight(18); hl.addWidget(f)
                 continue
             key, icon, label, kind, menu_items = it
+            if kind == "range":
+                hl.addWidget(self._range_combo())
+                continue
             b = QToolButton(); b.setObjectName("rb"); b.setIcon(icons.icon(icon, 16)); b.setIconSize(icons.icon_size(16))
             b.setToolTip(LABELS.get(key, label))
             if label:
@@ -257,6 +264,34 @@ class Ribbon(QWidget):
             hl.addWidget(b)
         hl.addStretch(1)
         return w
+
+    def _range_combo(self) -> QComboBox:
+        c = QComboBox(); c.setEditable(True); c.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        c.lineEdit().setPlaceholderText("페이지 번호 입력"); c.setFixedWidth(140)
+        for text, how in self.RANGE_ITEMS:
+            c.addItem(text, how)
+        c.setCurrentIndex(-1); c.setEditText("")
+        c.activated.connect(lambda k: self.rangePicked.emit(c.itemData(k)))
+        c.lineEdit().returnPressed.connect(self._range_entered)
+        self.range_combo = c
+        return c
+
+    def _range_entered(self):
+        text = self.range_combo.currentText().strip()
+        how = next((h for t, h in self.RANGE_ITEMS if t == text), None)
+        if how is None:   # 항목 글과 같으면 activated 가 이미 보냈다
+            self.rangePicked.emit(text)
+
+    def show_range(self, pages: list[int], total: int, labels: list[str]):
+        """썸네일 선택을 콤보에 비춘다: 짝수·홀수·모든 쪽과 같으면 그 항목, 아니면 레이블로 쓴 범위 글."""
+        c = self.range_combo
+        c.blockSignals(True)
+        every = list(range(total))
+        k = next((i for i in (2, 0, 1) if pages and pages == P.subset(every, self.RANGE_ITEMS[i][1])), -1)
+        c.setCurrentIndex(k)
+        if k < 0:
+            c.setEditText(P.format_range(pages, labels))
+        c.blockSignals(False)
 
     def _menu_pick(self, key: str, btn: QToolButton):
         if key in TOOL_KEYS and btn.property("kind") == "tool":
@@ -298,6 +333,7 @@ class Ribbon(QWidget):
         for btns in self.buttons.values():
             for b in btns:
                 b.setEnabled(on)
+        self.range_combo.setEnabled(on)
         for k, b in self.quick.items():
             if k != "mail":
                 b.setEnabled(on)

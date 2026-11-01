@@ -8,15 +8,23 @@ from ..engine.document import Document
 from .sidebar import LazyThumbs, PageGrid, fill_grid, kept_thumbs
 
 
+# 썸네일 비율(%) 열한 단계, 처음 20%. 100% 는 A4 폭(210mm)을 96dpi 로 그린 794px
+ZOOM_STEPS = (10, 12.5, 15, 20, 25, 30, 40, 50, 65, 80, 100)
+FULL_W = 794
+
+
 class OrganizeView(QWidget):
     reordered = Signal(list)
     pagesAction = Signal(str, list)
     openPage = Signal(int)
+    selectionChanged = Signal(list)   # 고른 쪽(0부터)
+    zoomChanged = Signal(bool, bool)  # 더 줄일 수 있나, 더 키울 수 있나
 
     def __init__(self, doc: Document, parent=None):
         super().__init__(parent)
         self.doc = doc
-        self.thumb_w = 150
+        self.step = ZOOM_STEPS.index(20)
+        self.thumb_w = self._width()
         lay = QVBoxLayout(self); lay.setContentsMargins(16, 16, 16, 16)
         self.list = PageGrid(14)
         self.list.setStyleSheet("QListWidget{background: transparent;}")
@@ -24,23 +32,46 @@ class OrganizeView(QWidget):
         self.list.itemDoubleClicked.connect(lambda it: self.openPage.emit(it.data(Qt.ItemDataRole.UserRole)))
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._menu)
+        self.list.itemSelectionChanged.connect(lambda: self.selectionChanged.emit(self.selected_pages()))
         lay.addWidget(self.list)
         self.thumbs = LazyThumbs(self.list, doc)
         self.reload()
 
-    def set_width(self, w: int):
-        self.thumb_w = max(80, min(400, w))
-        self.reload()
+    def _width(self) -> int:
+        return round(FULL_W * ZOOM_STEPS[self.step] / 100)
+
+    def zoom(self, step: int):
+        """다음·앞 단계로. 양 끝에서는 그대로이고 zoomChanged 로 그쪽 단추를 끈다."""
+        k = max(0, min(len(ZOOM_STEPS) - 1, self.step + step))
+        if k != self.step:
+            self.step = k
+            self.thumb_w = self._width()
+            self.reload()
+        self.zoomChanged.emit(*self.can_zoom())
+
+    def can_zoom(self) -> tuple[bool, bool]:
+        return self.step > 0, self.step < len(ZOOM_STEPS) - 1
+
+    def percent(self) -> float:
+        return ZOOM_STEPS[self.step]
 
     def selected_pages(self) -> list[int]:
         return sorted(it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems())
 
     def select_pages(self, pages: list[int]):
+        want = set(pages)
+        self.list.blockSignals(True)   # 한 장씩 고를 때마다 selectionChanged 가 나가지 않게, 끝에 한 번
         self.list.clearSelection()
+        first = None
         for k in range(self.list.count()):
             it = self.list.item(k)
-            if it.data(Qt.ItemDataRole.UserRole) in pages:
+            if it.data(Qt.ItemDataRole.UserRole) in want:
                 it.setSelected(True)
+                first = first or it
+        self.list.blockSignals(False)
+        if first:
+            self.list.scrollToItem(first)
+        self.selectionChanged.emit(self.selected_pages())
 
     def reload(self, mapping: list[int | None] | None = None, dirty=()):
         keep = kept_thumbs(self.thumbs, mapping, dirty)
