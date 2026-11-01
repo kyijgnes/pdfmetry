@@ -339,48 +339,6 @@ class InsertBlankDialog(FormDialog):
         return {"at": at, "count": self.count.value(), "width": w, "height": h}
 
 
-class InsertPdfDialog(FormDialog):
-    def __init__(self, parent, total: int, current: int, path: str, src_total: int):
-        super().__init__("PDF 에서 끼우기", parent)
-        self.form.addRow("파일", QLabel(os.path.basename(path)))
-        self.rng = self.add("가져올 쪽", QLineEdit()); self.rng.setPlaceholderText(f"비우면 전부 (1-{src_total})")
-        self.where = self.add("자리", QComboBox()); self.where.addItems(["지금 쪽 앞", "지금 쪽 뒤", "맨 앞", "맨 뒤"]); self.where.setCurrentIndex(1)
-        self.total, self.current, self.src_total = total, current, src_total
-
-    def values(self) -> dict:
-        at = {0: self.current, 1: self.current + 1, 2: 0, 3: self.total}[self.where.currentIndex()]
-        pages = P.parse_range(self.rng.text(), self.src_total) if self.rng.text().strip() else None
-        return {"at": at, "pages": pages}
-
-
-class SplitDialog(FormDialog):
-    def __init__(self, parent, total: int, default_dir: str):
-        super().__init__("분할", parent, "나누기")
-        self.mode = self.add("방식", QComboBox())
-        self.mode.addItems(["몇 쪽씩", "몇 덩어리로", "쪽 범위마다", "1단계 북마크마다", "한 쪽씩"])
-        self.value = self.add("값", QSpinBox()); self.value.setRange(1, max(1, total)); self.value.setValue(1)
-        self.ranges = QPlainTextEdit(); self.ranges.setPlaceholderText("한 줄에 범위 하나\n1-3\n4-10"); self.ranges.setMaximumHeight(80)
-        self.form.addRow("범위", self.ranges)
-        row = QWidget(); hl = QHBoxLayout(row); hl.setContentsMargins(0, 0, 0, 0)
-        self.dir = QLineEdit(default_dir); b = QPushButton("폴더"); b.clicked.connect(self._pick)
-        hl.addWidget(self.dir); hl.addWidget(b); self.add("저장 폴더", row)
-        self.mode.currentIndexChanged.connect(self._sync); self._sync()
-
-    def _sync(self):
-        k = self.mode.currentIndex()
-        self.value.setEnabled(k in (0, 1)); self.ranges.setEnabled(k == 2)
-
-    def _pick(self):
-        d = QFileDialog.getExistingDirectory(self, "저장 폴더", self.dir.text())
-        if d:
-            self.dir.setText(d)
-
-    def values(self) -> dict:
-        mode = ["count", "parts", "ranges", "bookmarks", "each"][self.mode.currentIndex()]
-        return {"mode": mode, "value": self.value.value(), "ranges": self.ranges.toPlainText().splitlines(),
-                "out_dir": self.dir.text()}
-
-
 class CropDialog(FormDialog):
     def __init__(self, parent, total: int, current: int, rect: fitz.Rect | None, page_rect: fitz.Rect):
         super().__init__("자르기", parent)
@@ -442,19 +400,6 @@ class ResizeDialog(FormDialog):
         if self.orient.currentIndex() == 1:
             w, h = h, w
         return {"width": w, "height": h, "fit": self.fit.isChecked(), "pages": self.pages.pages()}
-
-
-class PageLabelDialog(FormDialog):
-    def __init__(self, parent, total: int, current: int):
-        super().__init__("페이지 레이블", parent)
-        self.start = self.add("시작 쪽", QSpinBox()); self.start.setRange(1, total); self.start.setValue(current + 1)
-        self.style = self.add("번호 모양", QComboBox()); self.style.addItems(["1, 2, 3", "i, ii, iii", "I, II, III", "a, b, c", "A, B, C", "없음(접두어만)"])
-        self.prefix = self.add("접두어", QLineEdit())
-        self.first = self.add("첫 번호", QSpinBox()); self.first.setRange(1, 99999); self.first.setValue(1)
-
-    def values(self) -> dict:
-        return {"start_page": self.start.value() - 1, "style": ["D", "r", "R", "a", "A", ""][self.style.currentIndex()],
-                "prefix": self.prefix.text(), "first": self.first.value()}
 
 
 class PageBoxDialog(FormDialog):
