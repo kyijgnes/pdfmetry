@@ -87,6 +87,16 @@ def main() -> int:
         C.to_text(t.doc.fitz, os.path.join(out, "a.txt")); C.to_word(t.doc.fitz, os.path.join(out, "a.docx"))
         T.watermark(t.doc.fitz, text="시험"); T.header_footer(t.doc.fitz, footer_center="{page}/{total}")
     step("engine conv", conv)
+    def detach_and_back():   # 탭을 새 창으로 떼었다가 원래 창 탭 줄로 되돌린다(같은 문서 그대로)
+        from app.ui import tab_detach
+        w.open_path(pdf2)
+        w2 = tab_detach.move_tab(w.tabs[-1])
+        assert w2 is not w and len(w.tabs) == 1
+        tab_detach.move_tab(w2.tabs[0], w, 0)
+        assert len(w.tabs) == 2 and not w2.isVisible()
+        w.close_tab(0)
+    pdf2 = os.path.join(tempfile.gettempdir(), "smoke_ui_2.pdf"); make_pdf(pdf2)
+    step("tab detach", detach_and_back)
     step("close tab", lambda: (setattr(t.doc, "modified", False), w.close_tab(0)))
     step("start page", lambda: w.start.set_mode("folder"))
     if bad:

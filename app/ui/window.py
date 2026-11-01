@@ -14,8 +14,8 @@ import uuid
 import webbrowser
 
 import fitz
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QFont, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QMouseEvent, QColor, QFont, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtPrintSupport import QPrinterInfo
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
                                QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter, QStackedWidget,
@@ -29,7 +29,7 @@ from . import dlg_organize as O
 from .dlg_deco import run_decorate
 from . import dlg_pagebox as PB
 from . import dlg_split as DS
-from . import icons, theme
+from . import icons, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
 from .organize import OrganizeView
@@ -75,8 +75,33 @@ def save_settings(s: dict):
 
 
 class DocTabBar(QTabBar):
-    """문서 탭 줄. 가운데 단추로 누르면 그 탭을 닫는다."""
+    """문서 탭 줄. 가운데 단추로 누르면 그 탭을 닫는다. 탭을 줄 위아래로 끌어내면 tornOff(그 탭 번호)."""
+    tornOff = Signal(int)
+    TEAR = 24   # 탭 줄 위아래로 이만큼 벗어나면 떼어 낸다
+
+    def __init__(self):
+        super().__init__()
+        self._press = None
+
+    def mousePressEvent(self, e):
+        p = e.position().toPoint()
+        self._press = p if e.button() == Qt.MouseButton.LeftButton and self.tabAt(p) >= 0 else None
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        p = e.position().toPoint()
+        if self._press is not None and e.buttons() & Qt.MouseButton.LeftButton and (p.y() < -self.TEAR or p.y() > self.height() + self.TEAR):
+            # 탭 줄 안 순서 바꾸기를 끝내고(놓은 것으로 쳐서 제자리에 둔다) 끌어 떼기로 넘긴다
+            rel = QMouseEvent(QEvent.Type.MouseButtonRelease, e.position(), e.globalPosition(), Qt.MouseButton.LeftButton,
+                              Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+            super().mouseReleaseEvent(rel)
+            self._press = None
+            self.tornOff.emit(self.currentIndex())
+            return
+        super().mouseMoveEvent(e)
+
     def mouseReleaseEvent(self, e):
+        self._press = None
         if e.button() == Qt.MouseButton.MiddleButton:
             i = self.tabAt(e.position().toPoint())
             if i >= 0:
@@ -120,17 +145,18 @@ class DocTab(QWidget):
         # 신호
         self.thumbs.pageClicked.connect(self.viewer.goto)
         self.thumbs.reordered.connect(self.reorder)
-        self.thumbs.pagesAction.connect(self.win.pages_action)
+        # 탭이 다른 창으로 옮겨 가도 그때의 창(self.win)을 부르게 람다로 잇는다
+        self.thumbs.pagesAction.connect(lambda *a: self.win.pages_action(*a))
         self.organize.reordered.connect(self.reorder)
-        self.organize.pagesAction.connect(self.win.pages_action)
+        self.organize.pagesAction.connect(lambda *a: self.win.pages_action(*a))
         self.organize.openPage.connect(lambda i: (self.win.ribbon.set_tab("home"), self.viewer.goto(i)))
         self.organize.selectionChanged.connect(lambda pg: self.win.cur() is self and self.win.ribbon.show_range(pg, doc.page_count, P.labels(doc)))
-        self.organize.zoomChanged.connect(self.win.sync_thumb_zoom)
+        self.organize.zoomChanged.connect(lambda *a: self.win.sync_thumb_zoom(*a))
         self.bookmarks.gotoPage.connect(self.viewer.goto)
         self.bookmarks.changed.connect(lambda: self.win.mark_modified())
         self.annots.gotoAnnot.connect(lambda pg, r: self.viewer.goto(pg, r.y0))
         self.annots.changed.connect(lambda: self.changed(None))
-        self.annots.importExport.connect(self.win.annots_import_export)
+        self.annots.importExport.connect(lambda *a: self.win.annots_import_export(*a))
         self.attachments.changed.connect(lambda: self.win.mark_modified())
         self.search.hitsChanged.connect(self.show_hits)
         self.search.replaced.connect(lambda pages: self.changed(pages))
@@ -204,9 +230,10 @@ class DocTab(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings: dict | None = None):
+        """settings: 같은 프로그램 안 다른 창과 함께 쓸 설정(탭을 떼어 만든 창). 없으면 파일에서 읽는다."""
         super().__init__()
-        self.settings = load_settings()
+        self.settings = settings if settings is not None else load_settings()
         self.settings.setdefault("recent", []); self.settings.setdefault("favorites", []); self.settings.setdefault("prefs", {})
         self.prefs = self.settings["prefs"]
         self.setWindowTitle(APP_NAME)
@@ -216,10 +243,12 @@ class MainWindow(QMainWindow):
         self._drop_image = ""   # 끌어 놓은 이미지 파일(이미지 추가가 파일 고르기 없이 받는다)
         self._receiver = None   # 다른 데서 켠 PDF메트리가 파일을 넘겨 오는 곳(single.Receiver)
         self._closing = False   # 창을 닫는 중(탭마다 설정을 쓰지 않고 끝에 한 번)
+        self._emptied = False   # 탭을 모두 다른 창으로 옮겨서 닫는 창(창 크기·열린 문서를 기억하지 않는다)
         self._build()
         self.apply_theme()
         self._shortcuts()
         self.show_start()
+        tab_detach.register(self)
 
     def show_initial(self):
         """켤 때 창 크기: 환경 설정 「열 때 창 크기」(마지막으로 닫은 크기 · 화면 가득 · 보통 크기)."""
@@ -255,7 +284,10 @@ class MainWindow(QMainWindow):
                     self.open_path(p)
 
     def open_forwarded(self, paths: list[str]):
-        """다른 데서 켠 PDF메트리가 넘긴 파일을 이 창의 탭으로 연다. 파일이 없으면 창만 앞으로."""
+        """다른 데서 켠 PDF메트리가 넘긴 파일을 마지막으로 쓴 창의 탭으로 연다. 파일이 없으면 창만 앞으로."""
+        w = tab_detach.last_active(self)
+        if w is not self:
+            w.open_forwarded(paths); return
         if self.isMinimized():   # 최대화였으면 최대화로 되돌아온다
             self.setWindowState((self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
         self.raise_(); self.activateWindow()
@@ -273,7 +305,7 @@ class MainWindow(QMainWindow):
         central = QWidget(); central.setObjectName("central"); self.setCentralWidget(central)
         root = QVBoxLayout(central); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
         # 문서 탭 줄
-        tabrow = QWidget(); tabrow.setObjectName("titlebar"); tl = QHBoxLayout(tabrow); tl.setContentsMargins(6, 0, 6, 0); tl.setSpacing(4)
+        tabrow = self.tabrow = QWidget(); tabrow.setObjectName("titlebar"); tl = QHBoxLayout(tabrow); tl.setContentsMargins(6, 0, 6, 0); tl.setSpacing(4)
         home = QToolButton(); home.setObjectName("quick"); home.setIcon(icons.icon("thumbs", 18, theme.ACCENT)); home.setToolTip("시작 화면")
         home.clicked.connect(self.show_start); tl.addWidget(home)
         self.doctabs = DocTabBar(); self.doctabs.setObjectName("doctabs")
@@ -282,6 +314,7 @@ class MainWindow(QMainWindow):
         self.doctabs.setExpanding(False); self.doctabs.setDrawBase(False); self.doctabs.setElideMode(Qt.TextElideMode.ElideMiddle)
         self.doctabs.currentChanged.connect(self._tab_changed); self.doctabs.tabCloseRequested.connect(self.close_tab)
         self.doctabs.tabMoved.connect(self._tab_moved)
+        self.doctabs.tornOff.connect(lambda i: tab_detach.start_drag(self, i))
         tl.addWidget(self.doctabs)
         addb = QToolButton(); addb.setObjectName("quick"); addb.setIcon(icons.icon("add", 16)); addb.setToolTip("열기"); addb.clicked.connect(self.open_dialog)
         tl.addWidget(addb); tl.addStretch()
@@ -447,16 +480,68 @@ class MainWindow(QMainWindow):
     def _tab_moved(self, a: int, b: int):
         self.tabs.insert(b, self.tabs.pop(a))
 
+    def _wire(self, t: DocTab):
+        """탭 뷰어 신호를 이 창에 잇는다. 다른 창으로 옮길 때 끊으려고 연결을 t._conns 에 둔다."""
+        v = t.viewer
+        t._conns = [
+            v.pageChanged.connect(lambda i: self._sync_status(t)),
+            v.zoomChanged.connect(lambda z: (self._sync_status(t), self._remember_zoom(t))),
+            v.status.connect(self.say),
+            v.requestDialog.connect(lambda kind, data, tab=t: self.on_request(tab, kind, data)),
+            v.toolDone.connect(self._tool_done),
+            v.docChanged.connect(lambda: (self.ribbon.set_enabled("undo", t.doc.can_undo()), self.ribbon.set_enabled("redo", t.doc.can_redo()))),
+            v.selectionChanged.connect(lambda s: self._on_selection(t, s)),
+        ]
+
+    def _tab_label(self, t: DocTab) -> str:
+        return ("● " if t.doc.modified else "") + t.doc.name
+
+    def attach_tab(self, t: DocTab, index: int = -1):
+        """다른 창에서 옮겨 온 탭을 index 자리(-1 이면 끝)에 붙이고 그 탭을 보여 준다."""
+        t.win = self
+        self._wire(t)
+        if not 0 <= index <= len(self.tabs):
+            index = len(self.tabs)
+        self.tabs.insert(index, t)
+        self.docstack.addWidget(t)
+        self.doctabs.blockSignals(True)
+        i = self.doctabs.insertTab(index, self._tab_label(t))
+        self.doctabs.blockSignals(False)
+        self.doctabs.setTabToolTip(i, t.doc.path or "")
+        self.doctabs.setCurrentIndex(i)
+        self._tab_changed(i)
+
+    def detach_tab(self, t: DocTab):
+        """탭을 이 창에서 빼기만 한다(문서는 닫지 않는다). 남은 탭이 없으면 시작 화면."""
+        for c in getattr(t, "_conns", ()):
+            QObject.disconnect(c)
+        t._conns = []
+        i = self.tabs.index(t)
+        self.tabs.pop(i)
+        self.docstack.removeWidget(t)
+        self.doctabs.removeTab(i)
+        t.setParent(None)
+        if not self.tabs:
+            self.show_start()
+
+    def update_title(self):
+        t = self.cur()
+        self.setWindowTitle(f"{t.doc.name} - {APP_NAME}" if t else APP_NAME)
+
+    def close_emptied(self):
+        """탭을 모두 다른 창으로 옮긴 창: 묻지 않고 닫는다."""
+        self._emptied = True
+        self.close()
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            tab_detach.activated(self)
+        super().changeEvent(e)
+
     def add_doc(self, doc: Document, view: dict | None = None):
         """view: 그 문서를 지난번에 닫을 때의 보기(_remember_view). 있으면 환경 설정의 「열 때 확대·보기」 대신 그 자리로 연다."""
         t = DocTab(doc, self)
-        t.viewer.pageChanged.connect(lambda i: self._sync_status(t))
-        t.viewer.zoomChanged.connect(lambda z: (self._sync_status(t), self._remember_zoom(t)))
-        t.viewer.status.connect(self.say)
-        t.viewer.requestDialog.connect(lambda kind, data, tab=t: self.on_request(tab, kind, data))
-        t.viewer.toolDone.connect(self._tool_done)
-        t.viewer.docChanged.connect(lambda: (self.ribbon.set_enabled("undo", t.doc.can_undo()), self.ribbon.set_enabled("redo", t.doc.can_redo())))
-        t.viewer.selectionChanged.connect(lambda s: self._on_selection(t, s))
+        self._wire(t)
         self.tabs.append(t)
         self.docstack.addWidget(t)
         i = self.doctabs.addTab(doc.name)
@@ -545,6 +630,8 @@ class MainWindow(QMainWindow):
         m.addAction("경로 복사", lambda: (QApplication.clipboard().setText(os.path.normpath(path)), self.say("경로를 복사했습니다")
                                          )).setEnabled(bool(path))
         m.addSeparator()
+        m.addAction("새 창으로 분리", lambda: tab_detach.move_tab(t)).setEnabled(n > 1)
+        m.addSeparator()
         m.addAction("이 탭 닫기" + self.key_text("close"), lambda: self.close_tab(self.tabs.index(t)))
         m.addAction("다른 탭 닫기", lambda: self.close_tabs([x for x in self.tabs if x is not t])).setEnabled(n > 1)
         m.addAction("오른쪽 탭 닫기", lambda: self.close_tabs(self.tabs[self.tabs.index(t) + 1:])).setEnabled(i < n - 1)
@@ -599,8 +686,11 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, e: QCloseEvent):
-        self._remember_window()
-        self.settings["last_open"] = [t.doc.path for t in self.tabs if t.doc.path]
+        rest = tab_detach.others(self)
+        if not self._emptied:
+            self._remember_window()
+        if not rest:   # 창이 여럿이면 마지막에 닫는 창의 문서만 다음에 다시 연다
+            self.settings["last_open"] = [t.doc.path for t in self.tabs if t.doc.path]
         if self._receiver:   # 닫는 동안 넘어오는 파일은 받지 않는다(닫히는 창에 열려 사라지지 않게)
             self._receiver.stop()
         self._closing = True
@@ -611,18 +701,43 @@ class MainWindow(QMainWindow):
                     self._receiver.listen()
                 e.ignore(); return
         save_settings(self.settings)
-        if self._receiver:   # 이 뒤에 켜지는 PDF메트리는 넘기지 않고 제 창을 띄운다
+        if self._receiver and rest:   # 다른 창이 남았으면 넘겨 오는 파일은 그 창들이 받는다
+            rest[-1]._receiver, self._receiver = self._receiver, None
+            rest[-1]._receiver.on_paths = rest[-1].open_forwarded
+            rest[-1]._receiver.listen()
+        elif self._receiver:   # 이 뒤에 켜지는 PDF메트리는 넘기지 않고 제 창을 띄운다
             from .. import single
             single.release()
+        tab_detach.unregister(self)
         e.accept()
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
+        if e.mimeData().hasFormat(tab_detach.MIME):
+            e.accept() if tab_detach.dragging() is not None else e.ignore()
+        elif e.mimeData().hasUrls():
             e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasFormat(tab_detach.MIME):
+            if tab_detach.drop_target_ok(self, e.position().toPoint()):
+                e.acceptProposedAction()
+            else:
+                e.ignore()
+            return
+        super().dragMoveEvent(e)
 
     IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp")
 
     def dropEvent(self, e):
+        if e.mimeData().hasFormat(tab_detach.MIME):
+            pos = e.position().toPoint()
+            if tab_detach.drop_target_ok(self, pos):
+                e.acceptProposedAction()
+                t = tab_detach.dragging()
+                QTimer.singleShot(0, lambda: tab_detach.drop(self, pos, t))   # 끌기가 끝난 뒤에 옮긴다
+            else:
+                e.ignore()
+            return
         paths = [u.toLocalFile() for u in e.mimeData().urls() if os.path.isfile(u.toLocalFile())]
         images = [p for p in paths if p.lower().endswith(self.IMAGE_EXTS)]
         if self.cur() and len(paths) == 1 and images:
@@ -643,7 +758,7 @@ class MainWindow(QMainWindow):
         if not t:
             return
         i = self.tabs.index(t)
-        self.doctabs.setTabText(i, ("● " if t.doc.modified else "") + t.doc.name)
+        self.doctabs.setTabText(i, self._tab_label(t))
         self.ribbon.set_enabled("undo", t.doc.can_undo()); self.ribbon.set_enabled("redo", t.doc.can_redo())
 
     def say(self, msg: str):
@@ -1686,7 +1801,7 @@ class MainWindow(QMainWindow):
         t = self.cur()
         if not t or not t.doc.path:
             self.say("저장된 문서만 나란히 볼 수 있습니다"); return
-        w = MainWindow(); w.open_path(t.doc.path); w.show()
+        w = MainWindow(settings=self.settings); w.open_path(t.doc.path); w.show()
         g = self.frameGeometry(); scr = self.screen().availableGeometry()
         if horizontal:
             self.setGeometry(scr.x(), scr.y(), scr.width() // 2, scr.height()); w.setGeometry(scr.x() + scr.width() // 2, scr.y(), scr.width() // 2, scr.height())
