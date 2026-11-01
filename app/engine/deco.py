@@ -285,12 +285,21 @@ def _deco_draw(kind: str, s: dict):
     raise EngineError(f"모르는 꾸미기입니다: {kind}")
 
 
+def _number_order(kind: str, settings: dict, targets: list[int]) -> tuple[list[int], int]:
+    """번호를 셀 차례와 쪽 수. 보통은 범위 안 차례, 베이츠는 deco_text.bates_order(범위 밖 쪽도 셀 수 있음)."""
+    if kind == "bates":
+        from .deco_text import bates_order
+        return bates_order(settings, targets)
+    return list(range(len(targets))), len(targets)
+
+
 def _stamp(doc: fitz.Document, kind: str, settings: dict, targets: list[int], order: list[int] | None = None,
            count: int | None = None) -> None:
     """targets 쪽에 꾸미기를 폼 객체로 붙이고 표시를 단다. order·count 는 번호를 셀 때의 차례와 쪽 수
     (미리보기는 범위 가운데 한 쪽만 그리므로 따로 준다)."""
     draw, same = _deco_draw(kind, settings)
-    order = order if order is not None else list(range(len(targets)))
+    if order is None:
+        order, count = _number_order(kind, settings, targets)
     n = count if count is not None else len(targets)
     tmp = fitz.open()
     try:
@@ -422,7 +431,8 @@ def render_preview(doc: fitz.Document, pno: int, kind: str, settings: dict, page
             s = upgrade_settings(kind, settings, _file_stem(doc))
             s.pop("pages", None)
             try:
-                _stamp(tmp, kind, s, [0], order=[order.index(pno)], count=len(order))
+                ks, n = _number_order(kind, s, order)
+                _stamp(tmp, kind, s, [0], order=[ks[order.index(pno)]], count=n)
             except Exception:  # noqa: BLE001  칸을 채우는 중의 틀린 값은 미리보기에서 그냥 넘긴다
                 pass
         page = tmp[0]
