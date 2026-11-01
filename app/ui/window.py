@@ -25,6 +25,7 @@ from ..engine import annots as A
 from ..engine import pages as P
 from ..engine.document import Document, DocumentError, NeedsPassword
 from . import dialogs as D
+from . import dlg_organize as O
 from . import icons, theme
 from . import shortcuts as K
 from .organize import OrganizeView
@@ -964,24 +965,29 @@ class MainWindow(QMainWindow):
             if key == "rotate_left": P.rotate(d, pages, -90); t.changed(pages, structural=True)
             elif key == "rotate_right": P.rotate(d, pages, 90); t.changed(pages, structural=True)
             elif key == "rotate":
-                deg, ok = QInputDialog.getItem(self, "회전", f"{len(pages)}쪽 회전", ["오른쪽 90°", "왼쪽 90°", "180°"], 0, False)
-                if ok: P.rotate(d, pages, {"오른쪽 90°": 90, "왼쪽 90°": -90, "180°": 180}[deg]); t.changed(pages, structural=True)
+                dlg = O.RotateDialog(self, d, v.current, pages)
+                if dlg.exec() and dlg.values()["degrees"]:
+                    vals = dlg.values(); P.rotate(d, vals["pages"], vals["degrees"]); t.changed(vals["pages"], structural=True)
             elif key == "delete":
-                if d.page_count <= len(pages): self.say("쪽을 전부 지울 수는 없습니다"); return
-                if len(pages) > 1 and QMessageBox.question(self, "페이지 삭제", f"{len(pages)}쪽을 지울까요?") != QMessageBox.StandardButton.Yes: return
+                if not O.confirm_delete(self, d.page_count, len(pages)): return
                 gone = set(pages); keep = [i for i in range(d.page_count) if i not in gone]
                 P.delete(d, pages); v.clear_selection(); t.changed(None, structural=True, mapping=keep)
             elif key == "extract":
                 self._extract(t, pages)
             elif key == "insert_blank":
-                dlg = D.InsertBlankDialog(self, d.page_count, cur)
-                if dlg.exec(): P.insert_blank(d, **dlg.values()); t.changed(None, structural=True)
+                dlg = O.PlaceDialog(self, "빈 페이지 삽입", P.labels(d), v.current, self.prefs)
+                if dlg.exec(): save_settings(self.settings); P.insert_blank(d, dlg.at()); t.changed(None, structural=True)
             elif key == "insert_pdf":
-                p, _ = QFileDialog.getOpenFileName(self, "끼울 PDF", "", OPEN_FILTER)
-                if not p: return
-                src = fitz.open(p); n = src.page_count; src.close()
-                dlg = D.InsertPdfDialog(self, d.page_count, cur, p, n)
-                if dlg.exec(): P.insert_from_pdf(d, path=p, **dlg.values()); t.changed(None, structural=True)
+                paths, _ = QFileDialog.getOpenFileNames(self, "PDF에서 삽입", "", OPEN_FILTER)
+                srcs = O.open_sources(self, paths, d.path) if paths else None
+                if not srcs: return
+                row, rng = O.source_range_row(srcs[0][2]); row.setVisible(len(srcs) == 1)
+                dlg = O.PlaceDialog(self, "PDF에서 삽입", P.labels(d), v.current, self.prefs, row)
+                if dlg.exec():
+                    save_settings(self.settings)
+                    sub = P.parse_range(rng.text(), srcs[0][2]) if len(srcs) == 1 and rng.text().strip() else None
+                    n = P.insert_pdfs(d, dlg.at(), [(p, pw, sub) for p, pw, _ in srcs]); t.changed(None, structural=True)
+                    self.say(f"{len(srcs)}개 문서에서 {n}쪽을 끼웠습니다")
             elif key == "insert_images":
                 paths, _ = QFileDialog.getOpenFileNames(self, "끼울 이미지", "", "이미지 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif *.webp)")
                 if paths: P.insert_images(d, cur + 1, paths); t.changed(None, structural=True)
@@ -989,12 +995,8 @@ class MainWindow(QMainWindow):
                 dup = set(pages); m = [k for i in range(d.page_count) for k in ((i, i) if i in dup else (i,))]
                 P.duplicate(d, pages); t.changed(None, structural=True, mapping=m)
             elif key == "replace":
-                p, _ = QFileDialog.getOpenFileName(self, "바꿀 내용이 든 PDF", "", OPEN_FILTER)
-                if not p: return
-                src = fitz.open(p); n = src.page_count; src.close()
-                rng, ok = QInputDialog.getText(self, "바꾸기", f"{len(pages)}쪽을 「{os.path.basename(p)}」 의 어느 쪽으로 바꿀까요? (비우면 전부, 1-{n})")
-                if ok:
-                    P.replace(d, pages, p, P.parse_range(rng, n) if rng.strip() else None); t.changed(None, structural=True)
+                dlg = O.ReplaceDialog(self, d, pages)
+                if dlg.exec(): vals = dlg.values(); P.replace(d, **vals); v.clear_selection(); t.changed(None, structural=True)
             elif key == "crop":
                 # 자르기 상자는 지금 보이는 영역 기준의 회전 전 좌표다(page.rect 는 회전 뒤 크기라 MediaBox 를 넘었다)
                 cb = d.fitz[cur].cropbox
