@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import uuid
 import webbrowser
 
 import fitz
@@ -971,8 +972,7 @@ class MainWindow(QMainWindow):
                 gone = set(pages); keep = [i for i in range(d.page_count) if i not in gone]
                 P.delete(d, pages); v.clear_selection(); t.changed(None, structural=True, mapping=keep)
             elif key == "extract":
-                out, _ = QFileDialog.getSaveFileName(self, "쪽 내보내기", self._suggest(t, "_추출.pdf"), PDF_FILTER)
-                if out: P.extract(d, pages, out); self.say(f"{len(pages)}쪽을 저장했습니다: {out}"); self._offer_open(out)
+                self._extract(t, pages)
             elif key == "insert_blank":
                 dlg = D.InsertBlankDialog(self, d.page_count, cur)
                 if dlg.exec(): P.insert_blank(d, **dlg.values()); t.changed(None, structural=True)
@@ -1214,11 +1214,35 @@ class MainWindow(QMainWindow):
         m.addAction("끝내기", self.close)
         m.exec(self.ribbon.mapToGlobal(self.ribbon.rect().bottomLeft() - self.ribbon.rect().bottomLeft() + QPointF(6, 30).toPoint()))
 
+    def _extract(self, t: DocTab, pages: list[int]):
+        """페이지 내보내기: 고른 쪽을 임시 폴더에 PDF 하나로 저장해 새 탭으로 연다(저장 위치는 그 탭을 저장할 때 묻는다)."""
+        from .dlg_extract import ExtractDialog
+        d = t.doc
+        dlg = ExtractDialog(self, d.page_count, t.viewer.current, pages, bool(d.fitz.permissions & fitz.PDF_PERM_MODIFY))
+        if not dlg.exec():
+            return
+        vals = dlg.values()
+        folder = os.path.join(data_dir(), "Temp", uuid.uuid4().hex)
+        os.makedirs(folder, exist_ok=True)
+        out = P.extract_name(folder, d.name)
+        if D.ProgressDialog(self, "페이지 내보내기", P.extract, d, vals["pages"], out, creator=APP_NAME).run() is None:
+            return
+        new = Document(out, d.password)
+        new.ask_save = True   # 「저장」 해도 임시 폴더에 그냥 쓰지 않고 저장 위치를 묻는다
+        new.save_hint = os.path.join(os.path.dirname(d.path), os.path.basename(out)) if d.path else None
+        new.modified = True
+        self.add_doc(new)
+        if vals["delete"]:
+            gone = set(vals["pages"]); keep = [i for i in range(d.page_count) if i not in gone]
+            P.delete(d, vals["pages"]); t.viewer.clear_selection(); t.changed(None, structural=True, mapping=keep)
+        self.say(f"{len(vals['pages'])}쪽을 새 탭으로 내보냈습니다")
+
     # ── 저장 ──────────────────────────────────────────────────
     def save(self, t: DocTab, ask: bool = False) -> bool:
         path = t.doc.path
-        if ask or not path or not path.lower().endswith(".pdf"):
-            path, _ = QFileDialog.getSaveFileName(self, "저장", self._suggest(t, ".pdf") if not path else path, PDF_FILTER)
+        if ask or not path or getattr(t.doc, "ask_save", False) or not path.lower().endswith(".pdf"):
+            start = getattr(t.doc, "save_hint", None) or path
+            path, _ = QFileDialog.getSaveFileName(self, "저장", self._suggest(t, ".pdf") if not start else start, PDF_FILTER)
             if not path:
                 return False
         try:
@@ -1226,6 +1250,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "저장", f"저장하지 못했습니다: {e}")
             return False
+        t.doc.ask_save = False
         self.add_recent(path)
         i = self.tabs.index(t)
         self.doctabs.setTabText(i, t.doc.name); self.doctabs.setTabToolTip(i, path)
