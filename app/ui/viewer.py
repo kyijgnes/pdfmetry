@@ -214,6 +214,8 @@ class PageView(QGraphicsView):
         self._pan_start = QPointF()
         self._moving_annot = False
         self._move_last: fitz.Point | None = None
+        self._resize_corner = -1   # 고른 링크의 모서리를 끄는 중(0 왼쪽 위 · 1 오른쪽 위 · 2 왼쪽 아래 · 3 오른쪽 아래)
+        self._hover_link = ""      # 손 도구로 올린 링크 안내(같은 것을 거듭 띄우지 않는다)
         self._erase_last: tuple[int, fitz.Point] | None = None  # 지우개가 지난 자리(쪽, 쪽 좌표)
         self._hover_block: fitz.Rect | None = None
         self.search_hits: list[tuple[int, list[fitz.Rect]]] = []  # (쪽, 줄마다 네모)
@@ -708,6 +710,8 @@ class PageView(QGraphicsView):
         if t in ("select", "edit", "form"):
             if self._try_select_annot(i, sp, e):
                 return
+            if t == "edit" and self._links_editable() and self._press_link(i, sp):
+                return
             if t == "edit":
                 if self._select_block_or_image(i, sp):
                     return
@@ -718,6 +722,8 @@ class PageView(QGraphicsView):
                 return
             self._drag_rect = QRectF(sp, sp)
             self.clear_selection()
+        elif self._links_editable() and self._press_link(i, sp):
+            return
         elif t in TOOLS_MARKUP or t in TOOLS_SHAPE:
             if t in ("polygon", "polyline", "cloud", "m_perimeter", "m_area"):
                 if self._poly and self._poly_page != i:
@@ -749,9 +755,22 @@ class PageView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
             return
         sp = self.mapToScene(e.position().toPoint())
-        if self._moving_annot and self.sel and self.sel.kind in ("annot", "widget"):
+        if self._moving_annot and self.sel and self.sel.kind in ("annot", "widget", "link"):
             i = self.sel.page
             pt = self.to_page(i, sp)
+            if self._resize_corner >= 0:
+                r = fitz.Rect(self.sel.rect)
+                if self._resize_corner in (0, 2):
+                    r.x0 = pt.x
+                else:
+                    r.x1 = pt.x
+                if self._resize_corner in (0, 1):
+                    r.y0 = pt.y
+                else:
+                    r.y1 = pt.y
+                self.sel.rect = r
+                self.viewport().update()
+                return
             if self._move_last is not None:
                 dx, dy = pt.x - self._move_last.x, pt.y - self._move_last.y
                 self.sel.rect = self.sel.rect + (dx, dy, dx, dy)
@@ -794,14 +813,12 @@ class PageView(QGraphicsView):
         # 손 도구에서 링크 위면 손가락
         if self.tool == "hand":
             i = self.page_at(sp)
-            over = False
-            if i >= 0:
-                pt = self.to_page(i, sp)
-                for l in self.doc.fitz[i].get_links():
-                    if fitz.Rect(l["from"]).contains(pt):
-                        over = True
-                        break
-            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over else Qt.CursorShape.OpenHandCursor)
+            x = self._link_at(i, self.to_page(i, sp)) if i >= 0 else 0
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor if x else Qt.CursorShape.OpenHandCursor)
+            msg = self.link_hover_text(A.link_info(self.doc, i, x)) if x else ""
+            if msg != self._hover_link:
+                self._hover_link = msg
+                self.status.emit(msg)
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e: QMouseEvent):
@@ -818,6 +835,7 @@ class PageView(QGraphicsView):
             self._moving_annot = False
             if self.sel and self.sel.rect is not None:
                 self._commit_move()
+            self._resize_corner = -1
             return
         sp = self.mapToScene(e.position().toPoint())
         i = self._drag_page
@@ -866,6 +884,9 @@ class PageView(QGraphicsView):
             return
         if self.sel and self.sel.kind == "widget":
             self.requestDialog.emit("field_props", self.sel)
+            return
+        if self.sel and self.sel.kind == "link" and self.sel.rect and self.sel.rect.contains(self.to_page(i, sp)):
+            self.requestDialog.emit("edit_link", self.sel)
             return
         if self.edit_mode and self.sel and self.sel.kind == "block":
             self.requestDialog.emit("edit_block", self.sel)
@@ -1029,6 +1050,8 @@ class PageView(QGraphicsView):
             A.delete(self.doc, s.page, s.xref)
         elif s.kind == "widget":
             A.delete_field(self.doc, s.page, s.xref)
+        elif s.kind == "link":
+            A.delete_link(self.doc, s.page, s.xref)
         elif s.kind == "block":
             A.edit_block(self.doc, s.page, s.rect, "")
         elif s.kind == "image":
@@ -1051,6 +1074,16 @@ class PageView(QGraphicsView):
                     if new:
                         s.xref = new  # 선·연필·다각형은 옮기면 새로 만들어진다
                     self.refresh_pages([s.page])
+        elif s.kind == "link":
+            s.rect.normalize()
+            old = s.extra.get("rect")
+            if s.rect.width < 2 or s.rect.height < 2:
+                s.rect = fitz.Rect(old)   # 너무 작게 줄인 것은 되돌린다
+            elif old is None or any(abs(a - b) > 0.01 for a, b in zip(old, s.rect)):
+                s.xref = A.update_link(self.doc, s.page, s.xref, rect=s.rect) or s.xref
+                s.extra["rect"] = fitz.Rect(s.rect)
+                self.refresh_pages([s.page])
+            self.viewport().update()
         elif s.kind == "widget":
             self.doc.snapshot()
             for w in self.doc.fitz[s.page].widgets():
@@ -1064,16 +1097,91 @@ class PageView(QGraphicsView):
         i = self.page_at(sp)
         if i < 0:
             return
-        pt = self.to_page(i, sp)
+        x = self._link_at(i, self.to_page(i, sp))
+        info = A.link_info(self.doc, i, x) if x else None
+        if not info:
+            return
+        if info["kind"] == "goto":
+            self.goto_link(info)
+        elif info["kind"] == "uri":
+            self.requestDialog.emit("open_uri", info["uri"])
+        elif info["kind"] == "file":
+            self.requestDialog.emit("open_file", A.resolve_link_file(info["file"], self.doc.path))
+        else:
+            self.status.emit("링크가 잘못되었습니다.")
+
+    def goto_link(self, info: dict):
+        """쪽 이동 링크를 따라간다: 담아 둔 배율(0 이면 보던 배율 그대로)로 바꾸고 왼쪽 위 자리를 화면 왼쪽 위에."""
+        if self.closed or not self.items:
+            return
+        self._push_history(self._back)
+        self._fwd.clear()
+        if info["zoom"] and abs(info["zoom"] - self.zoom) > 0.001:
+            self.zoom_mode = "fixed"
+            self.set_zoom(info["zoom"])
+        i = max(0, min(info["to_page"], len(self.items) - 1))
+        p = info["to_point"] or fitz.Point(0, 0)
+        x = int(self.items[i].pos().x() + p.x * self.zoom) if p.x > 0 else 0
+        self.set_view_pos(i, max(0.0, p.y), x)
+
+    # ── 링크 고르기·옮기기 ─────────────────────────────────────
+    def _links_editable(self) -> bool:
+        """만든 링크를 고르고 옮기는 상태: 링크 도구, 또는 편집 대상이 링크인 편집 모드."""
+        return self.show_annots and (self.tool == "link" or (
+            self.edit_mode and self.tool == "edit" and getattr(self, "edit_target", "") == "link"))
+
+    def _link_at(self, i: int, pt: fitz.Point) -> int:
+        """그 자리의 링크 xref(겹치면 나중에 넣은 것). 없으면 0."""
+        if i < 0:
+            return 0
+        found = 0
         for l in self.doc.fitz[i].get_links():
-            if fitz.Rect(l["from"]).contains(pt):
-                if l["kind"] == fitz.LINK_GOTO:
-                    self.goto(l.get("page", 0))
-                elif l["kind"] == fitz.LINK_URI:
-                    self.requestDialog.emit("open_uri", l.get("uri", ""))
-                elif l["kind"] == fitz.LINK_LAUNCH:
-                    self.requestDialog.emit("open_file", l.get("file", ""))
-                return
+            if l.get("xref") and fitz.Rect(l["from"]).contains(pt):
+                found = l["xref"]
+        return found
+
+    def _press_link(self, i: int, sp: QPointF) -> bool:
+        pt = self.to_page(i, sp)
+        s = self.sel
+        if s and s.kind == "link" and s.page == i:
+            # 고른 링크의 모서리 손잡이를 누르면 크기 바꾸기
+            tol = 5 / self.zoom
+            for n, c in enumerate((s.rect.tl, s.rect.tr, s.rect.bl, s.rect.br)):
+                if abs(c.x - pt.x) <= tol and abs(c.y - pt.y) <= tol:
+                    self._resize_corner = n
+                    self._moving_annot = True
+                    return True
+        x = self._link_at(i, pt)
+        info = A.link_info(self.doc, i, x) if x else None
+        if info is None:
+            if s and s.kind == "link":
+                self.clear_selection()
+            return False
+        self.sel = Selection("link", i, x, fitz.Rect(info["rect"]), text=self.link_hover_text(info),
+                             extra={"kind": "Link", "kind_ko": "링크", "rect": fitz.Rect(info["rect"])})
+        self.selectionChanged.emit(self.sel)
+        self._moving_annot = True
+        self._resize_corner = -1
+        self._move_last = pt
+        self.viewport().update()
+        return True
+
+    def link_dest_here(self) -> tuple[fitz.Point, float]:
+        """쪽 이동 링크에 담을 지금 보기: (보는 쪽의 왼쪽 위 자리, 배율). 맞춤 보기면 배율 0(여는 쪽의 배율 그대로)."""
+        i, y, x = self.view_pos()
+        left = max(0.0, (x - self.items[i].pos().x()) / (self.zoom or 1)) if self.items else 0.0
+        zoom = round(self.zoom, 4) if self.zoom_mode == "fixed" else 0.0
+        return fitz.Point(round(left, 1), max(0.0, y)), zoom
+
+    @staticmethod
+    def link_hover_text(info: dict | None) -> str:
+        if not info or info["kind"] == "bad":
+            return "링크가 잘못되었습니다."
+        if info["kind"] == "goto":
+            return f"페이지로 이동: {info['to_page'] + 1}"
+        if info["kind"] == "uri":
+            return f"링크 열기: {info['uri']}"
+        return f"파일 열기: {info['file']}"
 
     # ── 도형 끝 ───────────────────────────────────────────────
     def _shape_done(self, i: int, pr: fitz.Rect, scene_r: QRectF):
@@ -1274,6 +1382,9 @@ class PageView(QGraphicsView):
             if self._hover_block and self._hover_block[0] == i:
                 p.setPen(QPen(accent, 1.5))
                 p.drawRect(self.from_page_rect(i, self._hover_block[1]))
+        # 링크: MuPDF 는 링크 테두리를 그리지 않아 여기서 그린다. 고를 수 있을 때는 안 보이는 링크 자리도 점선으로
+        if self.show_annots:
+            self._paint_links(p, i)
         # 양식 모드: 칸 상자
         if self.form_mode:
             p.setPen(QPen(QColor(60, 140, 240, 200), 1, Qt.PenStyle.DashLine))
@@ -1337,6 +1448,29 @@ class PageView(QGraphicsView):
                 p.setBrush(Qt.GlobalColor.white)
                 p.drawEllipse(q, 3, 3)
         p.restore()
+
+    def _paint_links(self, p: QPainter, i: int):
+        editable = self._links_editable()
+        for l in self.doc.fitz[i].get_links():
+            x = l.get("xref")
+            if not x:
+                continue
+            rr = self.from_page_rect(i, fitz.Rect(l["from"]))
+            st = A.link_style(self.doc, x)
+            if st["visible"]:
+                pen = QPen(self._qcolor(st["color"]), max(1.0, st["width"] * self.zoom))
+                if st["line"] == "dash":
+                    pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                if st["line"] == "underline":
+                    p.drawLine(rr.bottomLeft(), rr.bottomRight())
+                else:
+                    p.drawRect(rr)
+            elif editable:
+                p.setPen(QPen(QColor(60, 140, 240, 200), 1, Qt.PenStyle.DashLine))
+                p.setBrush(QColor(60, 140, 240, 25))
+                p.drawRect(rr)
 
     @staticmethod
     def _qcolor(c) -> QColor:

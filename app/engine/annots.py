@@ -689,31 +689,235 @@ def measure_annot(doc: Document, page: int, points: list[fitz.Point], kind: str,
 
 
 # ── 링크 ─────────────────────────────────────────────────────────
+# 외관: visible(보이는 직사각형) · color · width(1~10) · line(solid·dash·underline) · highlight(none·invert·push·outline)
+LINK_STYLE = {"visible": True, "color": (0.5, 0.5, 0.5), "width": 1, "line": "solid", "highlight": "invert"}
+_LINE_BS = {"solid": "S", "dash": "D", "underline": "U"}
+_HL_H = {"none": "N", "invert": "I", "outline": "O", "push": "P"}
+
+
 def links(doc: Document, page: int) -> list[dict]:
     with doc.lock:
         return doc.fitz[page].get_links()
 
 
-def add_link(doc: Document, page: int, r: fitz.Rect, *, to_page: int | None = None, uri: str | None = None,
-             file: str | None = None):
-    doc.snapshot()
+def _link_xrefs(doc: Document, page: int) -> list[int]:
+    return [x for x, t, _ in doc.fitz[page].annot_xrefs() if t == fitz.PDF_ANNOT_LINK]
+
+
+def link_file_path(path: str, doc_path: str | None, relative: bool) -> str:
+    """파일 링크에 담을 경로. relative 면 문서 폴더 기준(드라이브가 다르면 그대로 절대 경로).
+    역슬래시는 PDF 문자열에서 escape 로 먹혀 C:Users… 가 되므로 / 로 바꾼다."""
+    if relative and doc_path and os.path.isabs(path):
+        try:
+            path = os.path.relpath(path, os.path.dirname(os.path.abspath(doc_path)))
+        except ValueError:
+            pass
+    return path.replace("\\", "/")
+
+
+def resolve_link_file(path: str, doc_path: str | None) -> str:
+    """파일 링크 경로 → 열 수 있는 경로(상대 경로는 문서 폴더 기준)."""
+    if path and not os.path.isabs(path) and doc_path:
+        path = os.path.join(os.path.dirname(os.path.abspath(doc_path)), path)
+    return os.path.normpath(path) if path else path
+
+
+def _nums(v: str) -> list[float]:
+    out = []
+    for n in re.findall(r"-?\d*\.?\d+", v):
+        try:
+            out.append(float(n))
+        except ValueError:
+            pass
+    return out
+
+
+def link_style(doc: Document, xref: int) -> dict:
+    """링크 외관을 읽는다. 테두리 두께가 0 이거나 색이 없으면 보이지 않는 직사각형."""
+    st = dict(LINK_STYLE)
     with doc.lock:
-        if to_page is not None:
-            d = {"kind": fitz.LINK_GOTO, "from": r, "page": to_page, "to": fitz.Point(0, 0)}
-        elif uri:
-            d = {"kind": fitz.LINK_URI, "from": r, "uri": uri}
-        elif file:
-            # 역슬래시는 PDF 문자열에서 escape 로 먹혀 C:Users… 가 된다
-            d = {"kind": fitz.LINK_LAUNCH, "from": r, "file": file.replace("\\", "/")}
+        f = doc.fitz
+        width = 1.0   # PDF 기본값: /Border [0 0 1]
+        t, v = f.xref_get_key(xref, "BS/W")
+        tb, vb = f.xref_get_key(xref, "Border")
+        if t != "null":
+            width = (_nums(v) or [1.0])[0]
+        elif tb == "array":
+            nums = _nums(vb.split("[", 2)[1] if vb.count("[") > 1 else vb)
+            width = nums[2] if len(nums) >= 3 else 1.0
+        t, v = f.xref_get_key(xref, "BS/S")
+        line = {"/D": "dash", "/U": "underline"}.get(v, "solid") if t == "name" else "solid"
+        if line == "solid" and tb == "array" and vb.count("[") > 1:
+            line = "dash"
+        t, v = f.xref_get_key(xref, "C")
+        color = None
+        if t == "array":
+            nums = _nums(v)
+            if len(nums) == 3:
+                color = tuple(nums)
+            elif len(nums) == 1:
+                color = (nums[0],) * 3
+        t, v = f.xref_get_key(xref, "H")
+        hl = {"/N": "none", "/O": "outline", "/P": "push"}.get(v, "invert") if t == "name" else "invert"
+    st["visible"] = width > 0 and color is not None
+    st["width"] = max(1, min(10, round(width))) if width > 0 else LINK_STYLE["width"]
+    st["color"] = color or LINK_STYLE["color"]
+    st["line"] = line
+    st["highlight"] = hl
+    return st
+
+
+def _apply_link_style(doc: Document, xref: int, style: dict | None):
+    st = {**LINK_STYLE, **(style or {})}
+    f = doc.fitz
+    w = max(1, min(10, int(st["width"] or 1))) if st["visible"] else 0
+    line = _LINE_BS.get(st["line"], "S")
+    r, g, b = st["color"]
+    if w and line == "D":
+        f.xref_set_key(xref, "Border", f"[0 0 {w} [3 2]]")
+        f.xref_set_key(xref, "BS", f"<</W {w}/S/D/D[3 2]>>")
+    else:
+        f.xref_set_key(xref, "Border", f"[0 0 {w}]")
+        f.xref_set_key(xref, "BS", f"<</W {w}/S/{line}>>")
+    f.xref_set_key(xref, "C", f"[{r:g} {g:g} {b:g}]")
+    f.xref_set_key(xref, "H", "/" + _HL_H.get(st["highlight"], "I"))
+
+
+def link_info(doc: Document, page: int, xref: int) -> dict | None:
+    """링크 하나: rect · kind(goto·uri·file·bad) · to_page · to_point · zoom · uri · file · style."""
+    with doc.lock:
+        for l in doc.fitz[page].get_links():
+            if l.get("xref") != xref:
+                continue
+            out = {"rect": fitz.Rect(l["from"]), "kind": "bad", "to_page": None, "to_point": None, "zoom": 0.0,
+                   "uri": "", "file": ""}
+            k = l["kind"]
+            if k == fitz.LINK_GOTO and 0 <= l.get("page", -1) < doc.page_count and _dest_ok(doc, xref):
+                out.update(kind="goto", to_page=l["page"], to_point=fitz.Point(l.get("to") or (0, 0)))
+                # PyMuPDF 는 XYZ 의 배율을 읽지 않는다(늘 0): 목적지 배열에서 직접 읽는다
+                for key in ("A/D", "Dest"):
+                    t, v = doc.fitz.xref_get_key(xref, key)
+                    m = re.search(r"/XYZ\s+(\S+)\s+(\S+)\s+([-\d.]+)", v) if t == "array" else None
+                    if m:
+                        out["zoom"] = (_nums(m.group(3)) or [0.0])[0]
+                        break
+            elif k == fitz.LINK_NAMED and str(l.get("page", "")).isdigit() and 1 <= int(l["page"]) <= doc.page_count:
+                out.update(kind="goto", to_page=int(l["page"]) - 1, to_point=fitz.Point(0, 0))
+            elif k == fitz.LINK_URI and l.get("uri"):
+                out.update(kind="uri", uri=l["uri"])
+            elif k in (fitz.LINK_LAUNCH, fitz.LINK_GOTOR) and _launch_file(doc, xref):   # 파일 경로가 있으면 GOTOR 로 읽힌다
+                out.update(kind="file", file=_launch_file(doc, xref))
+            break
         else:
-            raise ValueError("링크 대상이 없습니다")
-        doc.fitz[page].insert_link(d)
+            return None
+    out["style"] = link_style(doc, xref)
+    return out
 
 
-def delete_link(doc: Document, page: int, link: dict):
+def _dest_ok(doc: Document, xref: int) -> bool:
+    """쪽 이동 목적지가 실제 쪽을 가리키나(없는 객체를 가리키면 MuPDF 는 첫 쪽으로 읽는다)."""
+    for key in ("A/D", "Dest"):
+        t, v = doc.fitz.xref_get_key(xref, key)
+        if t == "array":
+            m = re.match(r"\[\s*(\d+)\s+0\s+R", v)
+            if not m:
+                return True
+            n = int(m.group(1))
+            return 0 < n < doc.fitz.xref_length() and doc.fitz.xref_get_key(n, "Type")[1] == "/Page"
+    return True
+
+
+def _launch_file(doc: Document, xref: int) -> str:
+    """파일 링크 경로(get_links 는 한글을 %EC… 로 바꿔 주므로 사전에서 직접 읽는다)."""
+    for key in ("A/F/UF", "A/F/F", "A/F"):
+        t, v = doc.fitz.xref_get_key(xref, key)
+        if t == "string" and v:
+            return v
+    return ""
+
+
+def _check_page(doc: Document, to_page: int | None):
+    if to_page is not None and not 0 <= to_page < doc.page_count:
+        raise ValueError(f"쪽 번호는 1~{doc.page_count} 사이여야 합니다")
+
+
+def _insert_link(doc: Document, page: int, r: fitz.Rect, to_page, to_point, zoom, uri, file, style) -> int:
+    if to_page is not None:
+        d = {"kind": fitz.LINK_GOTO, "from": r, "page": to_page, "to": fitz.Point(to_point or (0, 0))}
+        if zoom:
+            d["zoom"] = float(zoom)
+    elif uri:
+        d = {"kind": fitz.LINK_URI, "from": r, "uri": uri}
+    elif file:
+        d = {"kind": fitz.LINK_LAUNCH, "from": r, "file": file.replace("\\", "/")}
+    else:
+        raise ValueError("링크 대상이 없습니다")
+    before = set(_link_xrefs(doc, page))
+    doc.fitz[page].insert_link(d)
+    xref = next((x for x in _link_xrefs(doc, page) if x not in before), 0)
+    if xref:
+        if file:   # 한글 경로는 UTF-16 글자열로(PyMuPDF 는 UTF-8 바이트로 넣는다)
+            s = fitz.get_pdf_str(d["file"])
+            doc.fitz.xref_set_key(xref, "A/F/F", s)
+            doc.fitz.xref_set_key(xref, "A/F/UF", s)
+        _apply_link_style(doc, xref, style)
+    return xref
+
+
+def add_link(doc: Document, page: int, r: fitz.Rect, *, to_page: int | None = None, to_point=None, zoom: float = 0,
+             uri: str | None = None, file: str | None = None, style: dict | None = None) -> int:
+    """링크를 넣고 xref 를 돌려준다. 쪽 이동은 to_point(쪽 좌표 왼쪽 위)·zoom(0 이면 보던 배율 그대로)까지 담는다."""
+    if to_page is None and not uri and not file:
+        raise ValueError("링크 대상이 없습니다")
+    _check_page(doc, to_page)
     doc.snapshot()
     with doc.lock:
-        doc.fitz[page].delete_link(link)
+        return _insert_link(doc, page, fitz.Rect(r), to_page, to_point, zoom, uri, file, style)
+
+
+def update_link(doc: Document, page: int, xref: int, *, rect: fitz.Rect | None = None, target: dict | None = None,
+                style: dict | None = None) -> int:
+    """링크의 자리·대상·외관을 바꾼다(되돌리기 한 번). target 은 add_link 의 대상 인자(to_page·to_point·zoom·uri·file).
+    지우고 새로 넣는 것이라 xref 가 바뀔 수 있어 새 xref 를 돌려준다."""
+    info = link_info(doc, page, xref)
+    if info is None:
+        return 0
+    if target is None:
+        if info["kind"] == "goto":
+            target = {"to_page": info["to_page"], "to_point": info["to_point"], "zoom": info["zoom"]}
+        elif info["kind"] == "uri":
+            target = {"uri": info["uri"]}
+        elif info["kind"] == "file":
+            target = {"file": info["file"]}
+        else:
+            raise ValueError("링크가 잘못되었습니다.")
+    if target.get("to_page") is None and not target.get("uri") and not target.get("file"):
+        raise ValueError("링크 대상이 없습니다")
+    _check_page(doc, target.get("to_page"))
+    doc.snapshot()
+    with doc.lock:
+        _delete_link_xref(doc, page, xref)
+        return _insert_link(doc, page, fitz.Rect(rect if rect is not None else info["rect"]), target.get("to_page"),
+                            target.get("to_point"), target.get("zoom", 0), target.get("uri"), target.get("file"),
+                            style if style is not None else info["style"])
+
+
+def _delete_link_xref(doc: Document, page: int, xref: int):
+    p = doc.fitz[page]
+    for l in p.get_links():
+        if l.get("xref") == xref:
+            p.delete_link(l)
+            return
+
+
+def delete_link(doc: Document, page: int, link: dict | int):
+    """링크 하나를 지운다(get_links 의 dict 또는 xref)."""
+    doc.snapshot()
+    with doc.lock:
+        if isinstance(link, int):
+            _delete_link_xref(doc, page, link)
+        else:
+            doc.fitz[page].delete_link(link)
 
 
 # ── 교정(수정) 표시 ───────────────────────────────────────────────

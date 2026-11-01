@@ -1129,10 +1129,25 @@ class MainWindow(QMainWindow):
             if p:
                 A.attachment(d, data["page"], data["point"], p, v.props["author"]); t.changed([data["page"]])
         elif kind == "link":
-            dlg = D.LinkDialog(self, d.page_count)
+            from .dlg_link import LinkDialog
+            dlg = LinkDialog(self, d, v.current, self.prefs, view_dest=v.link_dest_here())
             if dlg.exec():
-                A.add_link(d, data["page"], data["rect"], **dlg.values()); t.changed([data["page"]])
+                vals = dlg.values()
+                A.add_link(d, data["page"], data["rect"], style=vals["style"], **vals["target"])
+                dlg.remember(); save_settings(self.settings); t.changed([data["page"]])
             self.on_tool("select")
+        elif kind == "edit_link":
+            from .dlg_link import LinkDialog
+            s = data
+            info = A.link_info(d, s.page, s.xref)
+            if info is None:
+                return
+            dlg = LinkDialog(self, d, v.current, self.prefs, info=info, view_dest=v.link_dest_here())
+            if dlg.exec():
+                vals = dlg.values()
+                s.xref = A.update_link(d, s.page, s.xref, target=vals["target"], style=vals["style"]) or s.xref
+                s.text = v.link_hover_text(A.link_info(d, s.page, s.xref))
+                dlg.remember(); save_settings(self.settings); t.changed([s.page])
         elif kind == "crop":
             cb = d.fitz[data["page"]].cropbox
             dlg = D.CropDialog(self, d.page_count, data["page"], data["rect"], fitz.Rect(0, 0, cb.width, cb.height))
