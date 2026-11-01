@@ -302,6 +302,49 @@ def open_source(path: str, password: str | None = None) -> fitz.Document:
     return src
 
 
+def _ocg_name(f: fitz.Document, xref: int) -> str:
+    return _pdf_text(f.xref_get_key(xref, "Name")[1])
+
+
+def _pdf_hex(s: str) -> str:
+    return "<FEFF" + s.encode("utf-16-be").hex().upper() + ">"
+
+
+def _append(f: fitz.Document, xref: int, key: str, items: str):
+    cur = f.xref_get_key(xref, key)
+    body = cur[1][1:-1] if cur[0] == "array" else ""
+    f.xref_set_key(xref, key, f"[{body} {items}]")
+
+
+def _own_dict(f: fitz.Document, owner: int, key: str) -> int:
+    """owner 의 key 사전을 간접 객체로 만들어 xref 를 돌려준다(없으면 빈 사전)."""
+    cur = f.xref_get_key(owner, key)
+    if cur[0] == "xref":
+        return int(cur[1].split()[0])
+    x = f.get_new_xref()
+    f.update_object(x, cur[1] if cur[0] == "dict" else "<<>>")
+    f.xref_set_key(owner, key, f"{x} 0 R")
+    return x
+
+
+def _adopt_layers(f: fitz.Document, first_new: int, src: fitz.Document, label: str):
+    """insert_pdf 는 쪽 자원과 함께 레이어(OCG)를 복사만 하고 문서 레이어 목록에는 올리지 않는다.
+    새로 생긴 OCG 를 목록에 올리고 원본 파일 이름 묶음 아래에 둔다. 켜짐·꺼짐은 원본의 같은 이름 레이어를 따른다."""
+    new = [x for x in range(first_new, f.xref_length()) if f.xref_get_key(x, "Type")[1] == "/OCG"]
+    if not new:
+        return
+    state = {v["name"]: v["on"] for v in src.get_ocgs().values()}
+    refs = " ".join(f"{x} 0 R" for x in new)
+    off = " ".join(f"{x} 0 R" for x in new if state.get(_ocg_name(f, x), True) is False)
+    cat = f.pdf_catalog()
+    props = _own_dict(f, cat, "OCProperties")
+    _append(f, props, "OCGs", refs)
+    d = _own_dict(f, props, "D")
+    _append(f, d, "Order", f"[{_pdf_hex(label)} [{refs}]]")
+    if off:
+        _append(f, d, "OFF", off)
+
+
 def insert_pdfs(doc: Document, at: int, items: list[tuple]) -> int:
     """여러 문서를 고른 차례대로 at 자리부터 이어 끼운다. items: (경로, 암호, 가져올 쪽 또는 None).
     되돌리기 한 걸음으로 묶는다. 끼운 쪽 수를 돌려준다."""
@@ -315,7 +358,8 @@ def insert_pdfs(doc: Document, at: int, items: list[tuple]) -> int:
     doc.dedupe = True  # 끼운 문서와 같은 글꼴·그림이 겹칠 수 있어 저장 때 합친다
     n = 0
     with doc.lock:
-        for src, pg in srcs:
+        for (src, pg), (path, _, _) in zip(srcs, items):
+            first_new = doc.fitz.xref_length()
             if pg is None:
                 doc.fitz.insert_pdf(src, start_at=at + n)
                 n += src.page_count
@@ -323,6 +367,7 @@ def insert_pdfs(doc: Document, at: int, items: list[tuple]) -> int:
                 for i in pg:
                     doc.fitz.insert_pdf(src, from_page=i, to_page=i, start_at=at + n)
                     n += 1
+            _adopt_layers(doc.fitz, first_new, src, os.path.basename(path))
             src.close()
     return n
 

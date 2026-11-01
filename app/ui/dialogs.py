@@ -8,7 +8,7 @@ from typing import Callable
 
 import fitz
 from PySide6.QtCore import QEvent, QRegularExpression, QThread, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPixmap, QRegularExpressionValidator
+from PySide6.QtGui import QColor, QRegularExpressionValidator
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComb
 from ..engine import annots as A
 from ..engine import pages as P
 from ..engine.document import Document
-from . import icons, theme
+from . import theme
 
 PAGE_SIZES_MM = {"A4": (210, 297), "A3": (297, 420), "A5": (148, 210), "B4": (250, 353), "B5": (176, 250),
                  "Letter": (215.9, 279.4), "Legal": (215.9, 355.6)}
@@ -355,66 +355,6 @@ class CropDialog(FormDialog):
     def values(self) -> dict:
         v = {k: sb.value() / 2.54 * 72 for k, sb in self.vals.items()}
         return {"rect": fitz.Rect(v["x0"], v["y0"], v["x1"], v["y1"]), "pages": self.pages.pages()}
-
-
-class SplitGridDialog(FormDialog):
-    """쪽 하나를 가로·세로 칸으로 나눠 여러 쪽으로(스캔한 두 쪽 펼침 나누기)."""
-    def __init__(self, parent, total: int, current: int, pages: list[int] | None = None):
-        super().__init__("페이지 분할", parent, "나누기")
-        self.cols = self.add("가로 칸", QSpinBox()); self.cols.setRange(1, 10); self.cols.setValue(2)
-        self.rows = self.add("세로 칸", QSpinBox()); self.rows.setRange(1, 10); self.rows.setValue(1)
-        self.preview = self.add("결과", QLabel())
-        self.pages = self.add("나눌 쪽", PageRangeEdit(total, current, odd_even=True))
-        if pages and len(pages) > 1:
-            self.pages.set_pages(pages)
-        self.cols.valueChanged.connect(self._sync); self.rows.valueChanged.connect(self._sync); self._sync()
-
-    def _sync(self):
-        n = self.cols.value() * self.rows.value()
-        self.preview.setText(f"한 쪽 → {n}쪽 · 왼쪽 위부터 오른쪽, 다음 줄 차례" if n > 1 else "나눌 칸이 없습니다")
-        self.bb.button(QDialogButtonBox.StandardButton.Ok).setEnabled(n > 1)
-
-    def values(self) -> dict:
-        return {"cols": self.cols.value(), "rows": self.rows.value(), "pages": self.pages.pages()}
-
-
-class ResizeDialog(FormDialog):
-    def __init__(self, parent, total: int, current: int):
-        super().__init__("쪽 크기", parent)
-        self.size = self.add("크기", QComboBox()); self.size.addItems(list(PAGE_SIZES_MM) + ["직접 입력"])
-        self.w = self.add("가로(mm)", QDoubleSpinBox()); self.w.setRange(10, 2000); self.w.setValue(210)
-        self.h = self.add("세로(mm)", QDoubleSpinBox()); self.h.setRange(10, 2000); self.h.setValue(297)
-        self.orient = self.add("방향", QComboBox()); self.orient.addItems(["세로", "가로"])
-        self.fit = self.add("", QCheckBox("내용을 비율대로 맞추기")); self.fit.setChecked(True)
-        self.pages = self.add("적용할 쪽", PageRangeEdit(total, current))
-        self.size.currentIndexChanged.connect(self._sync); self._sync()
-
-    def _sync(self):
-        custom = self.size.currentText() == "직접 입력"
-        self.w.setEnabled(custom); self.h.setEnabled(custom)
-        if not custom:
-            mm = PAGE_SIZES_MM[self.size.currentText()]; self.w.setValue(mm[0]); self.h.setValue(mm[1])
-
-    def values(self) -> dict:
-        w, h = mm2pt(self.w.value()), mm2pt(self.h.value())
-        if self.orient.currentIndex() == 1:
-            w, h = h, w
-        return {"width": w, "height": h, "fit": self.fit.isChecked(), "pages": self.pages.pages()}
-
-
-class PageBoxDialog(FormDialog):
-    def __init__(self, parent, total: int, current: int, page_rect: fitz.Rect):
-        super().__init__("페이지 박스", parent)
-        self.box = self.add("박스", QComboBox()); self.box.addItems(["crop(보이는 영역)", "media", "trim", "bleed", "art"])
-        self.vals = {}
-        for key, label, v in (("x0", "왼쪽(cm)", page_rect.x0), ("y0", "위(cm)", page_rect.y0), ("x1", "오른쪽(cm)", page_rect.x1), ("y1", "아래(cm)", page_rect.y1)):
-            sb = QDoubleSpinBox(); sb.setRange(0, 500); sb.setDecimals(2); sb.setValue(v / 72 * 2.54)
-            self.vals[key] = self.add(label, sb)
-        self.pages = self.add("적용할 쪽", PageRangeEdit(total, current))
-
-    def values(self) -> dict:
-        v = {k: sb.value() / 2.54 * 72 for k, sb in self.vals.items()}
-        return {"box": self.box.currentText().split("(")[0], "rect": fitz.Rect(v["x0"], v["y0"], v["x1"], v["y1"]), "pages": self.pages.pages()}
 
 
 # ── 꾸미기: 워터마크·배경·머리글·쪽 번호·베이츠 ─────────────────
