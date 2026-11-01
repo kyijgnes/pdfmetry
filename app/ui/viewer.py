@@ -636,7 +636,8 @@ class PageView(QGraphicsView):
 
     def _apply_cursor(self):
         tool = self.tool
-        cur = {"hand": Qt.CursorShape.OpenHandCursor, "select": Qt.CursorShape.IBeamCursor}.get(tool)
+        cur = {"hand": Qt.CursorShape.OpenHandCursor, "select": Qt.CursorShape.IBeamCursor,
+               "addtext": Qt.CursorShape.IBeamCursor}.get(tool)
         if cur is None:
             cur = Qt.CursorShape.CrossCursor if tool in TOOLS_SHAPE or tool in TOOLS_MARKUP or tool in (
                 "pencil", "eraser", "note", "caret", "attach") else Qt.CursorShape.ArrowCursor
@@ -841,6 +842,10 @@ class PageView(QGraphicsView):
                     A.text_markup(self.doc, i, [pr], TOOLS_MARKUP[t], color=self.props["hl_color"],
                                   opacity=self.props["opacity"], author=self.props["author"])
                     self.refresh_pages([i])
+            elif t == "addtext":
+                # 누른 자리에 바로 치는 글 상자. 끌어 그렸으면 그 왼쪽 위에서 그린 너비로
+                self.requestDialog.emit("addtext", {"page": i, "scene_pt": r.topLeft(),
+                                                    "width": None if small else r.width() / self.zoom})
             elif not small:
                 self._shape_done(i, pr, r)
             self.viewport().update()
@@ -1106,8 +1111,6 @@ class PageView(QGraphicsView):
             self.requestDialog.emit("textbox", {"page": i, "rect": pr, "kind": "callout"}); return
         elif t == "typewriter":
             self.requestDialog.emit("textbox", {"page": i, "rect": pr, "kind": "typewriter"}); return
-        elif t == "addtext":
-            self.requestDialog.emit("addtext", {"page": i, "rect": pr}); return
         elif t == "addimage":
             self.requestDialog.emit("addimage", {"page": i, "rect": pr}); return
         elif t == "stamp":

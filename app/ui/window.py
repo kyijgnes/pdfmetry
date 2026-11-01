@@ -30,6 +30,7 @@ from . import dlg_pagebox as PB
 from . import dlg_split as DS
 from . import icons, theme
 from . import shortcuts as K
+from .inline_text import InlineText
 from .organize import OrganizeView
 from .props import PropsPanel
 from .ribbon import LABELS, TOOL_KEYS, Ribbon
@@ -781,7 +782,7 @@ class MainWindow(QMainWindow):
         self._sync_status(t)
         if key in ("hand", "select"):
             self.say("")
-        elif key in ("note", "caret", "attach"):   # 한 번 누르면 바로 넣는 도구
+        elif key in ("note", "caret", "attach", "addtext"):   # 한 번 누르면 바로 넣는 도구
             self.say(f"{LABELS[key]}: 넣을 자리를 누르세요. Esc 로 그만둡니다.")
         elif key in LABELS and key not in ("form", "edit"):
             self.say(f"{LABELS[key]}: 문서 위에서 끌어 그리세요. Esc 로 그만둡니다.")
@@ -1069,13 +1070,15 @@ class MainWindow(QMainWindow):
                     t.changed([data["page"]])
             self.on_tool("select")
         elif kind == "addtext":
-            dlg = D.TextBoxDialog(self, "addtext", v.props)
-            if dlg.exec():
-                vals = dlg.values()
-                if vals["text"].strip():
-                    A.add_text(d, data["page"], data["rect"], vals["text"], vals["fontsize"], vals["text_color"] or (0, 0, 0), vals["bold"], vals["align"])
-                    t.changed([data["page"]])
-            self.on_tool("select" if not v.edit_mode else "edit")
+            def done(text: str, rect, style: dict, t=t, i=data["page"]):
+                self.prefs["addtext_style"] = style; save_settings(self.settings)   # 마지막 서식 기억
+                if t.viewer.closed:
+                    return
+                if A.add_text(t.doc, i, rect, text, style["fontsize"], style["color"], style["bold"], style["align"],
+                              italic=style["italic"]):
+                    t.changed([i])
+                self.on_tool("select" if not t.viewer.edit_mode else "edit")
+            InlineText(v, data["page"], data["scene_pt"], self.prefs.get("addtext_style"), done, data.get("width"))
         elif kind == "edit_block":
             s = data
             dlg = D.TextBoxDialog(self, "edit_block", {"fontsize": s.extra.get("fontsize", 11), "text_color": (0, 0, 0)}, s.text)
