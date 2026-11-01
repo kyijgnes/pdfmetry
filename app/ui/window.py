@@ -26,6 +26,7 @@ from ..engine import pages as P
 from ..engine.document import Document, DocumentError, NeedsPassword
 from . import dialogs as D
 from . import dlg_organize as O
+from . import dlg_pagebox as PB
 from . import dlg_split as DS
 from . import icons, theme
 from . import shortcuts as K
@@ -1026,16 +1027,15 @@ class MainWindow(QMainWindow):
                 dlg = O.ReplaceDialog(self, d, pages)
                 if dlg.exec(): vals = dlg.values(); P.replace(d, **vals); v.clear_selection(); t.changed(None, structural=True)
             elif key == "crop":
-                # 자르기 상자는 지금 보이는 영역 기준의 회전 전 좌표다(page.rect 는 회전 뒤 크기라 MediaBox 를 넘었다)
-                cb = d.fitz[cur].cropbox
-                dlg = D.CropDialog(self, d.page_count, cur, None, fitz.Rect(0, 0, cb.width, cb.height))
-                if dlg.exec(): vals = dlg.values(); P.crop(d, vals["pages"], vals["rect"]); t.changed(None, structural=True)
+                dlg = PB.CropDialog(self, d, pages, self.prefs.get("unit", "cm"))
+                if dlg.exec(): vals = dlg.values(); P.crop(d, vals["pages"], margins=vals["margins"]); t.changed(None, structural=True)
             elif key == "resize":
-                dlg = D.ResizeDialog(self, d.page_count, cur)
+                dlg = PB.PageSizeDialog(self, d, pages, self.prefs.get("unit", "cm"))
                 if dlg.exec(): vals = dlg.values(); P.resize(d, vals["pages"], vals["width"], vals["height"], vals["fit"]); t.changed(None, structural=True)
             elif key == "pagebox":
-                dlg = D.PageBoxDialog(self, d.page_count, cur, d.fitz[cur].cropbox)
-                if dlg.exec(): vals = dlg.values(); P.set_box(d, vals["pages"], vals["box"], vals["rect"]); t.changed(None, structural=True)
+                dlg = PB.PageBoxDialog(self, d, pages, self.prefs.get("unit", "cm"))
+                if dlg.exec():
+                    vals = dlg.values(); P.set_boxes(d, vals["pages"], vals["margins"], vals["size"], vals["offset"]); t.changed(None, structural=True)
             elif key == "pagelabel": self.on_action("pagelabel")
             elif key == "delete_blank":
                 T = _engine("tools"); d.snapshot(); gone = T.delete_blank_pages(d.fitz)

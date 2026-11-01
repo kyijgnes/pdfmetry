@@ -591,7 +591,19 @@ def duplicate(doc: Document, pages: list[int]):
             doc.fitz.fullcopy_page(i, i + 1)
 
 
-def crop(doc: Document, pages: Iterable[int], rect: fitz.Rect):
+def crop(doc: Document, pages: Iterable[int], rect: fitz.Rect | None = None, margins: dict | None = None):
+    """margins(자르기 창): MediaBox 안쪽으로 들어온 거리(pt, 보이는 방향의 top·left·bottom·right)로 쪽마다 CropBox 만 정한다.
+    rect(홈 탭 자르기 도구): 지금 보이는 영역 기준 상자."""
+    if margins is not None:
+        doc.snapshot()
+        with doc.lock:
+            f = doc.fitz
+            for i in pages:
+                rot, media = page_geom(f, i)
+                r = _inset(media, margins, rot)
+                if r:
+                    f.xref_set_key(f[i].xref, "CropBox", _arr(r))
+        return
     doc.snapshot()
     with doc.lock:
         for i in pages:
@@ -616,7 +628,102 @@ def set_box(doc: Document, pages: Iterable[int], box: str, rect: fitz.Rect):
             getattr(p, f"set_{box}box")(r)
 
 
-_NUM = re.compile(r"-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+# ── 박스 여백: 보이는 방향(회전 반영)의 위·왼쪽·아래·오른쪽 거리 ↔ PDF 좌표(아래가 0) 상자 ──
+SIDES = ("top", "right", "bottom", "left")   # 시계 방향
+BOX_KEYS = {"crop": "CropBox", "bleed": "BleedBox", "trim": "TrimBox", "art": "ArtBox"}
+
+
+def _to_view(pdf: dict, rot: int) -> dict:
+    """PDF 쪽 네 변의 값 → 보이는 방향. /Rotate 90 이면 PDF 왼쪽 변이 화면 위로 간다."""
+    k = (rot // 90) % 4
+    return {SIDES[j]: pdf[SIDES[(j - k) % 4]] for j in range(4)}
+
+
+def _to_pdf(view: dict, rot: int) -> dict:
+    k = (rot // 90) % 4
+    return {SIDES[(j - k) % 4]: view[SIDES[j]] for j in range(4)}
+
+
+def _arr(r: list[float]) -> str:
+    return "[" + " ".join(f"{v:g}" for v in r) + "]"
+
+
+def page_geom(f: fitz.Document, i: int) -> tuple[int, list[float]]:
+    """(회전, MediaBox PDF 좌표)."""
+    page = f[i]
+    rot, xref = page.rotation, page.xref
+    del page
+    return rot, _box(f, xref, "MediaBox") or [0, 0, 595, 842]
+
+
+def view_size(media: list[float], rot: int) -> tuple[float, float]:
+    """MediaBox 의 보이는 방향 가로·세로(pt)."""
+    w, h = media[2] - media[0], media[3] - media[1]
+    return (h, w) if rot in (90, 270) else (w, h)
+
+
+def _inset(media: list[float], margins: dict, rot: int) -> list[float] | None:
+    m = _to_pdf(margins, rot)
+    r = [media[0] + m["left"], media[1] + m["bottom"], media[2] - m["right"], media[3] - m["top"]]
+    r = [max(r[0], media[0]), max(r[1], media[1]), min(r[2], media[2]), min(r[3], media[3])]
+    return r if r[2] > r[0] and r[3] > r[1] else None
+
+
+def box_margins(f: fitz.Document, i: int, box: str = "crop") -> dict:
+    """쪽 i 의 박스가 MediaBox 안쪽으로 들어온 거리(pt, 보이는 방향). 없는 블리드·트림·아트 박스는 자르기 박스를 따른다."""
+    rot, media = page_geom(f, i)
+    xref = f[i].xref
+    r = _box(f, xref, BOX_KEYS[box]) if box != "crop" else None
+    r = r or _box(f, xref, "CropBox") or media
+    pdf = {"left": r[0] - media[0], "bottom": r[1] - media[1], "right": media[2] - r[2], "top": media[3] - r[3]}
+    return {k: max(0.0, v) for k, v in _to_view(pdf, rot).items()}
+
+
+def set_boxes(doc: Document, pages: Iterable[int], margins: dict, size: tuple[float, float] | None = None,
+              offset: tuple[float, float] | None = None):
+    """페이지 박스 창: margins = {"crop"|"bleed"|"trim"|"art": 여백 dict(pt, 보이는 방향)}, 준 박스만 새로 정한다.
+
+    size(보이는 방향 가로·세로 pt)가 지금 쪽보다 크면 MediaBox 를 넓힌다(줄이지는 않는다). 원래 쪽은 가운데(offset 없음)나
+    offset(왼쪽 위에서 x·y)에 놓이고 내용은 제자리라 주석을 옮길 일이 없다. 여백은 넓힌 MediaBox 기준이다.
+    넓힐 때 손대지 않은 박스는 제자리, 다만 MediaBox 와 같던 박스는 새 MediaBox 를 따른다.
+    끝으로 포함 관계를 맞춘다: Bleed·Crop ⊆ Media, Trim ⊆ Bleed, Art ⊆ Trim (교집합이 없으면 [0 0 0 0])."""
+    doc.snapshot()
+    with doc.lock:
+        f = doc.fitz
+        for i in pages:
+            rot, media = page_geom(f, i)
+            xref = f[i].xref
+            cur = {b: _box(f, xref, k) for b, k in BOX_KEYS.items()}
+            if size:
+                w, h = view_size(media, rot)
+                ex, ey = max(0.0, size[0] - w), max(0.0, size[1] - h)
+                if ex or ey:
+                    ox, oy = (ex / 2, ey / 2) if offset is None else (min(max(offset[0], 0), ex), min(max(offset[1], 0), ey))
+                    g = _to_pdf({"top": oy, "left": ox, "bottom": ey - oy, "right": ex - ox}, rot)
+                    old = media
+                    media = [old[0] - g["left"], old[1] - g["bottom"], old[2] + g["right"], old[3] + g["top"]]
+                    f.xref_set_key(xref, "MediaBox", _arr(media))
+                    for b, r in cur.items():
+                        if r and all(abs(a - c) < 0.01 for a, c in zip(r, old)):
+                            cur[b] = list(media)
+            for b, m in margins.items():
+                cur[b] = _inset(media, m, rot) or [0, 0, 0, 0]
+
+            def inside(r, outer):
+                if r is None:
+                    return None
+                q = [max(r[0], outer[0]), max(r[1], outer[1]), min(r[2], outer[2]), min(r[3], outer[3])]
+                return q if q[2] > q[0] and q[3] > q[1] else [0, 0, 0, 0]
+            crop = cur["crop"] = inside(cur["crop"], media)
+            bleed = cur["bleed"] = inside(cur["bleed"], media)
+            cur["trim"] = inside(cur["trim"], bleed or crop or media)
+            cur["art"] = inside(cur["art"], cur["trim"] or crop or media)
+            for b, r in cur.items():
+                if r is not None:
+                    f.xref_set_key(xref, BOX_KEYS[b], _arr(r))
+
+
+_NUM =re.compile(r"-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
 def _box(f: fitz.Document, xref: int, key: str) -> list[float] | None:
