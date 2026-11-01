@@ -12,7 +12,8 @@ import traceback
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 import fitz  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 
 def make_pdf(path: str):
@@ -27,6 +28,14 @@ def make_pdf(path: str):
 
 def main() -> int:
     app = QApplication([])
+
+    def close_modal():  # 확인 창(삭제 확인 등)이 뜨면 기본 단추로 닫는다. 안 닫으면 점검이 거기서 멈춘다
+        m = QApplication.activeModalWidget()
+        if isinstance(m, QMessageBox) and m.defaultButton():
+            m.defaultButton().click()
+        elif m is not None:
+            m.reject()
+    closer = QTimer(); closer.timeout.connect(close_modal); closer.start(200)
     from app.ui.window import MainWindow
     from app.engine import annots as A
     w = MainWindow(); w.show()
