@@ -87,6 +87,7 @@ def delete(doc: Document, page: int, xref: int):
     with doc.lock:
         a = get(doc, page, xref)
         if a:
+            _drop_replies(a._page, xref)   # 답글이 지운 주석을 가리킨 채 남지 않게
             a._page.delete_annot(a)
 
 
@@ -422,16 +423,17 @@ def erase_ink_at(doc: Document, page: int, point: fitz.Point, radius: float = 6,
 # ── 글 상자 · 노트 ────────────────────────────────────────────────
 def free_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float = 11, text_color: Color = (0, 0, 0),
               fill: Color | None = None, border: Color | None = None, width: float = 0, opacity: float = 1.0,
-              callout: fitz.Point | None = None, author: str = "", typewriter: bool = False) -> int:
-    """텍스트 박스(테두리·바탕 있음) · 타자기(typewriter=True, 테두리 없음) · 말풍선(callout 점).
+              callout=None, author: str = "", typewriter: bool = False) -> int:
+    """텍스트 박스(테두리·바탕 있음) · 타자기(typewriter=True, 테두리 없음) · 말풍선(callout).
 
-    PyMuPDF 는 richtext 가 아니면 테두리 색을 따로 못 준다(테두리는 글자색). 테두리 색이 글자색과
-    다르면 richtext 로 만든다.
+    callout 은 지시선 끝 점 하나(상자 위 가운데로 잇는다) 또는 끝 점부터 상자까지의 꼭짓점 목록.
+    지시선 끝은 열린 화살촉. PyMuPDF 는 richtext 가 아니면 테두리 색을 따로 못 준다(테두리는 글자색).
+    테두리 색이 글자색과 다르면 richtext 로 만든다.
     """
     doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
-        if callout is not None:
+        if isinstance(callout, fitz.Point):
             callout = (callout, fitz.Point((r.x0 + r.x1) / 2, r.y0))
         if typewriter:
             fill, border, width = None, None, 0
@@ -441,10 +443,11 @@ def free_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float
 
 def _add_free_text(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, text_color: Color, fill: Color | None,
                    border: Color | None, width: float, opacity: float, callout, rotate: int, author: str = "") -> fitz.Annot:
-    """글상자 하나(free_text·주석 가져오기가 같이 씀). callout 은 말풍선 선의 꼭짓점들(없으면 None)."""
+    """글상자 하나(free_text·주석 가져오기·고치기가 같이 씀). callout 은 말풍선 선의 꼭짓점들(없으면 None)."""
     kw = {"rotate": rotate}
     if callout:
         kw["callout"] = tuple(fitz.Point(q) for q in callout)
+        kw["line_end"] = fitz.PDF_ANNOT_LE_OPEN_ARROW
     text_color = tuple(text_color)
     rich = border is not None and tuple(border) != text_color
     if rich:
@@ -461,13 +464,168 @@ def _add_free_text(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, text_
     return a
 
 
-def note(doc: Document, page: int, point: fitz.Point, content: str, icon: str = "Note", color: Color = (1, 0.8, 0),
+def freetext_info(doc: Document, page: int, xref: int) -> dict | None:
+    """쪽 위에서 다시 고칠 글상자의 값. kind 는 textbox · callout · typewriter, box 는 글이 들어가는 네모."""
+    with doc.lock:
+        a = get(doc, page, xref)
+        if not a or a.type[1] != "FreeText":
+            return None
+        f = doc.fitz
+        fs, tc = _freetext_style(doc, a)
+        width = (a.border or {}).get("width") or 0
+        fill = annot_colors(doc, a).get("fill") or None
+        box = _inner(a.rect, _rd(f, a))
+        box = fitz.Rect(box.x0 + width / 2, box.y0 + width / 2, box.x1 - width / 2, box.y1 - width / 2)
+        callout = a.vertices if f.xref_get_key(a.xref, "IT")[1] == "/FreeTextCallout" else None
+        kind = "callout" if callout else "typewriter" if not width and not fill else "textbox"
+        op = a.opacity
+        return {"kind": kind, "text": a.info.get("content", ""), "box": box, "fontsize": fs, "text_color": tc,
+                "fill": tuple(fill) if fill else None, "border": _freetext_border(a) if width else None,
+                "width": width, "opacity": 1.0 if op is None or op < 0 else op, "callout": callout,
+                "rotate": max(a.rotation, 0), "author": a.info.get("title", ""), "subject": a.info.get("subject", "")}
+
+
+def edit_free_text(doc: Document, page: int, xref: int, text: str, box: fitz.Rect | None = None) -> int | None:
+    """글상자의 글(과 글이 들어갈 네모)을 바꾼다. 빈 글이면 지우고 None. 한 걸음에 실행 취소된다.
+
+    다시 만들어 그린다(말풍선은 set_rect 로 지시선이 흐트러진다). 지시선 꼭짓점·모양·작성자는 그대로."""
+    info = freetext_info(doc, page, xref)
+    if info is None:
+        return None
+    doc.snapshot()
+    with doc.lock:
+        p = doc.fitz[page]
+        a = get(doc, page, xref)
+        if not text.strip():
+            _drop_replies(p, xref)
+            p.delete_annot(a)
+            return None
+        f = doc.fitz
+        keep = [(k, f.xref_get_key(xref, k)) for k in ("NM", "CreationDate")]
+        p.delete_annot(a)
+        b = fitz.Rect(box or info["box"])
+        callout = info["callout"]
+        if callout:   # 상자가 줄어도 지시선이 상자에 닿게(상자 쪽 끝 점을 상자 안으로)
+            q = callout[-1]
+            callout = list(callout[:-1]) + [(min(max(q[0], b.x0), b.x1), min(max(q[1], b.y0), b.y1))]
+        n = _add_free_text(p, b, text, info["fontsize"], info["text_color"], info["fill"],
+                           info["border"], info["width"], info["opacity"], callout, info["rotate"],
+                           info["author"])
+        for k, (t, v) in keep:
+            if t != "null":
+                f.xref_set_key(n.xref, k, v)
+        if info["subject"]:
+            f.xref_set_key(n.xref, "Subj", fitz.get_pdf_str(info["subject"]))
+        for r in p.annots():   # 이 글상자에 달린 답글이 새 글상자를 가리키게
+            if _irt(f, r.xref) == xref:
+                f.xref_set_key(r.xref, "IRT", f"{n.xref} 0 R")
+        return n.xref
+
+
+def peek_hide(doc: Document, page: int, xref: int, hidden: bool) -> None:
+    """쪽 위에서 고치는 동안만 주석을 숨긴다(실행 취소 기록 없이 /F 숨김 비트만). 끝나면 꼭 False 로 되돌린다."""
+    with doc.lock:
+        f = doc.fitz
+        t, v = f.xref_get_key(xref, "F")
+        fl = int(v) if t == "int" else 0
+        f.xref_set_key(xref, "F", str(fl | 2 if hidden else fl & ~2))
+
+
+def user_author(author: str = "") -> str:
+    """작성자 칸이 비었으면 Windows 사용자 이름(새 주석·답글에 쓴다)."""
+    return author or os.environ.get("USERNAME", "") or os.environ.get("USER", "")
+
+
+def note(doc: Document, page: int, point: fitz.Point, content: str, icon: str = "Comment", color: Color = (1, 1, 0),
          author: str = "") -> int:
     doc.snapshot()
     with doc.lock:
         a = doc.fitz[page].add_text_annot(point, content, icon=icon)
         _finish(a, stroke=color, content=content, author=author)
         return a.xref
+
+
+# ── 답글(/IRT 로 이어진 노트. 다른 PDF 뷰어에서도 답글로 보인다) ─────────────
+def _irt(f: fitz.Document, xref: int) -> int:
+    t, v = f.xref_get_key(xref, "IRT")
+    try:
+        return int(v.split()[0]) if t == "xref" else 0
+    except (ValueError, IndexError):
+        return 0
+
+
+def _hide_ap(a: fitz.Annot) -> None:
+    """답글은 쪽에 아이콘을 그리지 않는다(빈 모양). 원 주석과 같은 자리라 눌러도 원 주석이 골라진다."""
+    a._setAP(b" ")
+
+
+def _drop_replies(p: fitz.Page, xref: int) -> None:
+    f = p.parent
+    for k in [a.xref for a in p.annots() if _irt(f, a.xref) == xref]:
+        _drop_replies(p, k)
+        a = next((a for a in p.annots() if a.xref == k), None)
+        if a:
+            p.delete_annot(a)
+
+
+def is_reply(doc: Document, xref: int) -> bool:
+    return _irt(doc.fitz, xref) > 0
+
+
+def replies(doc: Document, page: int, xref: int) -> list[dict]:
+    """그 주석에 바로 달린 답글들(단 차례). 칸: xref · content · author · modified."""
+    out = []
+    with doc.lock:
+        f = doc.fitz
+        for a in f[page].annots():
+            if a.type[1] == "Text" and _irt(f, a.xref) == xref:
+                info = a.info
+                out.append({"xref": a.xref, "content": info.get("content", ""), "author": info.get("title", ""),
+                            "modified": info.get("modDate", "") or info.get("creationDate", "")})
+    return out
+
+
+def add_reply(doc: Document, page: int, parent_xref: int, text: str, author: str = "") -> int | None:
+    """주석에 답글을 단다: /IRT 가 원 주석을 가리키고 /RT /R 인 노트(Text) 주석. 작성자가 비면 Windows 사용자 이름."""
+    doc.snapshot()
+    with doc.lock:
+        par = get(doc, page, parent_xref)
+        if not par:
+            return None
+        f = doc.fitz
+        r = fitz.Rect(par.rect)
+        a = par._page.add_text_annot(r.tl, text, icon="Comment")
+        col = par.colors.get("stroke") or par.colors.get("fill")
+        _finish(a, stroke=tuple(col) if col else None, content=text, author=user_author(author))
+        a.set_rect(r)
+        _hide_ap(a)
+        f.xref_set_key(a.xref, "IRT", f"{parent_xref} 0 R")
+        f.xref_set_key(a.xref, "RT", "/R")
+        return a.xref
+
+
+def update_reply(doc: Document, page: int, xref: int, text: str) -> bool:
+    doc.snapshot()
+    with doc.lock:
+        a = get(doc, page, xref)
+        if not a or not _irt(doc.fitz, xref):
+            return False
+        a.set_info(content=text)
+        a.update()
+        _hide_ap(a)
+        return True
+
+
+def delete_reply(doc: Document, page: int, xref: int) -> bool:
+    """답글 하나(와 거기 달린 답글)를 지운다."""
+    doc.snapshot()
+    with doc.lock:
+        a = get(doc, page, xref)
+        if not a or not _irt(doc.fitz, xref):
+            return False
+        _drop_replies(a._page, xref)
+        a._page.delete_annot(a)
+        return True
 
 
 def attachment(doc: Document, page: int, point: fitz.Point, path: str, author: str = "") -> int:

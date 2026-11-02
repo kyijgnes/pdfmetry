@@ -835,6 +835,10 @@ class PageView(QGraphicsView):
             self.clear_selection()
         elif self._links_editable() and self._press_link(i, sp):
             return
+        elif t in ("textbox", "callout", "typewriter"):
+            # 누른 자리에서 바로 쓰는 글 주석(말풍선은 누른 자리가 지시선 끝)
+            self.requestDialog.emit("textbox", {"page": i, "scene_pt": sp, "kind": t})
+            return
         elif t in TOOLS_MARKUP or t in TOOLS_SHAPE:
             if t in ("polygon", "polyline", "cloud", "m_perimeter", "m_area"):
                 if self._poly and self._poly_page != i:
@@ -1017,7 +1021,9 @@ class PageView(QGraphicsView):
             self._finish_poly()
             return
         if self.sel and self.sel.kind == "annot" and self.sel.rect and self.sel.rect.contains(self.to_page(i, sp)):
-            self.requestDialog.emit("annot_props", self.sel)
+            # 글상자는 그 자리에서 고치고, 노트는 팝업을 연다
+            k = self.sel.extra.get("kind")
+            self.requestDialog.emit({"FreeText": "textbox_edit", "Text": "note_open"}.get(k, "annot_props"), self.sel)
             return
         if self.sel and self.sel.kind == "widget":
             self.requestDialog.emit("field_props", self.sel)

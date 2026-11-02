@@ -34,6 +34,7 @@ from . import dlg_split as DS
 from . import icons, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
+from .inline_annot import InlineAnnot, NotePopup
 from .organize import OrganizeView
 from .props import PropsPanel
 from .quick_style import QuickStyle, eraser_radius, has_quick_style, style_key
@@ -1237,19 +1238,42 @@ class MainWindow(QMainWindow):
     def on_request(self, t: DocTab, kind: str, data):  # noqa: C901
         d, v = t.doc, t.viewer
         if kind == "textbox":
-            dlg = D.TextBoxDialog(self, data["kind"], v.props)
-            if dlg.exec():
-                vals = dlg.values()
-                if vals["text"].strip():
-                    callout = None
-                    if data["kind"] == "callout":
-                        r = data["rect"]; callout = fitz.Point(r.x0 - 40, r.y1 + 40)
-                    A.free_text(d, data["page"], data["rect"], vals["text"], vals["fontsize"], vals["text_color"], vals["fill"],
-                                vals["border"], vals["width"], v.props["opacity"], callout=callout, author=v.props["author"],
-                                typewriter=(data["kind"] == "typewriter"))
-                    t.props.remember(data["kind"], {k: vals[k] for k in ("fontsize", "text_color", "fill", "border", "width")})
-                    t.changed([data["page"]])
-            self.on_tool("select")
+            # 누른 자리에서 바로 쓰고, 다 쓰면 그 종류의 기본 모양으로 굽는다(빈 글이면 안 남김)
+            st = t.props.store.get(data["kind"])
+            def done(text: str, rect, callout, t=t, i=data["page"], k=data["kind"], st=st):
+                if t.viewer.closed:
+                    return
+                if text.strip():
+                    A.free_text(t.doc, i, rect, text, st["fontsize"], st["text_color"], st.get("fill"), st.get("border"),
+                                st.get("width", 0), st.get("opacity", 1.0), callout=callout,
+                                author=A.user_author(t.viewer.props["author"]), typewriter=(k == "typewriter"))
+                    t.changed([i])
+                t.viewer.toolDone.emit(k)
+            sp = data.get("scene_pt") or v.from_page_rect(data["page"], data["rect"]).topLeft()   # 끌어 그린 네모면 왼쪽 위
+            InlineAnnot(v, data["page"], data["kind"], st, done, scene_pt=sp)
+        elif kind == "textbox_edit":
+            s = data
+            info = A.freetext_info(d, s.page, s.xref)
+            if info is None or info["subject"] == "Stamp":
+                return self.on_request(t, "annot_props", s)
+            v.clear_selection()
+            A.peek_hide(d, s.page, s.xref, True); v.refresh_pages([s.page])   # 고치는 동안 쪽의 옛 글을 숨김
+            def done(text: str, rect, _callout, t=t, s=s, old=info["text"]):
+                A.peek_hide(t.doc, s.page, s.xref, False)
+                if not t.viewer.closed and text != old:
+                    A.edit_free_text(t.doc, s.page, s.xref, text, rect); t.changed([s.page])
+                elif not t.viewer.closed:
+                    t.viewer.refresh_pages([s.page])
+            InlineAnnot(v, s.page, info["kind"], info, done, box=info["box"], text=info["text"], callout=info["callout"])
+        elif kind in ("note", "note_open"):
+            # 노트 팝업(내용·색·답글). 노트 도구로 이미 있는 노트를 누르면 그 노트를 연다
+            i, pt = (data.page, fitz.Point(data.rect.tl)) if kind == "note_open" else (data["page"], data["point"])
+            hit = data.xref if kind == "note_open" else next(
+                (a.xref for a in d.fitz[i].annots() if a.type[1] == "Text" and not A.is_reply(d, a.xref)
+                 and fitz.Rect(a.rect).contains(pt)), None)
+            if hit is not None and kind == "note":
+                pt = fitz.Point(A.get(d, i, hit).rect.tl)
+            NotePopup(v, i, pt, hit, t.props.store.get("note")["color"], v.props["author"], lambda p, t=t: t.changed([p]))
         elif kind == "addtext":
             def done(text: str, rect, style: dict, t=t, i=data["page"]):
                 self.prefs["addtext_style"] = style; save_settings(self.settings)   # 마지막 서식 기억
@@ -1298,15 +1322,10 @@ class MainWindow(QMainWindow):
             if p and os.path.exists(p):
                 A.signature_image(d, data["page"], data["rect"], p); t.changed([data["page"]])
             self._tool_done("signature")
-        elif kind == "note":
-            text, ok = QInputDialog.getMultiLineText(self, "노트", "내용")
-            if ok and text.strip():
-                A.note(d, data["page"], data["point"], text, color=v.props["hl_color"], author=v.props["author"]); t.changed([data["page"]])
-        elif kind == "caret":
-            text, ok = QInputDialog.getText(self, "삽입 기호", "끼워 넣을 글자(메모)")
-            if ok:
-                A.caret(d, data["page"], data["point"], text, v.props["author"], v.props.get("caret_color", (0.5, 0, 0.5)),
-                        v.props["opacity"]); t.changed([data["page"]])
+        elif kind == "caret":   # 대화상자 없이 바로 단다(내용은 속성 패널·주석 목록에서)
+            A.caret(d, data["page"], data["point"], "", A.user_author(v.props["author"]),
+                    v.props.get("caret_color", (0.5, 0, 0.5)), v.props["opacity"]); t.changed([data["page"]])
+            self._tool_done("caret")
         elif kind == "attach":
             p, _ = QFileDialog.getOpenFileName(self, "첨부할 파일")
             if p:
