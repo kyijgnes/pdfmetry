@@ -5,9 +5,9 @@ import queue
 import time
 
 import fitz
-from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog,
+from PySide6.QtWidgets import (QAbstractItemDelegate, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
                                QStyle, QStyledItemDelegate, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -499,33 +499,81 @@ class BookmarkPanel(QWidget):
             parent.addChild(it); parent.setExpanded(True); self._save()
 
 
+class _NoteEditor(QStyledItemDelegate):
+    """주석 목록 내용 칸을 그 자리에서 고친다: 여러 줄, Ctrl+Enter 확정, Esc 취소, 칸을 떠나도 확정."""
+
+    def __init__(self, panel: "AnnotPanel"):
+        super().__init__(panel.tree)
+        self.panel = panel
+
+    def createEditor(self, parent, opt, idx):
+        from PySide6.QtWidgets import QPlainTextEdit
+        e = QPlainTextEdit(parent)
+        e.setPlaceholderText("답장 입력" if self.panel._is_new_reply(idx) else "주석 내용")
+        return e
+
+    def setEditorData(self, e, idx):
+        e.setPlainText(idx.data(Qt.ItemDataRole.EditRole) or "")
+        e.selectAll()
+
+    def setModelData(self, e, model, idx):
+        self.panel._commit_edit(idx, e.toPlainText())
+
+    def updateEditorGeometry(self, e, opt, idx):
+        r = opt.rect
+        e.setGeometry(r.x(), r.y(), max(r.width(), 120), max(r.height() * 3, 60))
+
+    def eventFilter(self, e, ev):
+        if ev.type() == QEvent.Type.KeyPress and ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
+                and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.commitData.emit(e)
+            self.closeEditor.emit(e, QAbstractItemDelegate.EndEditHint.NoHint)
+            return True
+        return super().eventFilter(e, ev)
+
+
 class AnnotPanel(QWidget):
-    gotoAnnot = Signal(int, object)  # page, rect
+    pickAnnot = Signal(int, int)  # page, xref: 뷰어에서도 그 주석을 고른다
     changed = Signal()
     importExport = Signal(str)
 
     def __init__(self, doc: Document, parent=None):
         super().__init__(parent)
         self.doc = doc
+        self.flt: dict | None = None      # 필터 창에서 고른 작성자·종류·색(없으면 전부)
+        self._syncing = False
+        self._collapsed: set[str] = set()
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
         lay.addWidget(panel_head("주석", tuple((name, tip, lambda _=False, k=key: self._action(k)) for name, tip, key in (
             ("import", "주석 가져오기", "import"), ("export", "주석 내보내기", "export"), ("delete", "모두 삭제", "delete_all")))))
         box = QWidget(); bl = QVBoxLayout(box); bl.setContentsMargins(8, 6, 8, 6); bl.setSpacing(4)
         row = QHBoxLayout(); row.setSpacing(4)
-        self.filter = QComboBox(); self.filter.addItems(["전체"] + sorted(set(A.KIND_NAMES.values())))
-        self.filter.currentIndexChanged.connect(self.reload)
         # 묶는 기준(주석 목록: 쪽·날짜·작성자·종류). 저장하지 않고 늘 쪽순으로 연다
         self.group = QComboBox(); self.group.addItems(["쪽순", "날짜순", "작성자순", "종류순"])
         self.group.currentIndexChanged.connect(self.reload)
-        row.addWidget(self.filter, 1); row.addWidget(self.group, 1); bl.addLayout(row)
+        self.filter_btn = QPushButton("필터"); self.filter_btn.setCheckable(True)
+        self.filter_btn.clicked.connect(self.open_filter)
+        row.addWidget(self.group, 1); row.addWidget(self.filter_btn); bl.addLayout(row)
         self.find = QLineEdit(); self.find.setPlaceholderText("내용·작성자 찾기"); self.find.setClearButtonEnabled(True)
         self.find.textChanged.connect(self.reload)
-        bl.addWidget(self.find); lay.addWidget(box)
-        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["종류", "내용", "작성자"]); _tidy_tree(self.tree, 1)
-        self.tree.itemClicked.connect(self._clicked)
-        self.tree.itemDoubleClicked.connect(lambda it, _c: (d := it.data(0, Qt.ItemDataRole.UserRole)) and self._edit(d))
+        bl.addWidget(self.find)
+        row = QHBoxLayout(); row.setSpacing(4)
+        for text, fn in (("모두 펼치기", self.expand_all), ("모두 접기", self.collapse_all)):
+            b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b, 1)
+        bl.addLayout(row)
+        lay.addWidget(box)
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["종류", "내용", "작성자", "날짜"]); _tidy_tree(self.tree, 1)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)   # 내용 칸만 직접 연다
+        self.tree.setItemDelegateForColumn(1, _NoteEditor(self))
+        self.tree.itemDelegateForColumn(1).closeEditor.connect(lambda *_: QTimer.singleShot(0, self._drop_empty_reply))
+        self.tree.itemSelectionChanged.connect(self._selected)
+        self.tree.itemDoubleClicked.connect(lambda it, _c: self.edit_item(it))
+        self.tree.itemCollapsed.connect(lambda it: it.parent() is None and self._collapsed.add(it.text(0)))
+        self.tree.itemExpanded.connect(lambda it: it.parent() is None and self._collapsed.discard(it.text(0)))
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._menu)
+        self.tree.installEventFilter(self)
         lay.addWidget(self.tree)
         self.empty = QLabel(""); self.empty.setObjectName("dim"); self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty.hide(); lay.addWidget(self.empty)
@@ -536,18 +584,45 @@ class AnnotPanel(QWidget):
         s = (mod or "").removeprefix("D:")
         return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) >= 8 and s[:8].isdigit() else "날짜 없음"
 
+    @staticmethod
+    def _when(mod: str) -> str:
+        """목록의 날짜 칸: 오늘 고친 것은 시:분, 아니면 yyyy/MM/dd."""
+        s = (mod or "").removeprefix("D:")
+        if len(s) < 12 or not s[:12].isdigit():
+            return ""
+        return f"{s[8:10]}:{s[10:12]}" if s[:8] == time.strftime("%Y%m%d") else f"{s[:4]}/{s[4:6]}/{s[6:8]}"
+
+    def _passes(self, a: A.AnnotInfo) -> bool:
+        if not self.flt:
+            return True
+        from .annot_filter import color_key
+        return all(v in self.flt[k] for k, v in (("authors", a.author or ""), ("kinds", a.kind_ko),
+                                                  ("colors", color_key(a.color))) if k in self.flt)
+
     def reload(self):
+        keep = {d[1] for d in (it.data(0, Qt.ItemDataRole.UserRole) for it in self.tree.selectedItems()) if d}
+        self._syncing = True
+        try:
+            self._reload(keep)
+        finally:
+            self._syncing = False
+
+    def _reload(self, keep: set[int]):
         self.tree.clear()
-        want = self.filter.currentText()
         q = self.find.text().strip().lower()
         how = self.group.currentIndex()
+        every = [a for a in A.list_annots(self.doc) if a.kind not in ("Link", "Widget", "Popup")]
+        self._all = every
+        replies: dict[int, list[A.AnnotInfo]] = {}
         rows = []
-        for a in A.list_annots(self.doc):
-            if a.kind in ("Link", "Widget", "Popup"):
+        for a in every:
+            if a.irt:
+                replies.setdefault(a.irt, []).append(a)
                 continue
-            if want != "전체" and a.kind_ko != want:
+            if not self._passes(a):
                 continue
-            if q and q not in (a.content or "").lower() and q not in (a.author or "").lower():
+            if q and q not in (a.content or "").lower() and q not in (a.author or "").lower() \
+                    and q not in (a.marked or "").lower():
                 continue
             head = (f"{a.page + 1}쪽", self._day(a.modified), a.author or "작성자 없음", a.kind_ko)[how]
             key = (a.page, "", a.author or "￿", a.kind_ko)[how]
@@ -557,44 +632,193 @@ class AnnotPanel(QWidget):
         # 날짜는 새것부터, 나머지는 오름차순. 같은 묶음 안은 문서 차례(쪽 → 쪽 안 차례)
         rows.sort(key=lambda r: r[0], reverse=(how == 1))
         groups: dict[str, QTreeWidgetItem] = {}
+        lock = icons.icon("lock", 14)
         for _key, head, a in rows:
             if head not in groups:
-                pit = QTreeWidgetItem([head, "", ""])
+                pit = QTreeWidgetItem([head, "", "", ""])
                 pit.setFlags(pit.flags() & ~Qt.ItemFlag.ItemIsSelectable)
                 self.tree.addTopLevelItem(pit)
                 groups[head] = pit
-            it = QTreeWidgetItem([a.kind_ko, a.content, a.author])
+            text = f"「{a.marked}」 {a.content}".strip() if a.marked else a.content
+            it = QTreeWidgetItem([a.kind_ko, text, a.author, self._when(a.modified)])
+            it.setData(1, Qt.ItemDataRole.EditRole, a.content)
+            it.setText(1, text.replace("\n", " "))
             if how != 0:
                 it.setText(0, f"{a.page + 1}쪽 {a.kind_ko}" if how != 3 else f"{a.page + 1}쪽")
-            it.setData(0, Qt.ItemDataRole.UserRole, (a.page, a.xref, a.rect))
+            if a.locked:
+                it.setIcon(0, lock)
+            it.setData(0, Qt.ItemDataRole.UserRole, (a.page, a.xref, a.rect, 0, a.locked))
             groups[head].addChild(it)
-        self.tree.expandAll()
-        self.empty.setText("찾은 주석 없음" if (q or want != "전체") else "주석 없음")
+            self._add_replies(it, a, replies)
+            if a.xref in keep:
+                it.setSelected(True)
+        for head, pit in groups.items():
+            pit.setExpanded(head not in self._collapsed)
+            for k in range(pit.childCount()):
+                pit.child(k).setExpanded(True)
+        self.filter_btn.setChecked(bool(self.flt))
+        self.empty.setText("찾은 주석 없음" if (q or self.flt) else "주석 없음")
         self.empty.setVisible(not rows)
         self.tree.setVisible(bool(rows))
 
-    def _clicked(self, it, _):
+    def _add_replies(self, parent: QTreeWidgetItem, a: A.AnnotInfo, replies: dict):
+        """답글은 원 주석 아래 들여 쓴 줄로(답글의 답글은 한 칸 더)."""
+        for r in replies.get(a.xref, ()):
+            it = QTreeWidgetItem(["답글", r.content.replace("\n", " "), r.author, self._when(r.modified)])
+            it.setData(1, Qt.ItemDataRole.EditRole, r.content)
+            it.setText(1, r.content.replace("\n", " "))
+            it.setData(0, Qt.ItemDataRole.UserRole, (r.page, r.xref, a.rect, a.xref, a.locked))
+            parent.addChild(it)
+            self._add_replies(it, r, replies)
+
+    # ── 고르기(문서와 서로 따라감) ───────────────────────────────
+    def _selected(self):
+        if self._syncing:
+            return
+        its = [it for it in self.tree.selectedItems() if it.data(0, Qt.ItemDataRole.UserRole)]
+        if len(its) == 1:
+            it = its[0]
+            while it.parent() is not None and it.parent().data(0, Qt.ItemDataRole.UserRole):
+                it = it.parent()
+            d = it.data(0, Qt.ItemDataRole.UserRole)
+            self.pickAnnot.emit(d[0], d[1])
+
+    def _item_of(self, xref: int) -> QTreeWidgetItem | None:
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            it = stack.pop()
+            d = it.data(0, Qt.ItemDataRole.UserRole)
+            if d and d[1] == xref:
+                return it
+            stack.extend(it.child(k) for k in range(it.childCount()))
+        return None
+
+    def follow(self, sel):
+        """뷰어에서 고른 주석을 목록에서도 고른다(목록이 다시 뷰어를 부르지 않게)."""
+        self._syncing = True
+        try:
+            it = self._item_of(sel.xref) if sel is not None and getattr(sel, "kind", "") == "annot" else None
+            if it is None:
+                self.tree.clearSelection()
+                return
+            if not it.isSelected() or len(self.tree.selectedItems()) != 1:
+                self.tree.clearSelection(); it.setSelected(True)
+            if it.parent() is not None:
+                it.parent().setExpanded(True)
+            self.tree.setCurrentItem(it, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+            self.tree.scrollToItem(it)
+        finally:
+            self._syncing = False
+
+    # ── 그 자리 편집 · 답글 ───────────────────────────────────
+    def edit_item(self, it: QTreeWidgetItem | None):
+        d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
+        if not d or d[4]:   # 잠긴 주석(과 그 답글)은 못 고친다
+            return
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.tree.editItem(it, 1)
+
+    def _is_new_reply(self, idx) -> bool:
+        d = self.tree.itemFromIndex(idx).data(0, Qt.ItemDataRole.UserRole) if idx.isValid() else None
+        return bool(d) and d[1] == 0
+
+    def add_reply(self, it: QTreeWidgetItem):
+        """줄 아래 빈 답글 줄을 열어 바로 쓰게 한다. 비운 채 닫으면 없어진다."""
         d = it.data(0, Qt.ItemDataRole.UserRole)
-        if d:
-            self.gotoAnnot.emit(d[0], d[2])
+        if not d or d[4]:
+            return
+        new = QTreeWidgetItem(["답글", "", "", ""])
+        new.setData(0, Qt.ItemDataRole.UserRole, (d[0], 0, d[2], d[1], False))
+        it.addChild(new); it.setExpanded(True)
+        self.edit_item(new)
+
+    def _commit_edit(self, idx, text: str):
+        it = self.tree.itemFromIndex(idx)
+        d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
+        if not d:
+            return
+        page, xref, _r, parent, _l = d
+        if xref == 0:
+            if text.strip():
+                A.add_reply(self.doc, page, parent, text)
+            else:
+                return
+        elif text == (it.data(1, Qt.ItemDataRole.EditRole) or ""):
+            return
+        elif parent:
+            A.update_reply(self.doc, page, xref, text)
+        else:
+            A.update(self.doc, page, xref, content=text)
+        QTimer.singleShot(0, lambda: (self.reload(), self.changed.emit()))
+
+    def _drop_empty_reply(self):
+        """비운 채 닫은 답글 줄을 걷는다."""
+        for it in list(self._items()):
+            d = it.data(0, Qt.ItemDataRole.UserRole)
+            if d and d[1] == 0 and it.parent() is not None:
+                it.parent().removeChild(it)
+
+    def _items(self):
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            it = stack.pop()
+            yield it
+            stack.extend(it.child(k) for k in range(it.childCount()))
+
+    # ── 지우기 · 메뉴 ─────────────────────────────────────────
+    def delete_selected(self):
+        """고른 줄을 확인 없이 지운다(잠긴 것은 남는다). 답글은 답글만."""
+        ds = [it.data(0, Qt.ItemDataRole.UserRole) for it in self.tree.selectedItems()]
+        ds = [d for d in ds if d and d[1] and not d[4]]
+        if not ds:
+            return
+        for page, xref, _r, parent, _l in ds:
+            if parent:
+                A.delete_reply(self.doc, page, xref)
+            else:
+                A.delete(self.doc, page, xref)
+        self.reload(); self.changed.emit()
+
+    def expand_all(self):
+        self._collapsed.clear(); self.tree.expandAll()
+
+    def collapse_all(self):
+        self._collapsed = {self.tree.topLevelItem(i).text(0) for i in range(self.tree.topLevelItemCount())}
+        self.tree.collapseAll()
+
+    def eventFilter(self, obj, e):
+        if obj is self.tree and e.type() == QEvent.Type.KeyPress and self.tree.state() != QAbstractItemView.State.EditingState:
+            if e.key() == Qt.Key.Key_Delete:
+                self.delete_selected(); return True
+            if e.key() == Qt.Key.Key_F2:
+                self.edit_item(self.tree.currentItem()); return True
+        return super().eventFilter(obj, e)
 
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
         d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
         m = QMenu(self)
         if d:
-            m.addAction("내용 고치기", lambda: self._edit(d))
-            m.addAction("삭제", lambda: (A.delete(self.doc, d[0], d[1]), self.reload(), self.changed.emit()))
+            if not it.isSelected():
+                self.tree.clearSelection(); it.setSelected(True)
+            m.addAction("고치기", lambda: self.edit_item(it)).setEnabled(not d[4])
+            m.addAction("답글", lambda: self.add_reply(it)).setEnabled(not d[4])
+            m.addAction("삭제", self.delete_selected).setEnabled(not d[4])
+        else:
+            m.addAction("모두 펼치기", self.expand_all)
+            m.addAction("모두 접기", self.collapse_all)
         m.exec(self.tree.mapToGlobal(pos))
 
-    def _edit(self, d):
-        a = A.get(self.doc, d[0], d[1])
-        if not a:
-            return
-        text, ok = QInputDialog.getMultiLineText(self, "주석 내용", "내용", a.info.get("content", ""))
-        if ok:
-            A.update(self.doc, d[0], d[1], content=text)
-            self.reload(); self.changed.emit()
+    def open_filter(self):
+        from .annot_filter import AnnotFilterDialog, color_key
+        every = getattr(self, "_all", [])
+        authors = sorted({a.author or "" for a in every if not a.irt})
+        kinds = sorted({a.kind_ko for a in every if not a.irt})
+        colors = sorted({color_key(a.color) for a in every if not a.irt})
+        dlg = AnnotFilterDialog(self, authors, kinds, colors, self.flt)
+        if dlg.exec():
+            self.flt = dlg.values()
+        self.reload()
 
     def _action(self, key: str):
         if key == "delete_all":

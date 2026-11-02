@@ -658,6 +658,8 @@ class PreferencesDialog(QDialog):
         lay = QVBoxLayout(self); tabs = QTabWidget(); lay.addWidget(tabs)
         w = QWidget(); f = QFormLayout(w)
         self.author = QLineEdit(prefs.get("author", "")); f.addRow("주석 작성자 이름", self.author)
+        self.autosave_style = QCheckBox("마지막에 고친 주석 모양을 기본값으로")
+        self.autosave_style.setChecked(prefs.get("annot_autosave_style", True)); f.addRow(self.autosave_style)
         self.zoom = QComboBox(); self.zoom.addItems(["창 너비에 맞추기", "창 크기에 맞추기", "실제 크기", "마지막으로 쓴 확대"])
         self.zoom.setCurrentIndex(["fit_width", "fit_page", "actual", "last"].index(prefs.get("default_zoom", "last")))
         f.addRow("열 때 확대", self.zoom)
@@ -679,7 +681,8 @@ class PreferencesDialog(QDialog):
         lay.addWidget(_buttons(self, "저장"))
 
     def values(self) -> dict:
-        return {"author": self.author.text(), "default_zoom": ["fit_width", "fit_page", "actual", "last"][self.zoom.currentIndex()],
+        return {"author": self.author.text(), "annot_autosave_style": self.autosave_style.isChecked(),
+                "default_zoom": ["fit_width", "fit_page", "actual", "last"][self.zoom.currentIndex()],
                 "default_layout": ["continuous", "single", "facing", "facing_continuous"][self.layout_.currentIndex()],
                 "dark": self.dark.isChecked(), "restore": self.restore.isChecked(),
                 "window_size": ["last", "max", "normal"][self.winsize.currentIndex()], "recent_n": self.recent_n.value(),

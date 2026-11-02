@@ -11,7 +11,7 @@ import os
 
 import fitz
 
-from .annots import Color, MARKUP_KINDS, _freetext_border, _freetext_style, annot_colors  # noqa: F401
+from .annots import Color, MARKUP_KINDS, _freetext_border, _freetext_style, annot_colors, line_ends  # noqa: F401
 from .document import Document
 
 YELLOW = (1.0, 238 / 255, 54 / 255)   # 강조색 #FFEE36
@@ -20,7 +20,8 @@ PURPLE = (0.5, 0.0, 0.5)
 
 # 기본값(기능명세/주석.md 「주석 객체와 종류별 기본값」). 선 굵기 1·불투명도 100%·채움 없음이 공통.
 _SHAPE = {"stroke": RED, "fill": None, "width": 1.0, "opacity": 1.0}
-_LINE = {"stroke": RED, "width": 1.0, "opacity": 1.0}
+_LE_NONE, _LE_OPEN = fitz.PDF_ANNOT_LE_NONE, fitz.PDF_ANNOT_LE_OPEN_ARROW
+_LINE = {"stroke": RED, "width": 1.0, "opacity": 1.0, "start": _LE_NONE, "end": _LE_NONE}
 _TEXT = {"text_color": RED, "fontsize": 14.0, "opacity": 1.0}
 DEFAULTS: dict[str, dict] = {
     "highlight": {"color": YELLOW, "opacity": 1.0},
@@ -30,24 +31,38 @@ DEFAULTS: dict[str, dict] = {
     "caret": {"color": PURPLE, "opacity": 1.0},
     "areahl": {"color": YELLOW, "opacity": 0.3},   # 일반적인 PDF 편집기는 채움 알파 76(약 30%)
     "rect": dict(_SHAPE), "oval": dict(_SHAPE), "polygon": dict(_SHAPE), "cloud": dict(_SHAPE),
-    "line": dict(_LINE), "arrow": dict(_LINE), "polyline": dict(_LINE),
+    "line": dict(_LINE), "arrow": dict(_LINE, end=_LE_OPEN), "polyline": dict(_LINE),
     "pencil": {"stroke": RED, "width": 1.0, "opacity": 1.0},
     "note": {"color": (1.0, 1.0, 0.0), "opacity": 1.0},
     "textbox": dict(_TEXT, fill=None, border=RED, width=1.0),
-    "callout": dict(_TEXT, fill=None, border=RED, width=1.0),
+    "callout": dict(_TEXT, fill=None, border=RED, width=1.0, start=_LE_OPEN),
     "typewriter": dict(_TEXT),
     "stamp": {"stroke": (0.8, 0.0, 0.0)},
+    "attach": {"color": (1.0, 1.0, 0.0), "opacity": 1.0, "icon": "PushPin"},
 }
 
 # 속성 패널이 그 종류에 보일 칸(차례 그대로). 고른 주석에만 보이는 칸은 SELECTED_ONLY.
 FIELDS: dict[str, tuple[str, ...]] = {k: tuple(v) for k, v in DEFAULTS.items()}
 for _k in ("rect", "oval", "polygon", "cloud", "line", "arrow", "polyline"):
     FIELDS[_k] += ("dashes",)
-SELECTED_ONLY = ("dashes",)
+for _k in ("rect", "oval", "polygon", "cloud"):
+    FIELDS[_k] += ("clouds",)
+SELECTED_ONLY = ("dashes", "clouds")
 
-# 테두리 모양(속성 패널 목록에서 구름 둘은 다각형의 「클라우드」 도구로 따로 있어 뺌)
+# 테두리 모양. 구름 둘은 사각형·타원·다각형(클라우드 포함)에만 보인다
 DASHES = {"실선": (), "점선 2·2": (2, 2), "점선 3·3": (3, 3), "점선 4·4": (4, 4),
           "점선 4·3·2·4": (4, 3, 2, 4), "점선 4·3·1·6·3·3": (4, 3, 1, 6, 3, 3), "점선 8·4·4·4": (8, 4, 4, 4)}
+CLOUDS = {"구름 1": 1, "구름 2": 2}
+
+# 선 끝 열 가지(이름 → PDF_ANNOT_LE_*)
+LINE_ENDS = {"없음": fitz.PDF_ANNOT_LE_NONE, "수직선": fitz.PDF_ANNOT_LE_BUTT, "원": fitz.PDF_ANNOT_LE_CIRCLE,
+             "닫힌 화살촉": fitz.PDF_ANNOT_LE_CLOSED_ARROW, "마름모": fitz.PDF_ANNOT_LE_DIAMOND,
+             "열린 화살촉": fitz.PDF_ANNOT_LE_OPEN_ARROW, "거꾸로 닫힌 화살촉": fitz.PDF_ANNOT_LE_R_CLOSED_ARROW,
+             "거꾸로 열린 화살촉": fitz.PDF_ANNOT_LE_R_OPEN_ARROW, "사선": fitz.PDF_ANNOT_LE_SLASH,
+             "네모": fitz.PDF_ANNOT_LE_SQUARE}
+
+# 첨부 아이콘(이름 → /Name)
+ATTACH_ICONS = {"그래프": "Graph", "클립": "Paperclip", "압정": "PushPin", "꼬리표": "Tag"}
 
 # 도구 → 이름(속성 패널 맨 위)
 TOOL_NAMES = {
@@ -55,6 +70,7 @@ TOOL_NAMES = {
     "areahl": "영역 강조", "rect": "직사각형", "oval": "타원", "polygon": "다각형", "cloud": "클라우드",
     "line": "선", "arrow": "화살표", "polyline": "연결된 선", "pencil": "연필", "note": "노트",
     "textbox": "텍스트 박스", "callout": "텍스트 말풍선", "typewriter": "타자기", "stamp": "스탬프",
+    "attach": "첨부 파일",
 }
 
 
@@ -71,6 +87,8 @@ def to_viewer_props(key: str, style: dict, props: dict) -> None:
         props["ink_color"], props["ink_width"] = s["stroke"], s["width"]
     elif key == "caret":
         props["caret_color"] = s["color"]
+    elif key == "attach":
+        props["attach_color"], props["attach_icon"] = s["color"], s["icon"]
     elif "color" in s:  # 강조·밑줄·영역 강조·노트
         props["hl_color"] = s["color"]
     elif key in ("textbox", "callout", "typewriter"):
@@ -82,6 +100,8 @@ def to_viewer_props(key: str, style: dict, props: dict) -> None:
         for k in ("stroke", "fill", "width"):
             if k in s:
                 props[k] = s[k]
+    if key in ("line", "arrow", "polyline"):
+        props["line_ends"] = (s.get("start", 0), s.get("end", 0))
 
 
 def key_of(doc: Document, a: fitz.Annot) -> str | None:
@@ -106,7 +126,8 @@ def key_of(doc: Document, a: fitz.Annot) -> str | None:
         if not ((a.border or {}).get("width") or 0) and not annot_colors(doc, a).get("fill"):
             return "typewriter"
         return "textbox"
-    return {"Circle": "oval", "PolyLine": "polyline", "Ink": "pencil", "Text": "note", "Caret": "caret"}.get(kind)
+    return {"Circle": "oval", "PolyLine": "polyline", "Ink": "pencil", "Text": "note", "Caret": "caret",
+            "FileAttachment": "attach"}.get(kind)
 
 
 def style_of(doc: Document, a: fitz.Annot, key: str | None = None) -> dict:
@@ -119,11 +140,15 @@ def style_of(doc: Document, a: fitz.Annot, key: str | None = None) -> dict:
     if key in ("textbox", "callout", "typewriter", "stamp"):
         fs, tc = _freetext_style(doc, a)
         s.update(fontsize=fs, text_color=tc, stroke=tc, fill=_tup(cols.get("fill")) or None,
-                 border=_freetext_border(a), width=b.get("width") or 0)
+                 border=_freetext_border(a), width=b.get("width") or 0, start=line_ends(doc, a)[0])
         return s
     stroke = _tup(cols.get("stroke")) or None
     s.update(color=stroke, stroke=stroke, fill=_tup(cols.get("fill")) or None, width=b.get("width", 1) or 0,
-             dashes=tuple(b.get("dashes") or ()))
+             dashes=tuple(b.get("dashes") or ()), clouds=max(0, b.get("clouds", 0) or 0))
+    le = line_ends(doc, a)
+    s.update(start=le[0], end=le[1])
+    if key == "attach":
+        s["icon"] = (doc.fitz.xref_get_key(a.xref, "Name")[1] or "/PushPin").lstrip("/")
     return s
 
 

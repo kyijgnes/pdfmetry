@@ -138,6 +138,7 @@ class DocTab(QWidget):
             self.side.addWidget(p)
         self.side.hide()
         self.props = PropsPanel(self.viewer.props, self.viewer)
+        self.props.autosave = lambda: self.win.prefs.get("annot_autosave_style", True)
         self.props.hide()
         self.warn = QLabel(""); self.warn.setObjectName("warn"); self.warn.hide()
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
@@ -158,7 +159,8 @@ class DocTab(QWidget):
         self.organize.zoomChanged.connect(lambda *a: self.win.sync_thumb_zoom(*a))
         self.bookmarks.gotoPage.connect(self.viewer.goto)
         self.bookmarks.changed.connect(lambda: self.win.mark_modified())
-        self.annots.gotoAnnot.connect(lambda pg, r: self.viewer.goto(pg, r.y0))
+        self.annots.pickAnnot.connect(self.pick_annot)
+        self.viewer.selectionChanged.connect(self.annots.follow)
         self.annots.changed.connect(lambda: self.changed(None))
         self.annots.importExport.connect(lambda *a: self.win.annots_import_export(*a))
         self.attachments.changed.connect(lambda: self.win.mark_modified())
@@ -219,6 +221,21 @@ class DocTab(QWidget):
             r = rs[0] if isinstance(rs, list) else rs
             self.viewer.goto(pg, max(0, r.y0 - 100))
         self.viewer.viewport().update()
+
+    def pick_annot(self, page: int, xref: int):
+        """주석 목록에서 고른 주석: 그 자리로 가서 문서에서도 고른다."""
+        from .viewer import Selection
+        a = A.get(self.doc, page, xref)
+        if a is None:
+            return
+        v = self.viewer
+        v.goto(page, a.rect.y0)
+        v.sel = Selection("annot", page, xref, fitz.Rect(a.rect), text=a.info.get("content", ""),
+                          extra={"kind": a.type[1], "kind_ko": A.KIND_NAMES.get(a.type[1], a.type[1]),
+                                 "colors": A.annot_colors(self.doc, a), "opacity": a.opacity,
+                                 "width": (a.border or {}).get("width", 1)})
+        v.selectionChanged.emit(v.sel)
+        v.viewport().update()
 
     def apply_props(self, d: dict):
         s = self.viewer.sel
@@ -1329,7 +1346,8 @@ class MainWindow(QMainWindow):
         elif kind == "attach":
             p, _ = QFileDialog.getOpenFileName(self, "첨부할 파일")
             if p:
-                A.attachment(d, data["page"], data["point"], p, v.props["author"]); t.changed([data["page"]])
+                A.attachment(d, data["page"], data["point"], p, v.props["author"], v.props.get("attach_icon", "PushPin"),
+                             v.props.get("attach_color"), v.props.get("opacity")); t.changed([data["page"]])
             self._tool_done("attach")
         elif kind == "link":
             from .dlg_link import LinkDialog
@@ -1862,10 +1880,10 @@ class MainWindow(QMainWindow):
             return
         from ..engine import annot_xfdf as X
         if key == "export":
-            out, flt = QFileDialog.getSaveFileName(self, "주석 내보내기", self._suggest(t, ".xfdf"),
-                                                   "XFDF (*.xfdf);;FDF (*.fdf);;PDF메트리 JSON (*.json)")
+            out, flt = QFileDialog.getSaveFileName(self, "주석 내보내기", self._suggest(t, ".fdf"),
+                                                   "FDF (*.fdf);;XFDF (*.xfdf);;PDF메트리 JSON (*.json)")
             if not out: return
-            ext = os.path.splitext(out)[1].lower() or {"F": ".fdf", "R": ".json"}.get(flt[:1], ".xfdf")
+            ext = os.path.splitext(out)[1].lower() or {"X": ".xfdf", "P": ".json"}.get(flt[:1], ".fdf")
             skipped = 0
             if ext == ".json":
                 data = A.export_annots(t.doc); n = len(data)

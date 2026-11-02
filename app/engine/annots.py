@@ -37,6 +37,9 @@ class AnnotInfo:
     author: str
     color: Color | None
     modified: str
+    locked: bool = False
+    irt: int = 0          # 답글이면 원 주석 xref
+    marked: str = ""      # 글자 표시 주석이 덮은 글자
 
 
 # ── 공통 ─────────────────────────────────────────────────────────
@@ -68,8 +71,48 @@ def list_annots(doc: Document, pages: Sequence[int] | None = None) -> list[Annot
                 col = cols.get("stroke") or cols.get("fill")
                 out.append(AnnotInfo(i, a.xref, kind, KIND_NAMES.get(kind, kind), fitz.Rect(a.rect),
                                      info.get("content", ""), info.get("title", ""),
-                                     tuple(col) if col else None, info.get("modDate", "")))
+                                     tuple(col) if col else None, info.get("modDate", "") or info.get("creationDate", ""),
+                                     _locked(a), _irt(doc.fitz, a.xref),
+                                     _marked_text(doc.fitz[i], a) if kind in MARKUP_KINDS else ""))
     return out
+
+
+# 선 끝(PDF_ANNOT_LE_* 번호 차례 그대로)의 PDF 이름
+LE_NAMES = ("None", "Square", "Circle", "Diamond", "OpenArrow", "ClosedArrow", "Butt", "ROpenArrow", "RClosedArrow", "Slash")
+
+
+def line_ends(doc: Document, a: fitz.Annot) -> tuple[int, int]:
+    """(시작, 끝) 선 끝. 말풍선은 /LE 가 이름 하나라 PyMuPDF 가 못 읽어 직접 읽는다."""
+    t, v = doc.fitz.xref_get_key(a.xref, "LE")
+    if t == "name":
+        n = v.lstrip("/")
+        return (LE_NAMES.index(n) if n in LE_NAMES else 0), 0
+    return tuple(a.line_ends or (0, 0))
+
+
+def _marked_text(p: fitz.Page, a: fitz.Annot) -> str:
+    """글자 표시 주석이 덮은 글자(줄마다 한 줄)."""
+    v = a.vertices or []
+    lines = []
+    for k in range(0, len(v) - 3, 4):
+        t = p.get_textbox(fitz.Quad(v[k:k + 4]).rect).strip()
+        if t:
+            lines.append(" ".join(t.split()))
+    return "\n".join(lines)
+
+
+_LOCK = fitz.PDF_ANNOT_IS_LOCKED | fitz.PDF_ANNOT_IS_LOCKED_CONTENTS
+
+
+def _locked(a: fitz.Annot) -> bool:
+    return bool(a.flags & fitz.PDF_ANNOT_IS_LOCKED)
+
+
+def is_locked(doc: Document, page: int, xref: int) -> bool:
+    """잠긴 주석(옮기기·고치기·지우기 막힘)."""
+    with doc.lock:
+        a = get(doc, page, xref)
+        return a is not None and _locked(a)
 
 
 def get(doc: Document, page: int, xref: int) -> fitz.Annot | None:
@@ -82,13 +125,17 @@ def get(doc: Document, page: int, xref: int) -> fitz.Annot | None:
     return None
 
 
-def delete(doc: Document, page: int, xref: int):
+def delete(doc: Document, page: int, xref: int) -> bool:
+    """주석 하나를 지운다. 잠긴 주석은 그대로 두고 False."""
+    if is_locked(doc, page, xref):
+        return False
     doc.snapshot()
     with doc.lock:
         a = get(doc, page, xref)
         if a:
             _drop_replies(a._page, xref)   # 답글이 지운 주석을 가리킨 채 남지 않게
             a._page.delete_annot(a)
+        return a is not None
 
 
 def delete_all(doc: Document, pages: Sequence[int] | None = None):
@@ -97,7 +144,8 @@ def delete_all(doc: Document, pages: Sequence[int] | None = None):
         for i in (pages if pages is not None else range(doc.page_count)):
             p = doc.fitz[i]
             for a in list(p.annots()):
-                p.delete_annot(a)
+                if not _locked(a):
+                    p.delete_annot(a)
 
 
 VERTEX_KINDS = ("Line", "PolyLine", "Polygon", "Ink")  # 꼭짓점으로 그리는 주석(set_rect 로는 안 옮겨짐)
@@ -183,12 +231,12 @@ def _recreate_moved(p: fitz.Page, a: fitz.Annot, dx: float, dy: float) -> int:
         n = p.add_ink_annot([[sh(q) for q in s] for s in v])
     elif kind == "Line":
         n = p.add_line_annot(sh(v[0]), sh(v[-1]))
-        if a.line_ends:
-            n.set_line_ends(*a.line_ends)
     elif kind == "Polygon":
         n = p.add_polygon_annot([sh(q) for q in v])
     else:
         n = p.add_polyline_annot([sh(q) for q in v])
+    if kind in ("Line", "PolyLine") and a.line_ends:
+        n.set_line_ends(*a.line_ends)
     cols = a.colors
     n.set_colors(stroke=cols.get("stroke"), fill=cols.get("fill") if kind in ("Line", "Polygon") else None)
     b = a.border or {}
@@ -206,16 +254,25 @@ def update(doc: Document, page: int, xref: int, *, stroke: Color | None = None, 
            width: float | None = None, opacity: float | None = None, content: str | None = None,
            author: str | None = None, rect: fitz.Rect | None = None, fontsize: float | None = None,
            text_color: Color | None = None, border: Color | None = None,
-           dashes: Sequence[float] | None = None, subject: str | None = None) -> int | None:
+           dashes: Sequence[float] | None = None, subject: str | None = None, clouds: int | None = None,
+           start: int | None = None, end: int | None = None, icon: str | None = None,
+           locked: bool | None = None) -> int | None:
     """주석을 고친다. 꼭짓점 주석을 옮기면 새로 만들어지므로 (새) xref 를 돌려준다.
 
-    글상자: stroke(또는 text_color)=글자색, border=테두리 색, fill=바탕색. dashes=() 는 실선."""
+    글상자: stroke(또는 text_color)=글자색, border=테두리 색, fill=바탕색. dashes=() 는 실선.
+    clouds: 구름 테두리 세기(0 없음·1·2, 사각형·타원·다각형). start·end: 선 끝(PDF_ANNOT_LE_*, 선·연결된 선,
+    말풍선은 start=지시선 끝). icon: 첨부 아이콘(Graph·Paperclip·PushPin·Tag). locked: 잠그기·풀기.
+    잠긴 주석은 locked=False 로 풀기 전까지 다른 것을 바꾸지 않는다(그대로 xref 를 돌려준다)."""
+    if is_locked(doc, page, xref) and locked is not False:
+        return xref
     doc.snapshot()
     with doc.lock:
         a = get(doc, page, xref)
         if not a:
             return None
         kind = a.type[1]
+        if locked is not None:
+            a.set_flags(a.flags | _LOCK if locked else a.flags & ~_LOCK)
         if rect is not None:
             old = fitz.Rect(a.rect)
             if kind in VERTEX_KINDS:
@@ -238,6 +295,16 @@ def update(doc: Document, page: int, xref: int, *, stroke: Color | None = None, 
         if dashes is not None and kind not in ("FreeText", "Caret", "Text", "FileAttachment") + MARKUP_KINDS:
             w = (a.border or {}).get("width", 1)
             a.set_border({"width": w, "dashes": list(dashes), "style": "D"} if dashes else {"width": w, "dashes": [], "style": "S"})
+        if clouds is not None and kind in ("Square", "Circle", "Polygon"):
+            b = a.border or {}
+            a.set_border(width=b.get("width", 1), dashes=list(b.get("dashes") or ()) if not clouds else [], clouds=clouds)
+        if start is not None and kind == "FreeText":   # 말풍선 /LE 는 이름 하나(지시선 끝)
+            f.xref_set_key(a.xref, "LE", "/" + LE_NAMES[start])
+        elif (start is not None or end is not None) and kind in ("Line", "PolyLine"):
+            le = a.line_ends or (0, 0)
+            a.set_line_ends(le[0] if start is None else start, le[1] if end is None else end)
+        if icon is not None and kind == "FileAttachment":
+            a.set_name(icon)
         if opacity is not None:
             a.set_opacity(opacity)
         if content is not None:
@@ -337,22 +404,29 @@ def oval(doc: Document, page: int, r: fitz.Rect, stroke: Color = (1, 0, 0), fill
 
 
 def line(doc: Document, page: int, p1: fitz.Point, p2: fitz.Point, stroke: Color = (1, 0, 0), width: float = 1.5,
-         arrow: bool = False, opacity: float = 1.0, author: str = "") -> int:
+         arrow: bool = False, opacity: float = 1.0, author: str = "", ends: Sequence[int] | None = None) -> int:
+    """ends: (시작, 끝) 선 끝(PDF_ANNOT_LE_*). 없으면 arrow 일 때 끝만 열린 화살촉."""
     doc.snapshot()
     with doc.lock:
         a = doc.fitz[page].add_line_annot(p1, p2)
-        if arrow:
-            a.set_line_ends(fitz.PDF_ANNOT_LE_NONE, fitz.PDF_ANNOT_LE_OPEN_ARROW)
+        if ends is None and arrow:
+            ends = (fitz.PDF_ANNOT_LE_NONE, fitz.PDF_ANNOT_LE_OPEN_ARROW)
+        if ends and any(ends):
+            a.set_line_ends(*ends)
         _finish(a, stroke=stroke, fill=stroke, width=width, opacity=opacity, author=author)
         return a.xref
 
 
 def polygon(doc: Document, page: int, pts: list[fitz.Point], stroke: Color = (1, 0, 0), fill: Color | None = None,
-            width: float = 1.5, closed: bool = True, cloud: bool = False, opacity: float = 1.0, author: str = "") -> int:
+            width: float = 1.5, closed: bool = True, cloud: bool = False, opacity: float = 1.0, author: str = "",
+            ends: Sequence[int] | None = None) -> int:
+    """ends: 연결된 선(closed=False)의 (시작, 끝) 선 끝."""
     doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
         a = p.add_polygon_annot(pts) if closed else p.add_polyline_annot(pts)
+        if not closed and ends and any(ends):
+            a.set_line_ends(*ends)
         if cloud:
             try:
                 a.set_border(width=width, clouds=2)
@@ -401,6 +475,8 @@ def erase_ink_at(doc: Document, page: int, point: fitz.Point, radius: float = 6,
         p = doc.fitz[page]
         hit = []
         for a in p.annots(types=[fitz.PDF_ANNOT_INK]):
+            if _locked(a):
+                continue
             reach = radius + ((a.border or {}).get("width") or 1) / 2
             if not fitz.Rect(near.x0 - reach, near.y0 - reach, near.x1 + reach, near.y1 + reach).intersects(a.rect):
                 continue
@@ -490,8 +566,8 @@ def edit_free_text(doc: Document, page: int, xref: int, text: str, box: fitz.Rec
 
     다시 만들어 그린다(말풍선은 set_rect 로 지시선이 흐트러진다). 지시선 꼭짓점·모양·작성자는 그대로."""
     info = freetext_info(doc, page, xref)
-    if info is None:
-        return None
+    if info is None or is_locked(doc, page, xref):
+        return None if info is None else xref
     doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
@@ -628,12 +704,16 @@ def delete_reply(doc: Document, page: int, xref: int) -> bool:
         return True
 
 
-def attachment(doc: Document, page: int, point: fitz.Point, path: str, author: str = "") -> int:
+ATTACH_ICONS = ("Graph", "Paperclip", "PushPin", "Tag")
+
+
+def attachment(doc: Document, page: int, point: fitz.Point, path: str, author: str = "", icon: str = "PushPin",
+               color: Color | None = None, opacity: float | None = None) -> int:
     doc.snapshot()
     with doc.lock:
         a = doc.fitz[page].add_file_annot(point, open(path, "rb").read(), os.path.basename(path),
-                                          desc=os.path.basename(path), icon="PushPin")
-        _finish(a, author=author)
+                                          desc=os.path.basename(path), icon=icon if icon in ATTACH_ICONS else "PushPin")
+        _finish(a, stroke=color, opacity=opacity, author=author)
         return a.xref
 
 

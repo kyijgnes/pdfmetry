@@ -1115,7 +1115,7 @@ class PageView(QGraphicsView):
                                                 "colors": A.annot_colors(self.doc, a), "opacity": a.opacity,
                                                 "width": (a.border or {}).get("width", 1)})
                     self.selectionChanged.emit(self.sel)
-                    if self.tool == "select":
+                    if self.tool == "select" and not A.is_locked(self.doc, i, a.xref):   # 잠긴 주석은 끌어도 그대로
                         self._moving_annot = True
                         self._move_last = pt
                     self.viewport().update()
@@ -1407,7 +1407,7 @@ class PageView(QGraphicsView):
                 self.status.emit(f"거리 {label}")
             else:
                 A.line(d, i, s0, s1, P["stroke"], P["width"], arrow=(t == "arrow"), opacity=P["opacity"],
-                       author=P["author"])
+                       author=P["author"], ends=P.get("line_ends"))
         elif t in SH.SHAPES:
             A.polygon(d, i, SH.shape_points(t, pr), P["stroke"], P["fill"], P["width"], closed=True,
                       opacity=P["opacity"], author=P["author"])
@@ -1475,7 +1475,7 @@ class PageView(QGraphicsView):
                           opacity=P["opacity"], author=P["author"])
         elif t == "polyline":
             A.polygon(self.doc, i, pts, P["stroke"], None, P["width"], closed=False, opacity=P["opacity"],
-                      author=P["author"])
+                      author=P["author"], ends=P.get("line_ends"))
         elif t == "m_perimeter":
             label = A.measure(pts, "perimeter", P["measure_scale"], P["measure_unit"])
             A.measure_annot(self.doc, i, pts, "perimeter", label, author=P["author"])
