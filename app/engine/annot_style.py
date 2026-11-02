@@ -39,6 +39,7 @@ DEFAULTS: dict[str, dict] = {
     "typewriter": dict(_TEXT),
     "stamp": {"stroke": (0.8, 0.0, 0.0)},
     "attach": {"color": (1.0, 1.0, 0.0), "opacity": 1.0, "icon": "PushPin"},
+    "m_distance": dict(_LINE), "m_perimeter": dict(_LINE), "m_area": dict(_LINE),   # 측정: 빨강·굵기 1
 }
 
 # 속성 패널이 그 종류에 보일 칸(차례 그대로). 고른 주석에만 보이는 칸은 SELECTED_ONLY.

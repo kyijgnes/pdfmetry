@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsScene, QGra
 
 from ..engine import annot_shapes as SH
 from ..engine import annots as A
+from ..engine import stamps as ST
 from ..engine.document import Document
 from . import theme
 
@@ -31,7 +32,9 @@ TOOLS_SHAPE = {"rect", "oval", "line", "arrow", "polygon", "polyline", "cloud", 
                "addtext", "addimage", "textbox", "callout", "typewriter", "stamp", "signature", "snapshot", "ocrarea",
                "ftext", "fcheck", "fradio", "fcombo", "flist", "fbutton", "fimage", "fsign", "fdate",
                "m_distance", "m_perimeter", "m_area", *SH.SHAPES}
-SQUARE_TOOLS = {"rect", "oval", "areahl", *SH.SHAPES}   # Shift 를 누르고 끌면 가로세로 같게
+SQUARE_TOOLS = {"rect", "oval", "areahl", *SH.SHAPES}
+MEASURE_TOOLS = ("m_distance", "m_perimeter", "m_area")
+SNAP_PX = 8   # 측정 스냅이 붙는 거리(화면 px)   # Shift 를 누르고 끌면 가로세로 같게
 ERASER_RADIUS = 10   # 지우개 반지름 기본값(화면 px)
 
 
@@ -262,7 +265,9 @@ class PageView(QGraphicsView):
                       "hl_color": (1, 1, 0), "text_color": (0, 0, 0), "fontsize": 11, "ink_color": (0.1, 0.1, 0.9),
                       "ink_width": 2.0, "author": "", "stamp_text": "승인", "stamp_image": "", "redact_fill": (0, 0, 0),
                       "measure_unit": "cm", "measure_scale": 1.0, "field_type": "text", "image_path": "",
-                      "link_target": {}, "eraser_radius": ERASER_RADIUS}
+                      "link_target": {}, "eraser_radius": ERASER_RADIUS,
+                      "stamp_spec": None,   # 찍을 스탬프·서명(engine/stamps.py 의 spec)
+                      "measure": None}      # 측정 축척·스냅·라벨(settings.json 의 measure)
 
         self.sel: Selection | None = None
         self._drag_start: QPointF | None = None  # 화면(뷰포트) 좌표
@@ -271,6 +276,8 @@ class PageView(QGraphicsView):
         self._ink: list[QPointF] = []
         self._poly: list[QPointF] = []           # 다각형·연결선·측정 진행 중(장면 좌표)
         self._poly_page = -1
+        self._snap_cache: dict[int, list] = {}   # 측정 스냅 점(쪽마다, 문서가 바뀌면 비움)
+        self._snap_mark: QPointF | None = None   # 지금 붙은 스냅 점(장면 좌표)
         self._panning = False
         self._pan_last = QPointF()
         self._pan_start = QPointF()
@@ -516,7 +523,7 @@ class PageView(QGraphicsView):
     def refresh_pages(self, pages: list[int] | None = None, structural: bool = False,
                       mapping: list[int | None] | None = None):
         """문서가 바뀐 뒤 다시 그린다. structural=True 면 쪽 수·크기도 바뀐 것(mapping 은 rebuild 를 볼 것)."""
-        self.words_cache.clear(); self.blocks_cache.clear()
+        self.words_cache.clear(); self.blocks_cache.clear(); self._snap_cache.clear()
         if structural:
             self.rebuild(mapping, set(pages or ()))
         else:
@@ -840,6 +847,7 @@ class PageView(QGraphicsView):
             self.requestDialog.emit("textbox", {"page": i, "scene_pt": sp, "kind": t})
             return
         elif t in TOOLS_MARKUP or t in TOOLS_SHAPE:
+            sp = self._snap_scene(i, sp)
             if t in ("polygon", "polyline", "cloud", "m_perimeter", "m_area"):
                 if self._poly and self._poly_page != i:
                     self._poly.clear()
@@ -892,6 +900,11 @@ class PageView(QGraphicsView):
                 self.viewport().update()
             self._move_last = pt
             return
+        if self.tool in MEASURE_TOOLS:
+            had = self._snap_mark
+            sp = self._snap_scene(self.page_at(sp), sp)
+            if had != self._snap_mark:
+                self.viewport().update()
         if self._drag_rect is not None and e.buttons() & Qt.MouseButton.LeftButton:
             if self._drag_start_scene is not None and e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 sp = constrain(self.tool, self._drag_start_scene, sp)
@@ -999,6 +1012,17 @@ class PageView(QGraphicsView):
                 ir = self._image_scene_rect(i, sp)
                 if ir is not None:
                     self.requestDialog.emit("addimage", {"page": i, "rect": self._scene_rect_to_page(i, ir)})
+            elif t in ("stamp", "signature") and small:
+                # 한 번 누르면 기억한 크기로 누른 자리에
+                spec = self.props.get("stamp_spec")
+                if spec:
+                    try:
+                        pr = ST.default_rect(self.doc, i, self.to_page(i, sp), spec,
+                                             author=A.user_author(self.props["author"]))
+                    except ValueError as ex:
+                        self.status.emit(str(ex))
+                    else:
+                        self._shape_done(i, pr, r, click=True)
             elif not small:
                 self._shape_done(i, pr, r)
             self.viewport().update()
@@ -1388,7 +1412,37 @@ class PageView(QGraphicsView):
         return f"파일 열기: {info['file']}"
 
     # ── 도형 끝 ───────────────────────────────────────────────
-    def _shape_done(self, i: int, pr: fitz.Rect, scene_r: QRectF):
+    def _snap_scene(self, i: int, sp: QPointF) -> QPointF:
+        """측정 도구: 쪽 그림의 끝점·중점이 가까우면(화면 SNAP_PX) 그 점으로 붙인다."""
+        self._snap_mark = None
+        if self.tool not in MEASURE_TOOLS or i < 0:
+            return sp
+        snap = A.measure_ratio(self.props.get("measure"))["snap"]
+        if not any(snap.values()):
+            return sp
+        pts = self._snap_cache.get(i)
+        if pts is None:
+            with self.doc.lock:
+                pts = self._snap_cache[i] = A.snap_points(self.doc.fitz[i])
+        q = A.nearest_snap(pts, self.to_page(i, sp), SNAP_PX / max(self.zoom, 0.01), snap)
+        if q is None:
+            return sp
+        self._snap_mark = self.from_page_point(i, q)
+        return self._snap_mark
+
+    def _measure_done(self, i: int, pts: list[fitz.Point], kind: str):
+        from ..engine import annot_style as AS
+        P = self.props
+        st = AS.store().get("m_" + kind)
+        m = A.measure_ratio(P.get("measure"), P.get("measure_unit", "cm"), P.get("measure_scale", 1.0))
+        value = A.measure(pts, kind, ratio=m)
+        label = f"{m['label']} {value}".strip()
+        A.measure_annot(self.doc, i, pts, kind, label, st["stroke"], A.user_author(P["author"]),
+                        width=st["width"], opacity=st["opacity"], ratio=m)
+        name = {"distance": "거리", "perimeter": "둘레", "area": "영역"}[kind]
+        self.status.emit(f"{name} {value} (축척 {A.ratio_text(m)})")
+
+    def _shape_done(self, i: int, pr: fitz.Rect, scene_r: QRectF, click: bool = False):
         t = self.tool
         P = self.props
         d = self.doc
@@ -1402,9 +1456,7 @@ class PageView(QGraphicsView):
             s0 = self.to_page(i, self._drag_start_scene or scene_r.topLeft())
             s1 = self.to_page(i, self._drag_end_scene or scene_r.bottomRight())
             if t == "m_distance":
-                label = A.measure([s0, s1], "distance", P["measure_scale"], P["measure_unit"])
-                A.measure_annot(d, i, [s0, s1], "distance", label, author=P["author"])
-                self.status.emit(f"거리 {label}")
+                self._measure_done(i, [s0, s1], "distance")
             else:
                 A.line(d, i, s0, s1, P["stroke"], P["width"], arrow=(t == "arrow"), opacity=P["opacity"],
                        author=P["author"], ends=P.get("line_ends"))
@@ -1423,13 +1475,17 @@ class PageView(QGraphicsView):
             self.requestDialog.emit("textbox", {"page": i, "rect": pr, "kind": "typewriter"}); return
         elif t == "addimage":
             self.requestDialog.emit("addimage", {"page": i, "rect": pr}); return
-        elif t == "stamp":
-            if P.get("stamp_image"):
-                A.stamp_image(d, i, pr, P["stamp_image"], P["author"])
-            else:
-                A.stamp_text(d, i, pr, P["stamp_text"], P["stroke"], P["author"])
-        elif t == "signature":
-            self.requestDialog.emit("signature", {"page": i, "rect": pr}); return
+        elif t in ("stamp", "signature"):
+            spec = P.get("stamp_spec")
+            if not spec:
+                return
+            author = A.user_author(P["author"])
+            try:
+                if not click:   # 끌어서 찍은 크기를 다음에 한 번 눌러 찍을 크기로
+                    ST.remember_drag(d, i, pr, spec, author=author)
+                ST.add(d, i, pr, spec, author=author)
+            except ValueError as ex:
+                self.status.emit(str(ex)); return
         elif t == "link":
             self.requestDialog.emit("link", {"page": i, "rect": pr}); return
         elif t == "crop":
@@ -1477,13 +1533,9 @@ class PageView(QGraphicsView):
             A.polygon(self.doc, i, pts, P["stroke"], None, P["width"], closed=False, opacity=P["opacity"],
                       author=P["author"], ends=P.get("line_ends"))
         elif t == "m_perimeter":
-            label = A.measure(pts, "perimeter", P["measure_scale"], P["measure_unit"])
-            A.measure_annot(self.doc, i, pts, "perimeter", label, author=P["author"])
-            self.status.emit(f"둘레 {label}")
+            self._measure_done(i, pts, "perimeter")
         elif t == "m_area" and len(pts) >= 3:
-            label = A.measure(pts, "area", P["measure_scale"], P["measure_unit"])
-            A.measure_annot(self.doc, i, pts, "area", label, author=P["author"])
-            self.status.emit(f"영역 {label}")
+            self._measure_done(i, pts, "area")
         self.refresh_pages([i])
         self.toolDone.emit(t)
 
@@ -1668,6 +1720,9 @@ class PageView(QGraphicsView):
             for q in self._poly:
                 p.setBrush(Qt.GlobalColor.white)
                 p.drawEllipse(q, 3, 3)
+        if self._snap_mark is not None and self.tool in MEASURE_TOOLS and self.page_at(self._snap_mark) == i:
+            p.setPen(QPen(QColor(0, 120, 215), 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(self._snap_mark.x() - 4, self._snap_mark.y() - 4, 8, 8))
         p.restore()
 
     def image_pixmap(self) -> QPixmap | None:

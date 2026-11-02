@@ -857,11 +857,13 @@ def _import_one(doc: Document, e: dict) -> bool:
 
 
 # ── 스탬프 · 서명 ─────────────────────────────────────────────────
+# 새 스탬프·서명은 진짜 Stamp 주석(engine/stamps.py). 아래 글자 스탬프는 옛 버전이 찍던 모양(테두리 글상자,
+# 주제 「Stamp」)으로, 이미 찍힌 것을 읽고 고치는 호환용이다.
 STAMP_TEXTS = ["승인", "확인", "완료", "초안", "최종", "기밀", "검토 필요", "APPROVED", "DRAFT", "CONFIDENTIAL"]
 
 
 def stamp_text(doc: Document, page: int, r: fitz.Rect, text: str, color: Color = (0.8, 0, 0), author: str = "") -> int:
-    """글자 스탬프: 테두리 상자 + 글자(같은 색)."""
+    """옛 글자 스탬프: 테두리 상자 + 글자(같은 색)."""
     doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
@@ -875,56 +877,179 @@ def stamp_text(doc: Document, page: int, r: fitz.Rect, text: str, color: Color =
 
 
 def stamp_image(doc: Document, page: int, r: fitz.Rect, image_path: str, author: str = "") -> int:
-    """이미지 스탬프·손글씨 서명: 그림을 쪽 내용으로 넣는다(주석이 아니라 -1 을 돌려준다)."""
-    doc.snapshot()
-    with doc.lock:
-        p = doc.fitz[page]
-        p.insert_image(r, filename=image_path, overlay=True, keep_proportion=True, rotate=p.rotation)
-    return -1
+    """그림 스탬프: 그림을 외관으로 쓰는 Stamp 주석(지우고 옮길 수 있다)."""
+    from . import stamps as S
+    return S.add(doc, page, r, {"group": "signature", "file": image_path}, author=author)
 
 
-def signature_image(doc: Document, page: int, r: fitz.Rect, image_path: str) -> None:
-    """서명 그림을 쪽 내용으로 넣는다(평면화된 서명)."""
-    doc.snapshot()
-    with doc.lock:
-        p = doc.fitz[page]
-        p.insert_image(r, filename=image_path, overlay=True, keep_proportion=True, rotate=p.rotation)
+def signature_image(doc: Document, page: int, r: fitz.Rect, image_path: str, author: str = "") -> int:
+    """서명 그림을 Stamp 주석으로 넣는다(쪽 내용으로 굽는 것은 도구 탭 「평면화」)."""
+    from . import stamps as S
+    return S.add(doc, page, r, {"group": "signature", "file": image_path}, author=author)
 
 
 # ── 측정 ─────────────────────────────────────────────────────────
-def measure(points: list[fitz.Point], kind: str, scale: float = 1.0, unit: str = "cm") -> str:
-    """kind: distance · perimeter · area. scale = 1pt 가 몇 unit 인가(기본 1pt=1/72 inch → cm 변환)."""
-    pt_to = {"cm": 2.54 / 72, "mm": 25.4 / 72, "in": 1 / 72, "pt": 1.0}[unit] * scale
+# 단위 하나가 몇 pt 인가(차례가 설정 창 목록 차례). μm 는 Helvetica 로 그리는 선 캡션에서도 보이게 µ(U+00B5).
+MEASURE_UNITS: dict[str, float] = {"pt": 1.0, "in": 72.0, "mm": 72 / 25.4, "cm": 72 / 2.54, "p": 12.0, "ft": 864.0,
+                                   "yd": 2592.0, "m": 7200 / 2.54, "km": 7200000 / 2.54, "mile": 72.0 * 63360,
+                                   "µm": 72 / 25400}
+MEASURE_RANGE = (0.01, 1000000.0)
+# 축척: 문서 거리 doc doc_unit = 실제 거리 real real_unit. 스냅은 끝점·중점만 쓴다(경로·교차점은 아직).
+MEASURE_DEFAULT = {"doc": 1.0, "doc_unit": "cm", "real": 1.0, "real_unit": "cm",
+                   "snap": {"path": False, "end": True, "mid": True, "cross": False}, "label": ""}
+MEASURE_IT = {"distance": "/LineDimension", "perimeter": "/PolyLineDimension", "area": "/PolygonDimension"}
+
+
+def measure_ratio(ratio: dict | None = None, unit: str = "cm", scale: float = 1.0) -> dict:
+    """축척 설정 한 벌(빠진 칸은 기본값). ratio 가 없으면 옛 값(단위·배율)으로."""
+    r = {k: (dict(v) if isinstance(v, dict) else v) for k, v in MEASURE_DEFAULT.items()}
+    if ratio:
+        for k in r:
+            if k in ratio:
+                r[k] = dict(r[k], **ratio[k]) if isinstance(r[k], dict) and isinstance(ratio[k], dict) else ratio[k]
+    else:
+        r.update(doc_unit=unit, real_unit=unit, real=scale)
+    for k in ("doc_unit", "real_unit"):
+        if r[k] == "μm":
+            r[k] = "µm"
+        if r[k] not in MEASURE_UNITS:
+            r[k] = "cm"
+    lo, hi = MEASURE_RANGE
+    for k in ("doc", "real"):
+        try:
+            r[k] = min(hi, max(lo, float(r[k])))
+        except (TypeError, ValueError):
+            r[k] = 1.0
+    return r
+
+
+def ratio_text(ratio: dict) -> str:
+    """「2 cm = 1 m」"""
+    r = measure_ratio(ratio)
+    return f"{r['doc']:g} {r['doc_unit']} = {r['real']:g} {r['real_unit']}"
+
+
+def measure_factor(ratio: dict) -> float:
+    """1pt 가 실제 몇 real_unit 인가."""
+    r = measure_ratio(ratio)
+    return 1 / MEASURE_UNITS[r["doc_unit"]] / r["doc"] * r["real"]
+
+
+def measure_value(points: list[fitz.Point], kind: str, ratio: dict | None = None) -> float | None:
+    k = measure_factor(ratio or {})
     if kind == "distance" and len(points) >= 2:
-        d = math.dist(points[0], points[1]) * pt_to
-        return f"{d:.2f} {unit}"
-    if kind == "perimeter":
-        d = sum(math.dist(points[i], points[i + 1]) for i in range(len(points) - 1)) * pt_to
-        return f"{d:.2f} {unit}"
+        return math.dist(points[0], points[1]) * k
+    if kind == "perimeter" and len(points) >= 2:
+        return sum(math.dist(points[i], points[i + 1]) for i in range(len(points) - 1)) * k
     if kind == "area" and len(points) >= 3:
         s = 0.0
         for i in range(len(points)):
             x1, y1 = points[i]
             x2, y2 = points[(i + 1) % len(points)]
             s += x1 * y2 - x2 * y1
-        return f"{abs(s) / 2 * pt_to * pt_to:.2f} {unit}²"
-    return ""
+        return abs(s) / 2 * k * k
+    return None
+
+
+def measure(points: list[fitz.Point], kind: str, scale: float = 1.0, unit: str = "cm", ratio: dict | None = None) -> str:
+    """kind: distance · perimeter · area. ratio(축척 설정)를 주면 그 축척, 아니면 1pt 를 unit 으로 바꿔 scale 배."""
+    r = measure_ratio(ratio, unit, scale)
+    v = measure_value(points, kind, r)
+    if v is None:
+        return ""
+    return f"{v:.2f} {r['real_unit']}" + ("²" if kind == "area" else "")
 
 
 def measure_annot(doc: Document, page: int, points: list[fitz.Point], kind: str, label: str,
-                  stroke: Color = (0, 0.5, 0), author: str = "") -> int:
+                  stroke: Color = (1, 0, 0), author: str = "", *, width: float = 1.0, opacity: float = 1.0,
+                  ratio: dict | None = None) -> int:
+    """측정 주석. 거리는 양끝 닫힌 화살촉(채움=선 색)과 값 캡션, 둘레는 양끝 열린 화살촉, 영역은 다각형.
+    축척은 /Measure 사전(/R 「2 cm = 1 m」)으로 주석에 남겨 다시 열어도 보인다."""
+    r = measure_ratio(ratio)
     doc.snapshot()
     with doc.lock:
-        p = doc.fitz[page]
+        f = doc.fitz
+        p = f[page]
         if kind == "distance":
             a = p.add_line_annot(points[0], points[1])
-            a.set_line_ends(fitz.PDF_ANNOT_LE_BUTT, fitz.PDF_ANNOT_LE_BUTT)
+            a.set_line_ends(fitz.PDF_ANNOT_LE_CLOSED_ARROW, fitz.PDF_ANNOT_LE_CLOSED_ARROW)
+            a.set_colors(stroke=stroke, fill=stroke)
         elif kind == "perimeter":
             a = p.add_polyline_annot(points)
+            a.set_line_ends(fitz.PDF_ANNOT_LE_OPEN_ARROW, fitz.PDF_ANNOT_LE_OPEN_ARROW)
+            a.set_colors(stroke=stroke)
         else:
             a = p.add_polygon_annot(points)
-        _finish(a, stroke=stroke, width=1.2, content=label, author=author)
+            a.set_colors(stroke=stroke)
+        a.set_border(width=width)
+        if opacity < 1:
+            a.set_opacity(opacity)
+        a.set_info(content=label, title=author, subject={"distance": "거리 측정", "perimeter": "둘레 측정",
+                                                         "area": "영역 측정"}.get(kind, "측정"))
+        u = r["real_unit"] + ("²" if kind == "area" else "")
+        c = measure_factor(r) ** (2 if kind == "area" else 1)
+        f.xref_set_key(a.xref, "IT", MEASURE_IT.get(kind, "/LineDimension"))
+        f.xref_set_key(a.xref, "Measure", "<< /Type /Measure /Subtype /RL /R %s /X [ << /Type /NumberFormat /U %s /C %s /D 100 >> ] >>"
+                       % (fitz.get_pdf_str(ratio_text(r)), fitz.get_pdf_str(u), f"{c:.9g}"))
+        if kind == "distance":
+            try:   # 선 캡션은 Helvetica 로 그려진다. 한글 라벨이면 캡션 없이 내용에만
+                label.encode("cp1252")
+                f.xref_set_key(a.xref, "Cap", "true")
+            except UnicodeEncodeError:
+                pass
+        a.update()
         return a.xref
+
+
+def measure_info(doc: Document, page: int, xref: int) -> dict | None:
+    """측정 주석의 값(내용)·축척 글자(/Measure /R)·종류. 측정 주석이 아니면 None."""
+    f = doc.fitz
+    t, v = f.xref_get_key(xref, "Measure/R")
+    if t != "string":
+        return None
+    a = get(doc, page, xref)
+    return {"ratio": v, "value": a.info.get("content", "") if a else "",
+            "kind": {"/LineDimension": "distance", "/PolyLineDimension": "perimeter",
+                     "/PolygonDimension": "area"}.get(f.xref_get_key(xref, "IT")[1], "")}
+
+
+def snap_points(page: fitz.Page) -> list[tuple[fitz.Point, str]]:
+    """쪽 그림(선·네모·곡선)의 끝점(end)과 선분 가운데(mid). 측정 스냅이 이 점에 붙는다."""
+    out: list[tuple[fitz.Point, str]] = []
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return out
+    for dr in drawings:
+        for it in dr.get("items", []):
+            op = it[0]
+            if op in ("re", "qu"):
+                q = fitz.Rect(it[1]).quad if op == "re" else it[1]
+                cs = [fitz.Point(q.ul), fitz.Point(q.ur), fitz.Point(q.lr), fitz.Point(q.ll)]
+                out += [(c, "end") for c in cs]
+                out += [((cs[i] + cs[(i + 1) % 4]) / 2, "mid") for i in range(4)]
+            elif op == "l":
+                a, b = fitz.Point(it[1]), fitz.Point(it[2])
+                out += [(a, "end"), (b, "end"), ((a + b) / 2, "mid")]
+            elif op == "c":
+                out += [(fitz.Point(it[1]), "end"), (fitz.Point(it[4]), "end")]
+        if len(out) > 20000:   # 아주 복잡한 도면에서 멈추지 않게
+            break
+    return out
+
+
+def nearest_snap(points: list[tuple[fitz.Point, str]], pt: fitz.Point, radius: float,
+                 snap: dict | None = None) -> fitz.Point | None:
+    """반지름 안에서 가장 가까운 스냅 점(켠 종류만). 없으면 None."""
+    snap = snap or MEASURE_DEFAULT["snap"]
+    best, bd = None, radius
+    for q, kind in points:
+        if not snap.get(kind):
+            continue
+        dd = math.dist(q, pt)
+        if dd <= bd:
+            best, bd = q, dd
+    return best
 
 
 # ── 링크 ─────────────────────────────────────────────────────────
