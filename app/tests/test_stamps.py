@@ -347,3 +347,29 @@ def test_stamp_annot_key_is_stamp(store):
     d = Document(_pdf())
     x = S.add(d, 0, fitz.Rect(100, 100, 260, 140), {"group": "standard", "id": "Approved"}, author="a", st=store)
     assert ST.key_of(d, A.get(d, 0, x)) == "stamp"
+
+
+def test_stamp_manage_cancel_restores(win):
+    """스탬프 관리 창: 확인하면 바꾼 것이 남고, 취소하면 창을 열 때로 되돌아간다(그림 파일까지)."""
+    from app.ui import dlg_stamp
+    st = S.StampStore(tempfile.mkdtemp())
+    png = S.render_png({"shape": "rect", "color": (1, 0, 0), "lines": [("A", 1.0)], "image": "", "font": "",
+                        "fontsize": 0, "vertical": False, "width": 40, "height": 20}, 40, 20, px=40)
+    keep = st.put_custom({"type": "image", "name": "남길 것"}, png)
+    gone = st.put_custom({"type": "dynamic", "name": "지울 것", "text": "X"})
+
+    dlg = dlg_stamp.StampManageDialog(win, "윤성지", st=st)
+    buttons = [b.text() for b in dlg.findChildren(dlg_stamp.QPushButton)]
+    assert "확인" in buttons and "취소" in buttons and "닫기" not in buttons
+    st.delete_custom(keep)
+    new = st.put_custom({"type": "image", "name": "새 것"}, png)
+    st.put_custom(dict(st.get_custom(gone), name="바꾼 이름"))
+    dlg.reject()
+    again = S.StampStore(st.folder)
+    assert [e["name"] for e in again.custom()] == ["남길 것", "지울 것"]
+    assert os.path.exists(st.image_path(keep + ".png")) and not os.path.exists(st.image_path(new + ".png"))
+
+    dlg = dlg_stamp.StampManageDialog(win, "윤성지", st=st)
+    dlg.list.setCurrentRow(1); dlg.name.setText("확인한 이름"); dlg._rename()
+    dlg.accept()
+    assert S.StampStore(st.folder).get_custom(gone)["name"] == "확인한 이름"

@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import copy
 import os
 
 from PySide6.QtCore import QSize, Qt
@@ -309,7 +310,8 @@ class DynamicStampDialog(QDialog):
 
 
 class StampManageDialog(QDialog):
-    """사용자 스탬프 목록 · 이름 · 미리보기 · 추가(사용자 지정·동적) · 고치기 · 삭제. 바꾼 것은 바로 저장한다."""
+    """사용자 스탬프 목록 · 이름 · 미리보기 · 추가(사용자 지정·동적) · 고치기 · 삭제.
+    바꾼 것은 저장소에 바로 들어가지만 「취소」하면 창을 열 때로 되돌린다(stamps.json 과 그림 파일)."""
 
     def __init__(self, parent, author: str, st: S.StampStore | None = None, identity_edit=None):
         super().__init__(parent)
@@ -317,6 +319,7 @@ class StampManageDialog(QDialog):
         self.st = st or S.store()
         self.author = author
         self.identity_edit = identity_edit
+        self._snap = self._snapshot()
         lay = QHBoxLayout(self)
         left = QVBoxLayout()
         self.list = QListWidget(); self.list.setIconSize(QSize(64, 24)); self.list.setMinimumWidth(220)
@@ -339,11 +342,42 @@ class StampManageDialog(QDialog):
             row.addWidget(b)
         right.addLayout(row)
         right.addStretch(1)
-        close = QPushButton("닫기"); close.setDefault(True); close.clicked.connect(self.accept)
-        right.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+        right.addWidget(_buttons(self))
         lay.addLayout(right)
         self.list.currentRowChanged.connect(self._pick)
         self._fill()
+
+    def _snapshot(self) -> tuple[dict, dict[str, bytes]]:
+        files: dict[str, bytes] = {}
+        for e in self.st.data["custom"]:
+            if e.get("file"):
+                try:
+                    with open(self.st.image_path(e["file"]), "rb") as fp:
+                        files[e["file"]] = fp.read()
+                except OSError:
+                    pass
+        return copy.deepcopy(self.st.data), files
+
+    def reject(self):
+        """창을 열 때의 사용자 스탬프로 되돌린다. 새로 생긴 그림은 지우고 고치거나 지운 그림은 다시 쓴다."""
+        data, files = self._snap
+        for e in self.st.data["custom"]:
+            f = e.get("file")
+            if f and f not in files:
+                try:
+                    os.remove(self.st.image_path(f))
+                except OSError:
+                    pass
+        for f, png in files.items():
+            try:
+                os.makedirs(self.st.image_dir(), exist_ok=True)
+                with open(self.st.image_path(f), "wb") as fp:
+                    fp.write(png)
+            except OSError:
+                pass
+        self.st.data["custom"] = data["custom"]
+        self.st.save()
+        super().reject()
 
     def _fill(self, select: str | None = None):
         self.list.blockSignals(True)
