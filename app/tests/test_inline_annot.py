@@ -281,3 +281,34 @@ def test_empty_note_leaves_nothing_and_caret_without_dialog(win, pdf):
     pg = t.doc.fitz[0]
     anns = list(pg.annots())
     assert len(anns) == 1 and anns[0].type[1] == "Caret"
+
+
+def test_textbox_drag_sets_box_size(win, pdf):
+    """텍스트 상자 도구로 끌면 끈 크기대로 상자가 생긴다(글이 짧아도). 한 번 누르면 예전처럼 누른 자리에."""
+    win.open_path(pdf); pump(0.2)
+    t = win.cur(); v = t.viewer
+    win.on_tool("textbox")
+    v.goto(0); pump(0.1)
+    a, b = page_pos(v, 0, 100, 150), page_pos(v, 0, 400, 330)
+    QTest.mousePress(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, a)
+    for k in range(1, 6):
+        QTest.mouseMove(v.viewport(), a + (b - a) * k / 5); pump(0.01)
+    QTest.mouseRelease(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, b); pump(0.05)
+    ed = editor(v)
+    assert ed is not None and ed.fixed_width
+    type_text(v, "짧은 글")
+    click_away(v)
+    xs = [x for x in t.doc.fitz[0].annots() if x.type[1] == "FreeText"]
+    assert len(xs) == 1
+    r = A.freetext_info(t.doc, 0, xs[0].xref)["box"]
+    assert abs(r.x0 - 100) < 2 and abs(r.y0 - 150) < 2 and abs(r.x1 - 400) < 2 and abs(r.y1 - 330) < 4
+    # 한 번 누르면 정해진 너비(끈 크기 아님)
+    win.on_tool("textbox")
+    click_page(v, 0, 100, 450)
+    ed = editor(v)
+    assert ed is not None and not ed.fixed_width and ed.min_height == 0
+    type_text(v, "x")
+    click_away(v)
+    r2 = [A.freetext_info(t.doc, 0, x.xref)["box"] for x in t.doc.fitz[0].annots()
+          if x.type[1] == "FreeText" and x.xref != xs[0].xref][0]
+    assert r2.x0 < 100 < r2.x1 and r2.height < 60

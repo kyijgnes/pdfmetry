@@ -842,7 +842,13 @@ class PageView(QGraphicsView):
             self.clear_selection()
         elif self._links_editable() and self._press_link(i, sp):
             return
-        elif t in ("textbox", "callout", "typewriter"):
+        elif t == "textbox":
+            # 텍스트 상자는 끌면 그린 크기로, 한 번 누르면 누른 자리에(놓을 때 정한다)
+            self._drag_rect = QRectF(sp, sp)
+            self._drag_start_scene = sp
+            self._drag_end_scene = sp
+            return
+        elif t in ("callout", "typewriter"):
             # 누른 자리에서 바로 쓰는 글 주석(말풍선은 누른 자리가 지시선 끝)
             self.requestDialog.emit("textbox", {"page": i, "scene_pt": sp, "kind": t})
             return
@@ -1007,6 +1013,9 @@ class PageView(QGraphicsView):
                 # 누른 자리에 바로 치는 글 상자. 끌어 그렸으면 그 왼쪽 위에서 그린 너비로
                 self.requestDialog.emit("addtext", {"page": i, "scene_pt": r.topLeft(),
                                                     "width": None if small else r.width() / self.zoom})
+            elif t == "textbox":
+                self.requestDialog.emit("textbox", {"page": i, "kind": t, "scene_pt": self._drag_start_scene or sp}
+                                        if small else {"page": i, "kind": t, "scene_pt": r.topLeft(), "scene_rect": QRectF(r)})
             elif t == "addimage" and small:
                 # 한 번 누르면 미리보기 자리(원래 크기, 쪽보다 크면 줄임)에 바로 넣는다
                 ir = self._image_scene_rect(i, sp)

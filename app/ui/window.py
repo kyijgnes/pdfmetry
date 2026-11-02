@@ -1313,7 +1313,7 @@ class MainWindow(QMainWindow):
                     t.changed([i])
                 t.viewer.toolDone.emit(k)
             sp = data.get("scene_pt") or v.from_page_rect(data["page"], data["rect"]).topLeft()   # 끌어 그린 네모면 왼쪽 위
-            InlineAnnot(v, data["page"], data["kind"], st, done, scene_pt=sp)
+            InlineAnnot(v, data["page"], data["kind"], st, done, scene_pt=sp, drag=data.get("scene_rect"))
         elif kind == "textbox_edit":
             s = data
             info = A.freetext_info(d, s.page, s.xref)

@@ -40,6 +40,12 @@ class _Box(QGraphicsTextItem):
         super().__init__(parent)
         self.ed = ed
 
+    def boundingRect(self) -> QRectF:
+        """끌어 그린 상자면 글이 적어도 그린 높이까지(항목 단위)."""
+        r = super().boundingRect()
+        h = self.ed.min_height / self.ed._unit()
+        return QRectF(r.x(), r.y(), r.width(), max(r.height(), h))
+
     def paint(self, p: QPainter, opt: QStyleOptionGraphicsItem, w: QWidget | None = None):
         s, u = self.ed.style, self.ed._unit()
         r = self.boundingRect()
@@ -62,13 +68,14 @@ class InlineAnnot(QObject):
 
     kind: textbox · callout · typewriter. style: fontsize · text_color · fill · border · width · opacity.
     새로 쓰기는 scene_pt(누른 자리, 장면 좌표). 말풍선이면 그 자리가 지시선 끝이고 상자는 오른쪽 위.
+    drag(장면 좌표 네모)를 주면 끌어 그린 자리·크기로 상자를 연다(너비는 그 너비에서 줄을 바꾸고, 높이는 적어도 그만큼).
     고치기는 box(회전 전 쪽 좌표의 상자)·text·callout(지시선 꼭짓점, 쪽 좌표)을 준다.
     on_done(text, page_rect, callout_points): 끝날 때 한 번. callout_points 는 새 말풍선만(아니면 None).
     """
 
     def __init__(self, viewer, page: int, kind: str, style: dict,
                  on_done: Callable[[str, fitz.Rect, list | None], None], scene_pt: QPointF | None = None,
-                 box: fitz.Rect | None = None, text: str = "", callout: list | None = None):
+                 box: fitz.Rect | None = None, text: str = "", callout: list | None = None, drag: QRectF | None = None):
         super().__init__(viewer)
         self.v = viewer
         self.page = page
@@ -79,6 +86,8 @@ class InlineAnnot(QObject):
         self.on_done = on_done
         self.done = False
         self.editing = box is not None
+        self.min_height = 0.0   # 끌어 그린 높이(pt). 글이 적어도 상자는 이만큼
+        self.fixed_width = False
         it = viewer.items[page]
         z = viewer.zoom
         page_w, page_h = it.w / z, it.h / z
@@ -89,6 +98,14 @@ class InlineAnnot(QObject):
             # 고칠 때 지시선은 그대로(장면 좌표로 바꿔 둔다)
             self.tip_pt = None
             self._fixed_leader = [self._disp(viewer.from_page_point(page, fitz.Point(q))) for q in callout or []]
+        elif drag is not None and kind != "callout":
+            local = drag.topLeft() - it.pos()
+            self.pos_pt = QPointF(max(0.0, local.x() / z), max(0.0, local.y() / z))
+            self.min_width = max(10.0, drag.width() / z)
+            self.min_height = drag.height() / z
+            self.fixed_width = True
+            self.tip_pt = None
+            self._fixed_leader = []
         else:
             local = scene_pt - it.pos()
             click = QPointF(local.x() / z, local.y() / z)
@@ -150,12 +167,12 @@ class InlineAnnot(QObject):
         return self.style["fontsize"] / BASE_PX   # 항목 한 칸이 몇 pt 인가
 
     def _fit(self):
-        """너비는 처음 너비에서 가장 긴 줄만큼 늘고, 쪽 오른쪽 끝에서 줄을 바꾼다."""
+        """너비는 처음 너비에서 가장 긴 줄만큼 늘고, 쪽 오른쪽 끝에서 줄을 바꾼다. 끌어 그린 상자는 그 너비 그대로."""
         u = self._unit()
         doc = self.box.document()
         doc.setTextWidth(-1)
         want = doc.idealWidth() * u + A.TEXT_PAD
-        w = min(self.max_width, max(self.min_width, want))
+        w = min(self.max_width, self.min_width if self.fixed_width else max(self.min_width, want))
         if abs(self.box.textWidth() - w / u) > 1e-3:
             self.box.setTextWidth(w / u)
         else:
