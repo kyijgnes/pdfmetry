@@ -37,6 +37,7 @@ DEFAULTS: dict[str, dict] = {
     "callout": dict(_TEXT, fill=None, border=RED, width=1.0),
     "typewriter": dict(_TEXT),
     "stamp": {"stroke": (0.8, 0.0, 0.0)},
+    "m_distance": dict(_LINE), "m_perimeter": dict(_LINE), "m_area": dict(_LINE),   # 측정: 빨강·굵기 1
 }
 
 # 속성 패널이 그 종류에 보일 칸(차례 그대로). 고른 주석에만 보이는 칸은 SELECTED_ONLY.

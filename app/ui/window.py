@@ -25,12 +25,16 @@ from ..engine import annot_shapes as SH
 from ..engine import annot_style as S
 from ..engine import annots as A
 from ..engine import pages as P
+from ..engine import stamps as ST
 from ..engine.document import Document, DocumentError, NeedsPassword
 from . import dialogs as D
 from . import dlg_organize as O
 from .dlg_deco import run_decorate
+from .dlg_measure import MeasureDialog
+from .dlg_signature import SignatureDialog
 from . import dlg_pagebox as PB
 from . import dlg_split as DS
+from . import dlg_stamp as DST
 from . import icons, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
@@ -864,6 +868,52 @@ class MainWindow(QMainWindow):
         self._quick = q   # 닫힐 때까지 붙잡아 둔다
         q.popup_under(btn if btn is not None and btn.isVisible() else self.ribbon)
 
+    # ── 스탬프 · 서명 · 측정 창 ─────────────────────────────────────
+    def pick_stamp(self) -> dict | None:
+        """스탬프 메뉴를 마우스 자리에 띄워 고른 스탬프(spec). 아래 항목(만들기·관리·ID)은 메뉴를 닫은 뒤 연다."""
+        got: list[dict] = []
+        m = QMenu(self)
+        DST.fill_stamp_menu(m, got.append, lambda k: QTimer.singleShot(0, lambda: self.on_action(k)))
+        from PySide6.QtGui import QCursor
+        m.exec(QCursor.pos())
+        return got[0] if got else None
+
+    def stamp_dialog(self, key: str):
+        if key == "stamp_identity":
+            self.edit_identity(); return
+        author = A.user_author(self.prefs.get("author", ""))
+        if key == "stamp_create":
+            dlg = DST.CustomStampDialog(self)
+        elif key == "stamp_create_dyn":
+            dlg = DST.DynamicStampDialog(self, author, identity_edit=self.edit_identity)
+        else:
+            DST.StampManageDialog(self, author, identity_edit=self.edit_identity).exec(); return
+        t = self.cur()
+        if dlg.exec() and dlg.saved_id and t:   # 만든 스탬프로 바로 찍는다
+            t.viewer.props["stamp_spec"] = {"group": "custom", "id": dlg.saved_id}
+            self.on_tool("stamp_go")
+
+    def edit_identity(self) -> bool:
+        """ID 편집. 이름은 환경설정의 작성자와 같은 값(새 주석 작성자)."""
+        st = ST.store(); ident = st.identity()
+        dlg = DST.IdentityDialog(self, self.prefs.get("author", ""), ident["company"], ident["department"])
+        if not dlg.exec():
+            return False
+        v = dlg.values()
+        self.prefs["author"] = v["name"]; save_settings(self.settings)
+        st.set_identity(v["company"], v["department"])
+        for t in self.tabs:
+            t.viewer.props["author"] = v["name"]
+        return True
+
+    def measure_settings(self):
+        dlg = MeasureDialog(self, self.prefs.get("measure"))
+        if dlg.exec():
+            self.prefs["measure"] = dlg.values(); save_settings(self.settings)
+            for t in self.tabs:
+                t.viewer.props["measure"] = self.prefs["measure"]
+            self.say(f"측정 축척 {A.ratio_text(self.prefs['measure'])}")
+
     # ── 리본 처리 ─────────────────────────────────────────────
     def on_ribbon_tab(self, key: str):
         t = self.cur()
@@ -885,16 +935,15 @@ class MainWindow(QMainWindow):
         t = self.cur()
         if not t:
             return
-        if key == "stamp_pick":
-            text, ok = QInputDialog.getItem(self, "스탬프", "글자", A.STAMP_TEXTS, 0, True)
-            if not ok:
-                return
-            t.viewer.props["stamp_text"] = text; t.viewer.props["stamp_image"] = ""; key = "stamp"
-        elif key == "stamp_image":
-            p, _ = QFileDialog.getOpenFileName(self, "스탬프 이미지", "", "이미지 (*.png *.jpg *.jpeg *.bmp *.gif)")
-            if not p:
-                return
-            t.viewer.props["stamp_image"] = p; key = "stamp"
+        if key in ("stamp", "stamp_pick"):   # 스탬프 메뉴에서 고른 뒤 찍는다
+            spec = self.pick_stamp()
+            if not spec:
+                self.ribbon.reflect_tool(t.viewer.tool); return
+            t.viewer.props["stamp_spec"] = spec; key = "stamp"
+        elif key == "stamp_go":              # 스탬프를 이미 정했다(만들기 창에서 바로)
+            key = "stamp"
+        elif key in ("m_distance", "m_perimeter", "m_area"):
+            t.viewer.props["measure"] = self.prefs.get("measure")
         elif key == "addimage":
             p, self._drop_image = self._drop_image, ""
             if not p:
@@ -906,14 +955,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "이미지 추가", "읽을 수 없는 사진 파일입니다.")
                 return
             t.viewer.props["image_path"] = p
-        elif key == "signature":
-            p = self.prefs.get("signature_image")
-            if not p or not os.path.exists(p):
-                p, _ = QFileDialog.getOpenFileName(self, "서명 이미지(투명 PNG 권장)", "", "이미지 (*.png *.jpg *.jpeg *.bmp)")
-                if not p:
-                    return
-                self.prefs["signature_image"] = p; save_settings(self.settings)
-            t.viewer.props["stamp_image"] = p
+        elif key == "signature":   # 저장한 서명을 고르거나 그리기·타이핑·사진으로 새로
+            dlg = SignatureDialog(self)
+            if not dlg.exec() or not dlg.path:
+                self.ribbon.reflect_tool(t.viewer.tool); return
+            t.viewer.props["stamp_spec"] = {"group": "signature", "file": dlg.path}
         if key in ANNOT_TOOLS and not t.viewer.show_annots:
             self.say("주석이 숨겨져 있습니다. 「주석 보이기」를 켜면 주석 도구를 씁니다.")
             self.ribbon.reflect_tool(t.viewer.tool)
@@ -1147,12 +1193,12 @@ class MainWindow(QMainWindow):
             elif key == "digital_sign":
                 QMessageBox.information(self, "디지털 서명", "인증서 기반 디지털 서명은 넣지 않았습니다(공인 인증서·시점 확인 서버가 필요합니다).\n"
                                         "손글씨·도장 그림을 넣는 「서명 관리 → 서명 넣기」 를 쓰세요.")
-            elif key == "sign_new":
-                p, _ = QFileDialog.getOpenFileName(self, "서명 이미지(투명 PNG 권장)", "", "이미지 (*.png *.jpg *.jpeg *.bmp)")
-                if p: self.prefs["signature_image"] = p; save_settings(self.settings); self.say("서명 이미지를 등록했습니다")
-            elif key == "sign_apply": self.on_tool("signature")
+            elif key in ("sign_new", "sign_apply"): self.on_tool("signature")
             elif key == "sign_clear": self.prefs.pop("signature_image", None); save_settings(self.settings)
             elif key == "crop": self.on_tool("crop")
+            elif key == "stamp_pick": self.on_tool("stamp")
+            elif key in ("stamp_create", "stamp_create_dyn", "stamp_manage", "stamp_identity"): self.stamp_dialog(key)
+            elif key == "m_settings": self.measure_settings()
             elif key in TOOL_KEYS: self.on_tool(key)
             else: self.say(f"아직 없는 기능: {key}")
         except RuntimeError as e:
@@ -1317,11 +1363,6 @@ class MainWindow(QMainWindow):
                 else:
                     d.render(s.page, 3.0, clip=s.rect).save(out)
                 self.say(f"저장했습니다: {out}")
-        elif kind == "signature":
-            p = v.props.get("stamp_image") or self.prefs.get("signature_image")
-            if p and os.path.exists(p):
-                A.signature_image(d, data["page"], data["rect"], p); t.changed([data["page"]])
-            self._tool_done("signature")
         elif kind == "caret":   # 대화상자 없이 바로 단다(내용은 속성 패널·주석 목록에서)
             A.caret(d, data["page"], data["point"], "", A.user_author(v.props["author"]),
                     v.props.get("caret_color", (0.5, 0, 0.5)), v.props["opacity"]); t.changed([data["page"]])
