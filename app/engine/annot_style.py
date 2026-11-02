@@ -108,6 +108,11 @@ def to_viewer_props(key: str, style: dict, props: dict) -> None:
 def key_of(doc: Document, a: fitz.Annot) -> str | None:
     """이미 있는 주석이 어느 도구의 것인가(그 종류의 기본값으로 기억할 칸). 모르면 None."""
     f, kind = doc.fitz, a.type[1]
+    if kind == "Stamp":
+        return "stamp"
+    it = f.xref_get_key(a.xref, "IT")[1]
+    if kind in ("Line", "PolyLine", "Polygon") and f.xref_get_key(a.xref, "Measure")[0] != "null":
+        return {"/LineDimension": "m_distance", "/PolyLineDimension": "m_perimeter", "/PolygonDimension": "m_area"}.get(it)
     if kind in MARKUP_KINDS:
         return {"Highlight": "highlight", "Underline": "underline", "StrikeOut": "strike", "Squiggly": "squiggly"}[kind]
     if kind == "Square":

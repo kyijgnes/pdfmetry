@@ -327,3 +327,23 @@ def test_dialogs_build_and_save(win):
     assert not md.snaps["path"].isEnabled() and md.snaps["end"].isChecked()
     vals = md.values()
     assert A.ratio_text(vals) == "2 cm = 1 m" and vals["snap"]["mid"] is True
+
+
+def test_moved_measure_keeps_scale_and_stamp_key():
+    """합칠 때 맞춘 곳: 측정 선을 옮겨도 축척이 남고, 새 Stamp·측정 주석의 속성 패널 종류가 잡힌다."""
+    from app.engine import annot_style as ST
+    d = Document(_pdf())
+    ratio = {"doc": 2, "doc_unit": "cm", "real": 1, "real_unit": "m"}
+    x = A.measure_annot(d, 0, [fitz.Point(100, 100), fitz.Point(100 + 2 * CM, 100)], "distance", "1.00 m",
+                        (1, 0, 0), "a", ratio=ratio)
+    assert ST.key_of(d, A.get(d, 0, x)) == "m_distance"
+    n = A.move_by(d, 0, x, 30, 40)
+    assert A.measure_info(d, 0, n)["ratio"] == "2 cm = 1 m"
+    assert ST.key_of(d, A.get(d, 0, n)) == "m_distance"
+
+
+def test_stamp_annot_key_is_stamp(store):
+    from app.engine import annot_style as ST
+    d = Document(_pdf())
+    x = S.add(d, 0, fitz.Rect(100, 100, 260, 140), {"group": "standard", "id": "Approved"}, author="a", st=store)
+    assert ST.key_of(d, A.get(d, 0, x)) == "stamp"

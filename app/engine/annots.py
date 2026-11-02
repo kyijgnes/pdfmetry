@@ -226,6 +226,8 @@ def annot_colors(doc: Document, a: fitz.Annot) -> dict:
 def _recreate_moved(p: fitz.Page, a: fitz.Annot, dx: float, dy: float) -> int:
     """꼭짓점 주석을 옮긴 꼭짓점으로 새로 만들고 속성을 옮긴 뒤 옛것을 지운다. 새 xref 를 돌려준다."""
     kind, v = a.type[1], a.vertices
+    f, old = p.parent, a.xref
+    keep = [(k, f.xref_get_key(old, k)) for k in ("NM", "CreationDate", "IT", "Measure", "Cap", "F")]   # 측정 축척·잠금 등
     sh = lambda q: (q[0] + dx, q[1] + dy)  # noqa: E731
     if kind == "Ink":
         n = p.add_ink_annot([[sh(q) for q in s] for s in v])
@@ -246,7 +248,13 @@ def _recreate_moved(p: fitz.Page, a: fitz.Annot, dx: float, dy: float) -> int:
     info = a.info
     n.set_info(content=info.get("content", ""), title=info.get("title", ""), subject=info.get("subject", ""))
     n.update()
+    for k, (t, val) in keep:
+        if t != "null":
+            f.xref_set_key(n.xref, k, val)
     p.delete_annot(a)
+    for r in p.annots():   # 옮긴 주석에 달린 답글이 새 주석을 가리키게
+        if _irt(f, r.xref) == old:
+            f.xref_set_key(r.xref, "IRT", f"{n.xref} 0 R")
     return n.xref
 
 
