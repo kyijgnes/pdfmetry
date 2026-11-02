@@ -254,3 +254,32 @@ def test_old_stamp_text_and_measure_unit_rows_gone(qapp, tmp_path):
             assert p._fields() == () and not p.look_box.isVisibleTo(p)
     finally:
         v.close()
+
+
+def test_annot_list_find_text_drawn_bold(qapp):
+    """찾기 칸 글자가 목록 줄 안에서 굵게 보인다(내용·작성자 칸). 없는 글자면 보통대로."""
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    from app.ui.annot_filter import bold_html, find_spans
+    from app.ui.sidebar import AnnotPanel, _FoundText
+    assert find_spans("Abc abc", "ABC") == [(0, 3), (4, 7)]
+    assert bold_html("a<b>c", "B") == "a&lt;<b>b</b>&gt;c" and bold_html("글", "") == "글"
+    d = Document()
+    x = A.note(d, 0, fitz.Point(20, 20), "회의 메모 회의", author="회의실")
+    p = AnnotPanel(d)
+    p.resize(320, 400); p.show(); qapp.processEvents()
+    assert isinstance(p.tree.itemDelegateForColumn(1), _FoundText) and isinstance(p.tree.itemDelegateForColumn(2), _FoundText)
+
+    def ink(q: str) -> int:
+        p.find.setText(q); qapp.processEvents()
+        it = p._item_of(x)
+        idx = p.tree.indexFromItem(it, 1)
+        img = QImage(300, 24, QImage.Format.Format_ARGB32); img.fill(0xFFFFFFFF)
+        o = QStyleOptionViewItem(); o.rect = img.rect(); o.widget = p.tree; o.font = p.tree.font()
+        o.palette = p.tree.palette()
+        pa = QPainter(img); p.tree.itemDelegateForColumn(1).paint(pa, o, idx); pa.end()
+        return sum(1 for yy in range(img.height()) for xx in range(img.width()) if img.pixelColor(xx, yy).lightness() < 128)
+
+    plain = ink("")
+    assert ink("회의") > plain   # 굵은 글자가 잉크를 더 쓴다(같은 줄, 같은 글자)
+    p.close()

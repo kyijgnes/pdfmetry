@@ -1,8 +1,11 @@
 """주석 목록의 필터 창: 지금 문서에 있는 작성자 · 종류 · 색을 체크 목록으로 보이고 고른 것만 남긴다.
 
 「적용」은 체크한 것만 보이고, 「모두 지우기」는 필터를 풀어 전부 보인다. 다 체크하면 필터 없음과 같다.
+찾기 칸 글자를 목록 줄 안에서 굵게 보이는 도움 함수(find_spans · bold_html)도 여기 둔다.
 """
 from __future__ import annotations
+
+import html
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QPixmap
@@ -58,3 +61,23 @@ class AnnotFilterDialog(QDialog):
             if len(on) < len(items):
                 out[key] = on
         return out or None
+
+
+def find_spans(text: str, q: str) -> list[tuple[int, int]]:
+    """찾기 칸 글자가 text 안에 나오는 자리 [(시작, 끝)…]. 대소문자는 가리지 않는다."""
+    q = (q or "").strip().lower()
+    low, out, i = (text or "").lower(), [], 0
+    while q and (k := low.find(q, i)) >= 0:
+        out.append((k, k + len(q)))
+        i = k + len(q)
+    return out
+
+
+def bold_html(text: str, q: str) -> str:
+    """주석 목록 한 줄: 찾은 글자만 굵게(<b>), 나머지는 그대로(HTML 이스케이프)."""
+    out, i = [], 0
+    for a, b in find_spans(text, q):
+        out += [html.escape(text[i:a]), "<b>", html.escape(text[a:b]), "</b>"]
+        i = b
+    out.append(html.escape(text[i:]))
+    return "".join(out)

@@ -499,12 +499,41 @@ class BookmarkPanel(QWidget):
             parent.addChild(it); parent.setExpanded(True); self._save()
 
 
-class _NoteEditor(QStyledItemDelegate):
-    """주석 목록 내용 칸을 그 자리에서 고친다: 여러 줄, Ctrl+Enter 확정, Esc 취소, 칸을 떠나도 확정."""
+class _FoundText(QStyledItemDelegate):
+    """주석 목록 칸: 찾기 칸 글자가 든 줄은 그 글자만 굵게 그린다(나머지 꾸밈은 Qt 기본 그대로)."""
 
     def __init__(self, panel: "AnnotPanel"):
         super().__init__(panel.tree)
         self.panel = panel
+
+    def paint(self, p, opt, idx):
+        from PySide6.QtGui import QAbstractTextDocumentLayout, QPalette, QTextDocument, QTextOption
+        from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
+        from .annot_filter import bold_html, find_spans
+        q = self.panel.find.text()
+        o = QStyleOptionViewItem(opt); self.initStyleOption(o, idx)
+        if not find_spans(o.text, q):
+            return super().paint(p, opt, idx)
+        text, o.text = o.text, ""
+        st = o.widget.style() if o.widget else QApplication.style()
+        st.drawControl(QStyle.ControlElement.CE_ItemViewItem, o, p, o.widget)
+        r = st.subElementRect(QStyle.SubElement.SE_ItemViewItemText, o, o.widget).adjusted(3, 0, -3, 0)
+        doc = QTextDocument(); doc.setDocumentMargin(0); doc.setDefaultFont(o.font)
+        doc.setDefaultTextOption(QTextOption(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+        doc.defaultTextOption().setWrapMode(QTextOption.WrapMode.NoWrap)
+        doc.setHtml(f"<span style='white-space:pre'>{bold_html(text, q)}</span>")
+        ctx = QAbstractTextDocumentLayout.PaintContext()
+        role = QPalette.ColorRole.HighlightedText if o.state & QStyle.StateFlag.State_Selected else QPalette.ColorRole.Text
+        ctx.palette.setColor(QPalette.ColorRole.Text, o.palette.color(role))
+        p.save()
+        p.translate(r.left(), r.top() + (r.height() - doc.size().height()) / 2)
+        p.setClipRect(QRectF(0, 0, r.width(), r.height()))
+        doc.documentLayout().draw(p, ctx)
+        p.restore()
+
+
+class _NoteEditor(_FoundText):
+    """주석 목록 내용 칸을 그 자리에서 고친다: 여러 줄, Ctrl+Enter 확정, Esc 취소, 칸을 떠나도 확정."""
 
     def createEditor(self, parent, opt, idx):
         from PySide6.QtWidgets import QPlainTextEdit
@@ -566,6 +595,7 @@ class AnnotPanel(QWidget):
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)   # 내용 칸만 직접 연다
         self.tree.setItemDelegateForColumn(1, _NoteEditor(self))
+        self.tree.setItemDelegateForColumn(2, _FoundText(self))   # 찾은 글자 굵게(내용·작성자)
         self.tree.itemDelegateForColumn(1).closeEditor.connect(lambda *_: QTimer.singleShot(0, self._drop_empty_reply))
         self.tree.itemSelectionChanged.connect(self._selected)
         self.tree.itemDoubleClicked.connect(lambda it, _c: self.edit_item(it))
