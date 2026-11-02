@@ -238,3 +238,19 @@ def test_annot_list_replies_edit_delete_filter(qapp):
     assert not p.tree.topLevelItem(0).isExpanded()
     p.expand_all()
     assert p.tree.topLevelItem(0).isExpanded()
+
+
+def test_old_stamp_text_and_measure_unit_rows_gone(qapp, tmp_path):
+    """라운드 9 뒤 안 쓰는 칸(스탬프 글자·측정 단위)은 없다. 새 스탬프·측정 도구는 모양 카드를 비운다."""
+    d, v, st, p, _ = _panel(tmp_path)
+    try:
+        assert not hasattr(p, "stamp_text") and not hasattr(p, "unit")
+        assert "stamp_text" not in v.props and "stamp_image" not in v.props
+        labels = {p.look.labelForField(p.look.itemAt(i, p.look.ItemRole.FieldRole).widget()).text()
+                  for i in range(p.look.rowCount()) if p.look.labelForField(p.look.itemAt(i, p.look.ItemRole.FieldRole).widget())}
+        assert not {"스탬프 글자", "측정 단위"} & labels
+        for t in ("stamp", "m_distance"):
+            v.set_tool(t)
+            assert p._fields() == () and not p.look_box.isVisibleTo(p)
+    finally:
+        v.close()

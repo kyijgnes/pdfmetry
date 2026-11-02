@@ -867,7 +867,6 @@ def _import_one(doc: Document, e: dict) -> bool:
 # ── 스탬프 · 서명 ─────────────────────────────────────────────────
 # 새 스탬프·서명은 진짜 Stamp 주석(engine/stamps.py). 아래 글자 스탬프는 옛 버전이 찍던 모양(테두리 글상자,
 # 주제 「Stamp」)으로, 이미 찍힌 것을 읽고 고치는 호환용이다.
-STAMP_TEXTS = ["승인", "확인", "완료", "초안", "최종", "기밀", "검토 필요", "APPROVED", "DRAFT", "CONFIDENTIAL"]
 
 
 def stamp_text(doc: Document, page: int, r: fitz.Rect, text: str, color: Color = (0.8, 0, 0), author: str = "") -> int:

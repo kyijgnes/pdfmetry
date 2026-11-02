@@ -263,7 +263,7 @@ class PageView(QGraphicsView):
         # 도구 속성(오른쪽 패널이 바꿈)
         self.props = {"stroke": (1, 0, 0), "fill": None, "width": 1.5, "opacity": 1.0,
                       "hl_color": (1, 1, 0), "text_color": (0, 0, 0), "fontsize": 11, "ink_color": (0.1, 0.1, 0.9),
-                      "ink_width": 2.0, "author": "", "stamp_text": "승인", "stamp_image": "", "redact_fill": (0, 0, 0),
+                      "ink_width": 2.0, "author": "", "redact_fill": (0, 0, 0),
                       "measure_unit": "cm", "measure_scale": 1.0, "field_type": "text", "image_path": "",
                       "link_target": {}, "eraser_radius": ERASER_RADIUS,
                       "stamp_spec": None,   # 찍을 스탬프·서명(engine/stamps.py 의 spec)

@@ -116,10 +116,6 @@ class PropsPanel(QWidget):
         ol.addWidget(self.opacity, 1); ol.addWidget(self.op_label)
         self.op_row = op; f.addRow("불투명도", op)
         self.fontsize = QDoubleSpinBox(); self.fontsize.setRange(5, 200); self.fontsize.setDecimals(1); f.addRow("글자 크기", self.fontsize)
-        self.stamp_text = QComboBox(); self.stamp_text.setEditable(True); self.stamp_text.addItems(A.STAMP_TEXTS)
-        self.stamp_text.setCurrentText(props.get("stamp_text", "승인")); f.addRow("스탬프 글자", self.stamp_text)
-        self.unit = QComboBox(); self.unit.addItems(["cm", "mm", "in", "pt"]); self.unit.setCurrentText(props.get("measure_unit", "cm"))
-        f.addRow("측정 단위", self.unit)
         self.m_result = QLabel(""); self.m_result.setWordWrap(True); f.addRow("측정 결과", self.m_result)
         self.m_scale = QLabel(""); self.m_scale.setWordWrap(True); f.addRow("축척", self.m_scale)
         btns = QHBoxLayout(); btns.setSpacing(6)
@@ -146,7 +142,6 @@ class PropsPanel(QWidget):
         for c in (self.dashes, self.start, self.end, self.icon):
             c.currentIndexChanged.connect(self._edited)
         self.opacity.valueChanged.connect(self._opacity_moved); self.opacity.sliderReleased.connect(self._edited)
-        self.stamp_text.currentTextChanged.connect(self._extra); self.unit.currentTextChanged.connect(self._extra)
         if viewer is not None and hasattr(viewer, "toolChanged"):
             viewer.toolChanged.connect(self.tool_selected)
         self.show_selection(None)
@@ -175,13 +170,13 @@ class PropsPanel(QWidget):
         return tool_key(self._tool())
 
     def _fields(self) -> tuple[str, ...]:
-        if self.key in _MEASURE:
-            return ("unit",)
+        if self.key in _MEASURE:   # 측정 도구의 축척·단위는 측정 설정 창에서
+            return ()
         fs = S.FIELDS.get(self.key, ())
         if self.sel is None:
             fs = tuple(x for x in fs if x not in S.SELECTED_ONLY)
         if self.key == "stamp":
-            fs = ("stroke", "stamp_text") if self.sel is None else ("stroke", "opacity")
+            fs = () if self.sel is None else ("stroke", "opacity")   # 새 스탬프는 고른 스탬프 모양 그대로
         if self._measure is not None:
             fs += ("m_result", "m_scale")
         return fs
@@ -225,8 +220,8 @@ class PropsPanel(QWidget):
         rows = {self.swatches: main is not None, self.color: main is not None, self.border: "border" in fs,
                 self.fill: "fill" in fs, self.width: "width" in fs, self.dashes: "dashes" in fs,
                 self.start: "start" in fs, self.end: "end" in fs, self.icon: "icon" in fs,
-                self.op_row: "opacity" in fs, self.fontsize: "fontsize" in fs, self.stamp_text: "stamp_text" in fs,
-                self.unit: "unit" in fs, self.m_result: "m_result" in fs, self.m_scale: "m_scale" in fs and bool(self.m_scale.text())}
+                self.op_row: "opacity" in fs, self.fontsize: "fontsize" in fs,
+                self.m_result: "m_result" in fs, self.m_scale: "m_scale" in fs and bool(self.m_scale.text())}
         for w, on in rows.items():
             self.look.setRowVisible(w, on)
         if main:
@@ -358,11 +353,6 @@ class PropsPanel(QWidget):
 
     def _push_tool(self):
         S.to_viewer_props(self.key, self.store.get(self.key), self.props)
-        self.changed.emit(dict(self.props))
-
-    def _extra(self, *_):
-        self.props["stamp_text"] = self.stamp_text.currentText()
-        self.props["measure_unit"] = self.unit.currentText()
         self.changed.emit(dict(self.props))
 
     def _reset(self):
