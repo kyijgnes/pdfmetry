@@ -18,6 +18,7 @@ from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QImage, QKeyEvent, QK
 from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsScene, QGraphicsView, QInputDialog, QMenu,
                                QStyleOptionGraphicsItem, QWidget)
 
+from ..engine import annot_shapes as SH
 from ..engine import annots as A
 from ..engine.document import Document
 from . import theme
@@ -29,7 +30,64 @@ TOOLS_MARKUP = {"highlight": "Highlight", "underline": "Underline", "strike": "S
 TOOLS_SHAPE = {"rect", "oval", "line", "arrow", "polygon", "polyline", "cloud", "areahl", "redact", "link", "crop",
                "addtext", "addimage", "textbox", "callout", "typewriter", "stamp", "signature", "snapshot", "ocrarea",
                "ftext", "fcheck", "fradio", "fcombo", "flist", "fbutton", "fimage", "fsign", "fdate",
-               "m_distance", "m_perimeter", "m_area"}
+               "m_distance", "m_perimeter", "m_area", *SH.SHAPES}
+SQUARE_TOOLS = {"rect", "oval", "areahl", *SH.SHAPES}   # Shift 를 누르고 끌면 가로세로 같게
+ERASER_RADIUS = 10   # 지우개 반지름 기본값(화면 px)
+
+
+def flow_rects(words: list[tuple], a: fitz.Point, b: fitz.Point) -> list[fitz.Rect]:
+    """글자 표시 도구: a 에서 b 까지 글 흐름대로 고른 낱말을 줄마다 네모 하나로.
+
+    words 는 get_text("words") 꼴(x0,y0,x1,y1,글,덩어리,줄,낱말). 두 줄에 걸치면 첫 줄은 a 부터 끝까지,
+    가운데 줄은 통째로, 끝 줄은 처음부터 b 까지."""
+    ws = sorted(words, key=lambda w: (w[5], w[6], w[7]))
+    if not ws:
+        return []
+    lines: list[tuple[int, int, fitz.Rect]] = []   # (처음 낱말 자리, 끝 다음 자리, 줄 네모)
+    for k, w in enumerate(ws):
+        if lines and (ws[lines[-1][0]][5], ws[lines[-1][0]][6]) == (w[5], w[6]):
+            s0, _, r = lines[-1]
+            lines[-1] = (s0, k + 1, r | fitz.Rect(w[:4]))
+        else:
+            lines.append((k, k + 1, fitz.Rect(w[:4])))
+
+    def near(p: fitz.Point) -> int:
+        def dist(r: fitz.Rect) -> float:
+            dx = max(r.x0 - p.x, 0, p.x - r.x1)
+            dy = max(r.y0 - p.y, 0, p.y - r.y1)
+            return dx * dx + dy * dy * 4   # 위아래로 벗어난 것을 더 멀게(줄 사이 빈 곳은 가까운 줄로)
+        return min(range(len(lines)), key=lambda n: dist(lines[n][2]))
+
+    la, lb = near(a), near(b)
+    if (lb, b.x) < (la, a.x):
+        a, b, la, lb = b, a, lb, la
+    s0, e0, _ = lines[la]
+    start = next((k for k in range(s0, e0) if ws[k][2] > a.x), e0)
+    s1, e1, _ = lines[lb]
+    end = next((k + 1 for k in range(e1 - 1, s1 - 1, -1) if ws[k][0] < b.x), s1)
+    out: list[fitz.Rect] = []
+    for n in range(la, lb + 1):
+        s, e, _ = lines[n]
+        pick = ws[max(s, start):min(e, end)]
+        if pick:
+            r = fitz.Rect(pick[0][:4])
+            for w in pick[1:]:
+                r |= fitz.Rect(w[:4])
+            out.append(r)
+    return out
+
+
+def constrain(tool: str, a: QPointF, b: QPointF) -> QPointF:
+    """Shift 로 끌 때 끝점: 네모 꼴은 가로세로 같게, 선·화살표는 45도 단위로."""
+    dx, dy = b.x() - a.x(), b.y() - a.y()
+    if tool in SQUARE_TOOLS:
+        m = max(abs(dx), abs(dy))
+        return QPointF(a.x() + math.copysign(m, dx or 1), a.y() + math.copysign(m, dy or 1))
+    if tool in ("line", "arrow"):
+        ang = round(math.atan2(dy, dx) / (math.pi / 4)) * (math.pi / 4)
+        d = math.hypot(dx, dy)
+        return QPointF(a.x() + d * math.cos(ang), a.y() + d * math.sin(ang))
+    return b
 
 
 def _qimage(pix: fitz.Pixmap) -> QImage:
@@ -204,7 +262,7 @@ class PageView(QGraphicsView):
                       "hl_color": (1, 1, 0), "text_color": (0, 0, 0), "fontsize": 11, "ink_color": (0.1, 0.1, 0.9),
                       "ink_width": 2.0, "author": "", "stamp_text": "승인", "stamp_image": "", "redact_fill": (0, 0, 0),
                       "measure_unit": "cm", "measure_scale": 1.0, "field_type": "text", "image_path": "",
-                      "link_target": {}}
+                      "link_target": {}, "eraser_radius": ERASER_RADIUS}
 
         self.sel: Selection | None = None
         self._drag_start: QPointF | None = None  # 화면(뷰포트) 좌표
@@ -643,6 +701,11 @@ class PageView(QGraphicsView):
 
     def _apply_cursor(self):
         tool = self.tool
+        if tool == "eraser":
+            self.viewport().setCursor(self._eraser_cursor())
+            self.viewport().update()
+            self.toolChanged.emit(tool)
+            return
         cur = {"hand": Qt.CursorShape.OpenHandCursor, "select": Qt.CursorShape.IBeamCursor,
                "addtext": Qt.CursorShape.IBeamCursor}.get(tool)
         if cur is None:
@@ -651,6 +714,25 @@ class PageView(QGraphicsView):
         self.viewport().setCursor(QCursor(cur))
         self.viewport().update()
         self.toolChanged.emit(tool)
+
+    def _eraser_cursor(self) -> QCursor:
+        """지우개 마우스 모양: 지우는 크기 그대로의 원."""
+        r = int(self.props.get("eraser_radius", ERASER_RADIUS))
+        n = 2 * r + 3
+        pm = QPixmap(n, n); pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(255, 255, 255, 220), 3)); p.drawEllipse(QPointF(n / 2, n / 2), r, r)
+        p.setPen(QPen(QColor(40, 40, 40), 1)); p.drawEllipse(QPointF(n / 2, n / 2), r, r)
+        p.end()
+        return QCursor(pm, n // 2, n // 2)
+
+    def set_eraser_radius(self, r: int):
+        self.props["eraser_radius"] = int(r)
+        if self.tool == "eraser":
+            self.viewport().setCursor(self._eraser_cursor())
+
+    def _eraser_r(self) -> float:
+        return self.props.get("eraser_radius", ERASER_RADIUS) / self.zoom
 
     def set_edit_mode(self, on: bool, target: str | None = None):
         if target:
@@ -769,7 +851,7 @@ class PageView(QGraphicsView):
         elif t == "eraser":
             pt = self.to_page(i, sp)
             self._erase_last = (i, pt)
-            if A.erase_ink_at(self.doc, i, pt, radius=6 / self.zoom):
+            if A.erase_ink_at(self.doc, i, pt, radius=self._eraser_r()):
                 self.refresh_pages([i])
         elif t in ("note", "caret", "attach"):
             pt = self.to_page(i, sp)
@@ -807,6 +889,8 @@ class PageView(QGraphicsView):
             self._move_last = pt
             return
         if self._drag_rect is not None and e.buttons() & Qt.MouseButton.LeftButton:
+            if self._drag_start_scene is not None and e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                sp = constrain(self.tool, self._drag_start_scene, sp)
             self._drag_rect = QRectF(self._drag_rect.topLeft(), sp).normalized() if self._drag_start_scene is None                 else QRectF(self._drag_start_scene, sp).normalized()
             self._drag_end_scene = sp
             self.viewport().update()
@@ -822,7 +906,7 @@ class PageView(QGraphicsView):
                 pt = self.to_page(i, sp)
                 prev = self._erase_last[1] if self._erase_last and self._erase_last[0] == i else None
                 self._erase_last = (i, pt)
-                if A.erase_ink_at(self.doc, i, pt, radius=6 / self.zoom, prev=prev):
+                if A.erase_ink_at(self.doc, i, pt, radius=self._eraser_r(), prev=prev):
                     self.refresh_pages([i])
             return
         if self._poly:
@@ -888,14 +972,20 @@ class PageView(QGraphicsView):
                 if not small:
                     self._make_field(i, pr)
             elif t in TOOLS_MARKUP:
+                pt = self.to_page(i, sp)
                 if small:
                     # 한 번 눌렀으면 그 낱말 하나
-                    pt = self.to_page(i, sp)
-                    pr = next((fitz.Rect(w[:4]) for w in self.words(i) if fitz.Rect(w[:4]).contains(pt)), None)
-                if pr is not None:
-                    A.text_markup(self.doc, i, [pr], TOOLS_MARKUP[t], color=self.props["hl_color"],
+                    rects = [fitz.Rect(w[:4]) for w in self.words(i) if fitz.Rect(w[:4]).contains(pt)][:1]
+                else:
+                    # 글 흐름대로: 누른 자리부터 놓은 자리까지(두 줄이면 첫 줄 끝까지 + 둘째 줄 처음부터)
+                    rects = flow_rects(self.words(i), self.to_page(i, self._drag_start_scene or r.topLeft()), pt)
+                if rects:
+                    # 줄 네모의 위아래를 줄여 넘긴다(줄 사이가 좁으면 옆 줄 낱말까지 집혔다)
+                    bands = [fitz.Rect(q.x0, q.y0 + q.height * 0.3, q.x1, q.y1 - q.height * 0.3) for q in rects]
+                    A.text_markup(self.doc, i, bands, TOOLS_MARKUP[t], color=self.props["hl_color"],
                                   opacity=self.props["opacity"], author=self.props["author"])
                     self.refresh_pages([i])
+                    self.toolDone.emit(t)
             elif t == "addtext":
                 # 누른 자리에 바로 치는 글 상자. 끌어 그렸으면 그 왼쪽 위에서 그린 너비로
                 self.requestDialog.emit("addtext", {"page": i, "scene_pt": r.topLeft(),
@@ -914,6 +1004,7 @@ class PageView(QGraphicsView):
             A.ink(self.doc, i, [pts], stroke=self.props["ink_color"], width=self.props["ink_width"],
                   opacity=self.props["opacity"], author=self.props["author"])
             self.refresh_pages([i])
+            self.toolDone.emit(t)
         self._drag_start = None
         super().mouseReleaseEvent(e)
 
@@ -1311,6 +1402,9 @@ class PageView(QGraphicsView):
             else:
                 A.line(d, i, s0, s1, P["stroke"], P["width"], arrow=(t == "arrow"), opacity=P["opacity"],
                        author=P["author"])
+        elif t in SH.SHAPES:
+            A.polygon(d, i, SH.shape_points(t, pr), P["stroke"], P["fill"], P["width"], closed=True,
+                      opacity=P["opacity"], author=P["author"])
         elif t == "areahl":
             A.area_highlight(d, i, pr, P["hl_color"], P["opacity"], P["author"])
         elif t == "redact":
@@ -1541,6 +1635,11 @@ class PageView(QGraphicsView):
                 p.setPen(QPen(self._qcolor(self.props["stroke"]), self.props["width"] * self.zoom))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(r)
+            elif t in SH.SHAPES and r.width() > 1 and r.height() > 1:
+                p.setPen(QPen(self._qcolor(self.props["stroke"]), self.props["width"] * self.zoom))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                shape = SH.shape_points(t, fitz.Rect(r.left(), r.top(), r.right(), r.bottom()))
+                p.drawPolygon(QPolygonF([QPointF(q.x, q.y) for q in shape]))
             else:
                 p.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
                 p.setBrush(QColor(232, 56, 61, 25) if t != "redact" else QColor(0, 0, 0, 120))

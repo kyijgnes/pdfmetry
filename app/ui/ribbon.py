@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QFont, QFontMetrics
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QSizePolicy,
                                QSpinBox, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
@@ -48,19 +48,27 @@ TABS: list[tuple[str, str, list]] = [
                                                  ("pagenumber_menu", "페이지 번호", DECO_MENU("pagenumber")), ("pagelabel", "페이지 레이블"),
                                                  ("replace_image", "이미지 바꾸기(고른 것)"), ("delete_sel", "고른 것 삭제")]),
     ]),
+    # 묶음: 글자 표시 │ 그리기 │ 그림·스탬프 │ 글 주석 │ 체크 │ 도구. 더보기 split 의 여섯째 칸은 처음 쓸 도구.
     ("comment", "주석", [
-        ("pencil", "pencil", "연필", "tool", None), ("eraser", "eraser", "지우개", "tool", None), SEP,
-        ("highlight", "highlight", "강조", "tool", [("highlight", "강조"), ("areahl", "영역 강조")]),
-        ("underline", "underline", "밑줄", "tool", [("underline", "밑줄"), ("strike", "취소선"), ("squiggly", "구불구불한 선"), ("caret", "삽입 기호")]),
-        SEP,
-        ("typewriter", "typewriter", "타자기", "tool", [("typewriter", "타자기"), ("textbox", "텍스트 박스"), ("callout", "텍스트 말풍선")]),
-        ("note", "note", "노트", "tool", None), SEP,
-        ("rect", "rect", "직사각형", "tool", [("rect", "직사각형"), ("oval", "타원"), ("line", "선"), ("arrow", "화살표"), ("polygon", "다각형"),
-                                      ("polyline", "연결된 선"), ("cloud", "클라우드")]),
-        ("stamp", "stamp", "스탬프", "tool", [("stamp_pick", "스탬프 고르기"), ("stamp_image", "이미지 스탬프 만들기")]),
-        ("signature", "signature", "서명", "tool", None), ("attach", "attach", "첨부 파일", "tool", None),
+        ("highlight", "highlight", "강조", "tool", None), ("areahl", "areahl", "영역 강조", "tool", None),
+        ("underline", "underline", "밑줄", "tool", None), ("strike", "strike", "취소선", "tool", None),
+        ("markup_more", "squiggly", "구불구불한 선", "tool", [("underline", "밑줄"), ("strike", "취소선"), ("squiggly", "구불구불한 선"),
+                                                         ("caret", "삽입 기호")], "squiggly"),
+        ("annot_color", "background", "색", "action", None), SEP,
+        ("rect", "rect", "직사각형", "tool", None), ("oval", "oval", "타원", "tool", None), ("arrow", "arrow", "화살표", "tool", None),
+        ("shape_more", "line", "선", "tool", [("rect", "직사각형"), ("arrow", "화살표"), ("line", "선"), ("oval", "타원"),
+                                             ("polyline", "연결된 선"), ("cloud", "클라우드"), ("polygon", "다각형"), ("triangle", "삼각형"),
+                                             ("shape_more2", "모양 더 보기", [("cross", "십자가"), ("bent_arrow", "구부러진 위쪽 화살표"),
+                                                                         ("balloon", "말풍선")])], "line"),
+        ("note", "note", "노트", "tool", None),
         ("measure", "measure", "거리 측정", "tool", [("m_distance", "거리"), ("m_perimeter", "둘레"), ("m_area", "영역")]), SEP,
-        ("show_annots", "eye", "주석 보이기", "toggle", None),
+        ("pencil", "pencil", "연필", "tool", None), ("eraser", "eraser", "지우개", "tool", None),
+        ("stamp", "stamp", "스탬프", "tool", [("stamp_pick", "스탬프 고르기"), ("stamp_image", "이미지 스탬프 만들기")]),
+        ("signature", "signature", "서명", "tool", None), SEP,
+        ("typewriter", "typewriter", "타자기", "tool", None), ("textbox", "textbox", "텍스트 박스", "tool", None),
+        ("callout", "callout", "텍스트 말풍선", "tool", None), ("attach", "attach", "첨부 파일", "tool", None), SEP,
+        ("show_annots", "eye", "주석 보이기", "toggle", None), ("keep_tool", "pin", "도구 계속 쓰기", "toggle", None), SEP,
+        ("snapshot", "snapshot", "스크린샷", "tool", None),
     ]),
     ("convert", "변환", [
         ("create", "create", "PDF 생성", "menu", [("create_files", "파일에서 생성"), ("create_blank", "빈 PDF"),
@@ -139,18 +147,38 @@ LABELS.update({"hand": "손", "select": "선택", "zoomin": "확대", "zoomout":
                "squiggly": "구불구불한 선", "caret": "삽입 기호", "textbox": "텍스트 박스", "callout": "텍스트 말풍선", "oval": "타원",
                "line": "선", "arrow": "화살표", "polygon": "다각형", "polyline": "연결된 선", "cloud": "클라우드",
                "m_distance": "거리 측정", "m_perimeter": "둘레 측정", "m_area": "넓이 측정", "crop": "자르기", "link": "링크", "redact": "교정 표시",
-               "ocrarea": "영역 OCR", "addtext": "텍스트 추가", "addimage": "이미지 추가", "snapshot": "스크린샷"})
+               "ocrarea": "영역 OCR", "addtext": "텍스트 추가", "addimage": "이미지 추가", "snapshot": "스크린샷",
+               "triangle": "삼각형", "cross": "십자가", "bent_arrow": "구부러진 위쪽 화살표", "balloon": "말풍선",
+               "annot_color": "색", "keep_tool": "도구 계속 쓰기"})
 
 # 메뉴 항목 중 뷰어 도구가 되는 것
 TOOL_KEYS = {"hand", "select", "addtext", "addimage", "link", "crop", "pencil", "eraser", "highlight", "areahl", "underline",
              "strike", "squiggly", "caret", "typewriter", "textbox", "callout", "note", "rect", "oval", "line", "arrow",
-             "polygon", "polyline", "cloud", "stamp", "signature", "attach", "m_distance", "m_perimeter", "m_area",
+             "polygon", "polyline", "cloud", "triangle", "cross", "bent_arrow", "balloon", "stamp", "signature", "attach",
+             "m_distance", "m_perimeter", "m_area",
              "ocrarea", "redact", "snapshot", "ftext", "fcheck", "fradio", "fcombo", "flist", "fbutton", "fimage", "fsign", "fdate"}
+
+# 주석 도구: 주석을 숨기면 못 쓰고, 「도구 계속 쓰기」를 종류마다 기억한다
+ANNOT_TOOLS = {"highlight", "areahl", "underline", "strike", "squiggly", "caret", "rect", "oval", "arrow", "line", "polyline",
+               "cloud", "polygon", "triangle", "cross", "bent_arrow", "balloon", "note", "m_distance", "m_perimeter", "m_area",
+               "pencil", "eraser", "stamp", "signature", "typewriter", "textbox", "callout", "attach"}
+KEEP_OFF = {"stamp", "signature", "attach"}   # 처음엔 한 번 쓰고 선택 도구로 돌아가는 것
+
+
+def keep_tool(settings: dict, key: str) -> bool:
+    """그 도구를 쓰고 나서도 계속 켜 둘까(settings.json 의 keep_tool). 지우개는 늘 계속(끌 칸이 없다)."""
+    if key == "eraser":
+        return True
+    return bool((settings.get("keep_tool") or {}).get(key, key not in KEEP_OFF))
+
+COMMENT_ANNOT_KEYS = [it[0] for t, _, items in TABS if t == "comment" for it in items
+                      if it != SEP and it[0] not in ("show_annots", "snapshot")]
 
 
 class Ribbon(QWidget):
     action = Signal(str)          # action·menu 항목
     tool = Signal(str)            # 뷰어 도구 바뀜
+    quickStyle = Signal(str, object)   # 켜진 도구 단추를 다시 누름: (도구, 단추) → 빠른 스타일
     toggled = Signal(str, bool)   # toggle 단추
     tabChanged = Signal(str)
     searchRequested = Signal(str)
@@ -201,33 +229,46 @@ class Ribbon(QWidget):
         # 리본 아래 옅은 그림자: 리본과 문서 자리가 한 판으로 붙어 밋밋하던 것을 층으로 나눈다
         shade = QWidget(); shade.setObjectName("ribbonshadow"); shade.setFixedHeight(4)
         shade.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True); lay.addWidget(shade)
-        self._widths: dict[str, tuple[int, int, list[QToolButton]]] = {}
+        self._widths: dict[str, tuple[int, list[int], list[QToolButton]]] = {}
         self.current_tab = "home"
         self.set_edit_target("all")
         self.set_tab("home")
 
     # 창이 좁으면 단추 이름을 접고(아이콘만) 넓으면 편다. 이름을 늘 다 보이면 창을 1300px 아래로 못 줄였다.
+    # 주석 탭처럼 단추가 많으면 다 펴지 못하므로 왼쪽 단추부터 들어가는 만큼만 이름을 편다.
     def _measure(self):
         for key, w in self.pages.items():
             btns = [b for b in w.findChildren(QToolButton) if b.text()]
+            btns.sort(key=lambda b: w.layout().indexOf(b))
             lay = w.layout()
+            extra = []
             for b in btns:
+                b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly); small = b.sizeHint().width()
+                b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon); extra.append(b.sizeHint().width() - small)
                 b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             lay.invalidate(); compact = lay.minimumSize().width()
-            for b in btns:
-                b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            lay.invalidate(); full = lay.minimumSize().width()
-            self._widths[key] = (compact, full, btns)
+            self._widths[key] = (compact, extra, btns)
             w.setMinimumWidth(compact)
         self._fit()
 
     def _fit(self):
         avail = self.stack.width()
-        for compact, full, btns in self._widths.values():
-            style = Qt.ToolButtonStyle.ToolButtonTextBesideIcon if avail >= full else Qt.ToolButtonStyle.ToolButtonIconOnly
-            for b in btns:
+        for compact, extra, btns in self._widths.values():
+            room = avail - compact
+            for b, x in zip(btns, extra):
+                fits = room >= x
+                if fits:
+                    room -= x
+                else:
+                    room = -1   # 하나가 못 펴지면 그 뒤는 다 접는다(이름이 띄엄띄엄 보이지 않게)
+                style = Qt.ToolButtonStyle.ToolButtonTextBesideIcon if fits else Qt.ToolButtonStyle.ToolButtonIconOnly
                 if b.toolButtonStyle() != style:
                     b.setToolButtonStyle(style)
+
+    def sizeHint(self):
+        """창 처음 크기를 리본이 정하지 않게(이름을 다 편 주석 탭은 2700px 쯤 된다)."""
+        s = super().sizeHint()
+        return QSize(min(s.width(), 1360), s.height())
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -242,12 +283,13 @@ class Ribbon(QWidget):
     def _build(self, items) -> QWidget:
         w = QWidget(); hl = QHBoxLayout(w); hl.setContentsMargins(8, 3, 8, 4); hl.setSpacing(2)
         hl.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)  # 최소 폭은 _measure 가 정한다(아이콘만일 때 폭)
+        w.setMinimumWidth(1)   # _measure 전에는 이름을 다 편 폭이 창 최소 폭이 되지 않게
         hl.addStretch(1)
         for it in items:
             if it == SEP:
                 f = QFrame(); f.setObjectName("vsep"); f.setFrameShape(QFrame.Shape.VLine); f.setFixedHeight(18); hl.addWidget(f)
                 continue
-            key, icon, label, kind, menu_items = it
+            key, icon, label, kind, menu_items, *first = it
             if kind == "range":
                 hl.addWidget(self._range_combo())
                 continue
@@ -267,7 +309,7 @@ class Ribbon(QWidget):
                 # 화살표 자리를 QSS 가 단추 모양마다 맞춘다(split: 눌러 쓰고 옆 화살표로 고름, drop: 눌러서 메뉴)
                 b.setProperty("split" if split else "drop", True)
             if kind == "tool":
-                b.setProperty("toolkey", menu_items[0][0] if menu_items else key)
+                b.setProperty("toolkey", first[0] if first else menu_items[0][0] if menu_items else key)
                 b.clicked.connect(lambda checked, btn=b: self._tool_clicked(btn, checked))
             elif kind == "toggle":
                 b.clicked.connect(lambda checked, k=key: self.toggled.emit(k, checked))
@@ -334,6 +376,10 @@ class Ribbon(QWidget):
         key = btn.property("toolkey")
         if checked:
             self.tool.emit(key)
+        elif key in ANNOT_TOOLS:
+            # 켜진 주석 도구를 다시 누르면 끄지 않고 빠른 스타일(끄기는 Esc·손 도구)
+            btn.setChecked(True)
+            self.quickStyle.emit(key, btn)
         else:
             self.tool.emit("hand")
 
@@ -375,6 +421,13 @@ class Ribbon(QWidget):
             if k != "mail":
                 b.setEnabled(on)
         self.search.setEnabled(on)
+
+    def set_annot_enabled(self, on: bool):
+        """주석을 숨기면 주석 탭의 주석 도구 단추를 끈다(주석 보이기·스크린샷은 그대로)."""
+        for key in COMMENT_ANNOT_KEYS:
+            for b in self.buttons.get(key, []):
+                if b.parentWidget() is self.pages["comment"]:
+                    b.setEnabled(on)
 
     def set_enabled(self, key: str, on: bool):
         for b in self.buttons.get(key, []):

@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialo
                                QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter, QStackedWidget,
                                QTabBar, QToolButton, QVBoxLayout, QWidget)
 
+from ..engine import annot_shapes as SH
+from ..engine import annot_style as S
 from ..engine import annots as A
 from ..engine import pages as P
 from ..engine.document import Document, DocumentError, NeedsPassword
@@ -34,7 +36,8 @@ from . import shortcuts as K
 from .inline_text import InlineText
 from .organize import OrganizeView
 from .props import PropsPanel
-from .ribbon import LABELS, TOOL_KEYS, Ribbon
+from .quick_style import QuickStyle, eraser_radius, has_quick_style, style_key
+from .ribbon import ANNOT_TOOLS, LABELS, TOOL_KEYS, Ribbon, keep_tool
 from .sidebar import AnnotPanel, AttachmentPanel, BookmarkPanel, FieldPanel, LayerPanel, SearchPanel, ThumbnailPanel
 from .start import StartPage
 from .update import UpdateUI
@@ -323,6 +326,7 @@ class MainWindow(QMainWindow):
         # 리본
         self.ribbon = Ribbon()
         self.ribbon.action.connect(self.on_action); self.ribbon.tool.connect(self.on_tool); self.ribbon.toggled.connect(self.on_toggle)
+        self.ribbon.quickStyle.connect(self.open_quick_style)
         self.ribbon.tabChanged.connect(self.on_ribbon_tab); self.ribbon.searchRequested.connect(self.quick_search)
         self.ribbon.rangePicked.connect(self.pick_range)
         self.ribbon.fileMenu.connect(self.show_file_menu)
@@ -453,6 +457,7 @@ class MainWindow(QMainWindow):
         self.ribbon.set_toggle("edit_all", t.viewer.edit_mode); self.ribbon.set_edit_target(t.viewer.edit_target)
         self.ribbon.set_toggle("form_edit", t.viewer.form_mode)
         self.ribbon.set_toggle("show_annots", t.viewer.show_annots)
+        self.ribbon.set_annot_enabled(t.viewer.show_annots); self._sync_keep(t)
         self.ribbon.set_enabled("undo", t.doc.can_undo()); self.ribbon.set_enabled("redo", t.doc.can_redo())
         self.sync_thumb_zoom(*t.organize.can_zoom())
         self.ribbon.show_range(t.organize.selected_pages(), t.doc.page_count, P.labels(t.doc))
@@ -832,10 +837,31 @@ class MainWindow(QMainWindow):
         t = self.cur()
         if not t:
             return
-        # 한 번 쓰는 도구는 선택으로 돌아간다. 연필·강조·스탬프 등은 계속.
-        if tool in ("textbox", "callout", "typewriter", "addtext", "addimage", "link", "crop", "snapshot", "ocrarea", "signature",
-                    "escape") or tool.startswith("f"):
+        # 주석 도구는 「도구 계속 쓰기」(종류마다 기억)를 따르고, 그 밖의 한 번 쓰는 도구는 선택으로 돌아간다.
+        if tool in ANNOT_TOOLS:
+            if not keep_tool(self.settings, tool):
+                self.on_tool("select")
+        elif tool in ("addtext", "addimage", "link", "crop", "snapshot", "ocrarea", "escape") or tool.startswith("f"):
             self.on_tool("select" if not t.viewer.form_mode else "form")
+
+    def _sync_keep(self, t):
+        """「도구 계속 쓰기」 토글을 지금 도구의 값으로. 주석 도구가 아니거나 지우개면 끔·회색."""
+        tool = t.viewer.tool
+        on = tool in ANNOT_TOOLS and tool != "eraser" and t.viewer.show_annots
+        self.ribbon.set_toggle("keep_tool", keep_tool(self.settings, tool) if on else False)
+        self.ribbon.set_enabled("keep_tool", on)
+
+    def open_quick_style(self, tool: str, btn, only_color: bool = False):
+        """켜진 주석 도구 단추를 다시 누름(또는 리본 「색」): 그 단추 아래에 빠른 스타일."""
+        t = self.cur()
+        if not t or not has_quick_style(tool):
+            return
+        if tool == "eraser":
+            t.viewer.set_eraser_radius(eraser_radius(self.settings))
+        q = QuickStyle(tool, t.viewer, self.settings, lambda: save_settings(self.settings), only_color, parent=self)
+        q.changed.connect(lambda _k, t=t: None if t.viewer.closed else t.props.tool_selected(t.viewer.tool))
+        self._quick = q   # 닫힐 때까지 붙잡아 둔다
+        q.popup_under(btn if btn is not None and btn.isVisible() else self.ribbon)
 
     # ── 리본 처리 ─────────────────────────────────────────────
     def on_ribbon_tab(self, key: str):
@@ -887,6 +913,10 @@ class MainWindow(QMainWindow):
                     return
                 self.prefs["signature_image"] = p; save_settings(self.settings)
             t.viewer.props["stamp_image"] = p
+        if key in ANNOT_TOOLS and not t.viewer.show_annots:
+            self.say("주석이 숨겨져 있습니다. 「주석 보이기」를 켜면 주석 도구를 씁니다.")
+            self.ribbon.reflect_tool(t.viewer.tool)
+            return
         if key.startswith("f") and key in TOOL_KEYS and not t.viewer.form_mode:
             t.viewer.set_form_mode(True); self.ribbon.set_toggle("form_edit", True)
         if key in ("hand", "select") and t.viewer.form_mode:
@@ -896,8 +926,13 @@ class MainWindow(QMainWindow):
         if key in ("addtext", "addimage"):
             t.viewer.begin_edit_tool(("text", "all") if key == "addtext" else ("image", "all"))
             self.ribbon.set_toggle("edit_all", True); self.ribbon.set_edit_target(t.viewer.edit_target)
+        if key == "eraser":
+            t.viewer.set_eraser_radius(eraser_radius(self.settings))
         t.viewer.set_tool(key)
+        if key in SH.SHAPES:   # 모양 더보기 넷은 다각형의 기본값을 같이 쓴다
+            S.to_viewer_props(style_key(key), S.store().get(style_key(key)), t.viewer.props)
         self.ribbon.reflect_tool(key)
+        self._sync_keep(t)
         self._sync_status(t)
         if key in ("hand", "select"):
             self.say("")
@@ -935,6 +970,15 @@ class MainWindow(QMainWindow):
             # 보기 설정이다. 파일의 주석 숨김 표시를 바꾸면 저장할 때 주석이 숨은 채로 남는다.
             t.viewer.show_annots = on
             t.viewer.refresh_pages(None)
+            self.ribbon.set_annot_enabled(on)
+            if not on and t.viewer.tool in ANNOT_TOOLS:   # 숨긴 채 주석을 만들지 않게 도구를 끈다
+                self.on_tool("select")
+            self._sync_keep(t)
+        elif key == "keep_tool":
+            tool = t.viewer.tool
+            if tool in ANNOT_TOOLS and tool != "eraser":
+                self.settings.setdefault("keep_tool", {})[tool] = on; save_settings(self.settings)
+            self._sync_keep(t)
         elif key == "read_mode":
             self.ribbon.stack.setVisible(not on); self.navstrip.setVisible(not on); self.rightstrip.setVisible(not on)
             if on:
@@ -1026,6 +1070,9 @@ class MainWindow(QMainWindow):
             elif key == "tool_hand": self.on_tool("hand")
             elif key == "tool_select": self.on_tool("select")
             elif key == "snapshot_tool": self.on_tool("snapshot")
+            elif key == "annot_color":   # 리본 「색」: 지금 주석 도구의 색(주석 도구가 아니면 강조)
+                btns = self.ribbon.buttons.get("annot_color") or [None]
+                self.open_quick_style(v.tool if style_key(v.tool) else "highlight", btns[0], only_color=True)
             elif key == "delete_sel": v.delete_selection()
             elif key == "replace_image":
                 if v.sel and v.sel.kind == "image": self.on_request(t, "replace_image", v.sel)
@@ -1250,7 +1297,7 @@ class MainWindow(QMainWindow):
             p = v.props.get("stamp_image") or self.prefs.get("signature_image")
             if p and os.path.exists(p):
                 A.signature_image(d, data["page"], data["rect"], p); t.changed([data["page"]])
-            self.on_tool("select")
+            self._tool_done("signature")
         elif kind == "note":
             text, ok = QInputDialog.getMultiLineText(self, "노트", "내용")
             if ok and text.strip():
@@ -1264,6 +1311,7 @@ class MainWindow(QMainWindow):
             p, _ = QFileDialog.getOpenFileName(self, "첨부할 파일")
             if p:
                 A.attachment(d, data["page"], data["point"], p, v.props["author"]); t.changed([data["page"]])
+            self._tool_done("attach")
         elif kind == "link":
             from .dlg_link import LinkDialog
             dlg = LinkDialog(self, d, v.current, self.prefs, view_dest=v.link_dest_here())
