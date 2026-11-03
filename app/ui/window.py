@@ -47,6 +47,10 @@ from .sidebar import AnnotPanel, AttachmentPanel, BookmarkPanel, FieldPanel, Lay
 from .start import StartPage
 from .update import UpdateUI
 from .viewer import PageView
+from PySide6.QtCore import QRegularExpression  # noqa: E402  (보기 탭: 배율 칸 거르기)
+from PySide6.QtGui import QRegularExpressionValidator  # noqa: E402
+from . import fullscreen, tile as tiler  # noqa: E402
+from .viewer import BG_MODES as VIEW_BG, ZOOM_FITS, ZOOM_MAX, ZOOM_MIN, pct_text  # noqa: E402
 
 from ..appinfo import APP_NAME, ICON, VERSION, copy_old_data, data_dir  # noqa: E402
 
@@ -678,7 +682,8 @@ class MainWindow(QMainWindow):
             return
         v = t.viewer
         page, y, x = v.view_pos()
-        state = {"page": page, "y": y, "x": x, "zoom": round(v.zoom, 4), "mode": v.zoom_mode, "layout": v.layout_mode}
+        state = {"page": page, "y": y, "x": x, "zoom": round(v.zoom, 4), "mode": v.zoom_mode, "layout": v.layout_mode,
+                 "cover": v.cover_separate}
         path = os.path.abspath(t.doc.path)
         for r in self.settings["recent"]:
             if os.path.abspath(r["path"]) == path:
@@ -788,8 +793,14 @@ class MainWindow(QMainWindow):
         w, h = t.doc.page_size(v.current)
         self.size_label.setText(f"{w / 72 * 2.54:.2f} x {h / 72 * 2.54:.2f} cm")
         self.page_edit.setText(str(v.current + 1)); self.page_total.setText(f"/ {t.doc.page_count}")
-        self.zoom_slider.blockSignals(True); self.zoom_slider.setValue(int(v.zoom * 100)); self.zoom_slider.blockSignals(False)
-        self.zoom_box.setEditText(f"{int(round(v.zoom * 100))}%")
+        if self.zoom_slider.maximum() != int(ZOOM_MAX * 100):   # 확대 범위·목록을 단계표로(상태줄을 지을 때는 옛 값)
+            self.zoom_slider.setRange(int(ZOOM_MIN * 100), int(ZOOM_MAX * 100))
+            self.zoom_box.clear(); self.zoom_box.addItems([pct_text(z) for z in PageView.STEPS] + list(ZOOM_FITS))
+            self.zoom_box.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9.%]*"), self.zoom_box))
+        self.zoom_slider.blockSignals(True); self.zoom_slider.setValue(int(round(v.zoom * 100))); self.zoom_slider.blockSignals(False)
+        self.zoom_box.setEditText(pct_text(v.zoom))
+        v.sync_prefs(self.prefs)
+        self.ribbon.set_enabled("tile", tiler.doc_count() >= 2)
         self.sb_hand.setChecked(v.tool == "hand"); self.sb_sel.setChecked(v.tool == "select")
         self.sb_hist["prev_view"].setEnabled(bool(v._back)); self.sb_hist["next_view"].setEnabled(bool(v._fwd))
         i = self.tabs.index(t)
@@ -803,27 +814,26 @@ class MainWindow(QMainWindow):
         labels = P.labels(t.doc)
         if txt in labels:
             t.viewer.goto(labels.index(txt))
-        elif txt.isdigit():
+        elif txt.isdigit() and 1 <= int(txt) <= t.doc.page_count:
             t.viewer.goto(int(txt) - 1)
+        else:   # 못 읽으면 지금 쪽으로 되돌린다
+            cur = t.viewer.current
+            self.page_edit.setText(labels[cur] if 0 <= cur < len(labels) and labels[cur] else str(cur + 1))
 
     def _zoom_box(self, *_):
         t = self.cur()
         if not t:
             return
         txt = self.zoom_box.currentText().strip()
-        if txt == "창 너비":
-            t.viewer.set_zoom_mode("fit_width")
-        elif txt == "창 높이":
-            t.viewer.set_zoom_mode("fit_height")
-        elif txt == "창 크기":
-            t.viewer.set_zoom_mode("fit_page")
-        elif txt == "실제 크기":
-            t.viewer.set_zoom_mode("actual")
-        else:
-            try:
-                t.viewer.zoom_mode = "fixed"; t.viewer.set_zoom(float(txt.rstrip("%")) / 100)
-            except ValueError:
-                pass
+        if txt in ZOOM_FITS:
+            t.viewer.set_zoom_mode(ZOOM_FITS[txt])
+            return
+        try:
+            z = float(txt.replace("%", "")) / 100
+        except ValueError:
+            self.zoom_box.setEditText(pct_text(t.viewer.zoom)); return   # 못 읽으면 지금 배율로 되돌린다
+        t.viewer.zoom_mode = "fixed"; t.viewer.set_zoom(max(ZOOM_MIN, min(ZOOM_MAX, z)))
+        self.zoom_box.setEditText(pct_text(t.viewer.zoom))
 
     def toggle_side(self, key: str):
         t = self.cur()
@@ -1084,20 +1094,27 @@ class MainWindow(QMainWindow):
             elif key == "zoom_width": v.set_zoom_mode("fit_width")
             elif key == "zoom_height": v.set_zoom_mode("fit_height")
             elif key == "zoom_page": v.set_zoom_mode("fit_page")
+            elif key == "zoom_area": self.on_tool("zoomarea")
+            elif key == "layout_cover": v.set_cover_separate(not v.cover_separate)
             elif key.startswith("layout_"): v.set_layout_mode(key[len("layout_"):])
             elif key.startswith("canvas_"):
-                col = {"gray": theme.CANVAS, "white": "#FFFFFF", "dark": "#2B2B2E", "sepia": "#F1E7D0"}[key[7:]]
-                v.setBackgroundBrush(QColor(col))
+                # 배경 모드(앱 설정에 기억, 이 창의 모든 탭). 옛 이름(회색·흰·어두운·세피아)도 받는다
+                mode = {"gray": "default", "white": "day", "dark": "night", "sepia": "parchment"}.get(key[7:], key[7:])
+                if mode in VIEW_BG:
+                    self.prefs["view_bg"] = mode; save_settings(self.settings)
+                    for x in self.tabs: x.viewer.sync_prefs(self.prefs)
             elif key.startswith("rotate_view_"):
-                # 보기 회전 = 모든 쪽 회전(저장되는 회전). 일반적인 PDF 편집기도 저장되는 쪽으로 동작한다.
+                # 보기 회전 = 모든 쪽 회전(저장되는 회전). 화면에서만 돌리는 것은 다음에 따로
                 P.rotate(d, range(d.page_count), 90 if key.endswith("cw") else -90); t.changed(None, structural=True)
-            elif key == "fullscreen":
-                if self.isFullScreen(): self.showNormal(); self.ribbon.show(); self.status.show()
-                else: self.showFullScreen(); self.ribbon.hide()
+            elif key == "fullscreen": fullscreen.get(self).toggle()
             elif key == "auto_bookmark": self.auto_bookmark(t)
-            elif key == "toggle_grid": self.say("격자는 아직 그리지 않습니다")
-            elif key == "toggle_ruler": self.say("눈금자는 아직 그리지 않습니다")
+            elif key in ("toggle_grid", "toggle_ruler"):
+                attr = "show_grid" if key == "toggle_grid" else "show_ruler"
+                on = not getattr(v, attr)
+                for x in self.tabs: (x.viewer.set_grid if key == "toggle_grid" else x.viewer.set_ruler)(on)
             elif key in ("tile_h", "tile_v"): self.tile(key == "tile_h")
+            elif key == "maximize": self.showNormal() if self.isMaximized() else self.showMaximized()
+            elif key == "batch_convert": self.batch_dialog()
             elif key == "first": v.goto(0)
             elif key == "last": v.goto(d.page_count - 1)
             elif key == "next": v.next_page()
@@ -1903,17 +1920,33 @@ class MainWindow(QMainWindow):
         self.say(f"북마크 {len(fixed)}개를 만들었습니다")
 
     def tile(self, horizontal: bool):
-        """두 문서를 나란히: 지금 문서를 새 창에 하나 더 연다."""
+        """바둑판식 배열: 모든 창의 문서를 창 하나씩, 가로는 위아래로·세로는 좌우로 나눠 놓는다(tile.py)."""
+        if fullscreen.get(self).active:
+            fullscreen.get(self).leave()
+        tiler.tile(self, horizontal)
+
+    def view_checked(self, key: str):
+        """보기 탭 펼침 메뉴의 체크(리본이 메뉴를 열 때 묻는다). 체크가 없는 항목은 None."""
         t = self.cur()
-        if not t or not t.doc.path:
-            self.say("저장된 문서만 나란히 볼 수 있습니다"); return
-        w = MainWindow(settings=self.settings); w.open_path(t.doc.path); w.show()
-        g = self.frameGeometry(); scr = self.screen().availableGeometry()
-        if horizontal:
-            self.setGeometry(scr.x(), scr.y(), scr.width() // 2, scr.height()); w.setGeometry(scr.x() + scr.width() // 2, scr.y(), scr.width() // 2, scr.height())
-        else:
-            self.setGeometry(scr.x(), scr.y(), scr.width(), scr.height() // 2); w.setGeometry(scr.x(), scr.y() + scr.height() // 2, scr.width(), scr.height() // 2)
-        self._tiled = w
+        if t is None:
+            return None
+        v = t.viewer
+        modes = {"zoom_actual": "actual", "zoom_width": "fit_width", "zoom_height": "fit_height", "zoom_page": "fit_page"}
+        if key in modes:
+            return v.zoom_mode == modes[key]
+        if key == "fullscreen":
+            return fullscreen.get(self).active
+        if key == "layout_cover":
+            return v.cover_separate
+        if key.startswith("layout_"):
+            return v.layout_mode == key[len("layout_"):]
+        if key.startswith("canvas_"):
+            return v.bg_mode == key[len("canvas_"):]
+        if key == "toggle_grid":
+            return v.show_grid
+        if key == "toggle_ruler":
+            return v.show_ruler
+        return None
 
     def annots_import_export(self, key: str):
         t = self.cur()
