@@ -53,6 +53,7 @@ from .statusbar import StatusBar
 from .update import UpdateUI
 from .viewer import PageView
 from . import fullscreen, tile as tiler  # noqa: E402
+from . import dlg_adv_search as ADV, search_float as SF  # noqa: E402  (검색 및 바꾸기 판 · 고급 검색)
 from .viewer import BG_MODES as VIEW_BG, ZOOM_FITS, ZOOM_MAX, ZOOM_MIN, pct_text  # noqa: E402
 
 from ..appinfo import APP_NAME, ICON, VERSION, copy_old_data, data_dir  # noqa: E402
@@ -222,6 +223,8 @@ class DocTab(QWidget):
         self.attachments.changed.connect(lambda: self.win.mark_modified())
         self.search.hitsChanged.connect(self.show_hits)
         self.search.replaced.connect(lambda pages: self.changed(pages))
+        self.search.pickAnnot.connect(self.pick_annot)
+        self.find_float = None   # 검색 및 바꾸기 떠 있는 판(Ctrl+T, 처음 열 때 만든다)
         self.layers.changed.connect(self.view_changed)
         self.fieldlist.gotoField.connect(lambda pg, r: self.viewer.goto(pg, r.y0))
         self.viewer.pageChanged.connect(self.thumbs.set_current)
@@ -264,6 +267,7 @@ class DocTab(QWidget):
             self.organize.thumbs.forget(pages)   # 숨어 있으면 안 그리고, 다음에 보일 때 그린다
         self.annots.reload(); self.fieldlist.reload(); self.bookmarks.reload(); self.attachments.reload(); self.layers.reload()
         self.search.doc_changed(pages, structural)   # 찾아 둔 결과 자리를 바뀐 문서에 맞춘다
+        if self.find_float is not None: self.find_float.doc_changed()
         self.win.mark_modified()
 
     def view_changed(self):
@@ -277,10 +281,11 @@ class DocTab(QWidget):
         self.viewer.clear_selection()
         self.changed(None, structural=True, mapping=list(order))
 
-    def show_hits(self, hits, current):
+    def show_hits(self, hits, current, jump: bool | None = None):
+        """쪽 위 검색 강조. jump 를 안 주면 검색 패널의 뜻(문서를 고쳐 다시 찾았으면 제자리)을 따른다."""
         self.viewer.search_hits = hits
         self.viewer.search_current = current
-        if 0 <= current < len(hits) and self.search.jump:
+        if 0 <= current < len(hits) and (self.search.jump if jump is None else jump):
             pg, rs = hits[current]
             r = rs[0] if isinstance(rs, list) else rs
             self.viewer.goto(pg, max(0, r.y0 - 100))
@@ -1309,6 +1314,9 @@ class MainWindow(QMainWindow):
             elif key == "create_files": self.create_from_files()
             elif key == "create_clipboard": self.create_from_clipboard()
             elif key == "create_scan": QMessageBox.information(self, "스캐너", "스캐너 연동은 넣지 않았습니다. 스캔 프로그램으로 이미지를 받은 뒤 「파일에서 생성」 으로 PDF 를 만드세요.")
+            # 검색·버전(문서 없어도)
+            elif key == "search_advanced": ADV.open_for(self)
+            elif key == "about": self.show_help()
             # 보기
             elif not t: return
             elif key == "zoomin": v.zoom_in()
@@ -1349,9 +1357,10 @@ class MainWindow(QMainWindow):
             elif key == "next_view": v.forward()
             elif key in ("thumbs", "bookmark", "comments", "attach", "layers"): self.toggle_side(key)
             elif key == "search_panel": self.show_search()
-            elif key == "search_replace": self.show_search(); t.search.focus_replace()
+            elif key == "search_replace": SF.open_for(t)
             elif key in ("search_next", "search_prev"):
-                if t.search.hits: t.search.step(1 if key == "search_next" else -1)
+                if t.find_float is not None and t.find_float.isVisible(): t.find_float.find(1 if key == "search_next" else -1)
+                elif t.search.hits: t.search.step(1 if key == "search_next" else -1)
                 else: self.show_search()
             elif key == "side_left":   # F4: 내용 칸만 열고 닫기(막대를 접어 두었으면 편다)
                 if self.bars.left_collapsed: self.bars.set_left(False)
