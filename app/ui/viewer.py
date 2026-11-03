@@ -1416,7 +1416,7 @@ class PageView(QGraphicsView):
                 if spec:
                     try:
                         pr = ST.default_rect(self.doc, i, self.to_page(i, sp), spec,
-                                             author=A.user_author(self.props["author"]))
+                                             author=A.user_author(self.props["author"]), view_rot=self.view_rot)
                     except ValueError as ex:
                         self.status.emit(str(ex))
                     else:
@@ -1899,8 +1899,8 @@ class PageView(QGraphicsView):
             author = A.user_author(P["author"])
             try:
                 if not click:   # 끌어서 찍은 크기를 다음에 한 번 눌러 찍을 크기로
-                    ST.remember_drag(d, i, pr, spec, author=author)
-                ST.add(d, i, pr, spec, author=author)
+                    ST.remember_drag(d, i, pr, spec, author=author, view_rot=self.view_rot)
+                ST.add(d, i, pr, spec, author=author, view_rot=self.view_rot)
             except ValueError as ex:
                 self.status.emit(str(ex)); return
         elif t == "link":
