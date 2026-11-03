@@ -1534,6 +1534,29 @@ class MainWindow(QMainWindow):
         elif kind == "bookmark_text":
             if not (t.side.isVisible() and t.side_key == "bookmark"): self.toggle_side("bookmark")
             t.bookmarks.add(data["text"], data["page"])
+        elif kind == "reply":   # 오른쪽 클릭 메뉴의 답글
+            text, ok = QInputDialog.getMultiLineText(self, "답글", "답글 내용", "")
+            if ok and text.strip():
+                A.add_reply(d, data.page, data.xref, text, v.props["author"]); t.changed([data.page])
+        elif kind == "open_link":
+            info = A.link_info(d, data.page, data.xref)
+            if info is None:
+                return
+            if info["kind"] == "goto": v.goto_link(info)
+            elif info["kind"] == "uri": self.on_request(t, "open_uri", info["uri"])
+            elif info["kind"] == "file": self.on_request(t, "open_file", A.resolve_link_file(info["file"], d.path))
+        elif kind == "copy_link":
+            info = A.link_info(d, data.page, data.xref)
+            if info and info["kind"] in ("uri", "file"):
+                QApplication.clipboard().setText(info["uri"] or info["file"]); self.say("주소를 복사했습니다")
+        elif kind == "set_default":   # 고른 주석의 모양을 그 종류의 기본값으로(속성 패널의 「기본값으로」)
+            if t.props.sel is not None: t.props._use_as_default(); self.say("기본값으로 지정했습니다")
+        elif kind in ("rotate_obj", "flip_obj"):
+            if v.sel and v.sel.kind == "image":
+                v.place_content(v.sel.rect, **({"rotate": data} if kind == "rotate_obj" else {"flip_h" if data == "h" else "flip_v": True}))
+        elif kind == "link_text": self.on_request(t, "link", data)
+        elif kind == "note_text": self.on_request(t, "note", data)
+        elif kind == "tool": self.on_tool(data)
         elif kind == "rotate": P.rotate(d, data["pages"], data["deg"]); t.changed(list(data["pages"]), structural=True)
         elif kind == "delete_pages": self.pages_action("delete", data["pages"])
 

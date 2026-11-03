@@ -23,6 +23,7 @@ from ..engine import annot_shapes as SH
 from ..engine import annots as A
 from ..engine import stamps as ST
 from ..engine.document import Document
+from . import context_menu as CM
 from . import theme
 
 GAP = 12  # 쪽 사이 간격(px)
@@ -1481,6 +1482,11 @@ class PageView(QGraphicsView):
             self._finish_poly(); return
         if k == Qt.Key.Key_Delete and self.sel:
             self.delete_selection(); return
+        if k in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            if CM.focus_step(self, k == Qt.Key.Key_Tab and not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier)):
+                return
+            super().keyPressEvent(e)
+            return
         if k == Qt.Key.Key_Space and not e.isAutoRepeat() and self.tool != "hand" and not self._space_tool:
             # 누르는 동안만 손 도구. 떼면 하던 도구로
             self._space_tool = self.tool
@@ -1518,6 +1524,10 @@ class PageView(QGraphicsView):
                 self._select_words(i, r, click=False, scene_pt=None)
             return
         super().keyPressEvent(e)
+
+    def focusNextPrevChild(self, nxt: bool) -> bool:
+        """Tab · Shift+Tab 은 Qt 가 초점 이동으로 먼저 가져가므로 여기서 문서 안 대상 고르기부터 한다."""
+        return CM.focus_step(self, nxt) or super().focusNextPrevChild(nxt)
 
     def keyReleaseEvent(self, e: QKeyEvent):
         if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat() and self._space_tool:
@@ -1957,53 +1967,7 @@ class PageView(QGraphicsView):
 
     # ── 오른쪽 클릭 ───────────────────────────────────────────
     def _context_menu(self, e: QMouseEvent, i: int, sp: QPointF):
-        m = QMenu(self)
-        act = lambda key: self.requestDialog.emit("action", key)  # noqa: E731  창의 동작(on_action)을 부탁
-        if self.sel and self.sel.kind == "words":
-            s = self.sel
-            m.addAction("복사", self.copy_selection)
-            m.addSeparator()
-            m.addAction("강조", lambda: self._markup_sel("Highlight"))
-            m.addAction("밑줄", lambda: self._markup_sel("Underline"))
-            m.addAction("취소선", lambda: self._markup_sel("StrikeOut"))
-            m.addAction("구불구불한 선", lambda: self._markup_sel("Squiggly"))
-            m.addSeparator()
-            m.addAction("북마크 추가", lambda: self.requestDialog.emit("bookmark_text", {"page": s.page, "text": s.text}))
-            m.addAction("이 글자 검색", lambda: self.requestDialog.emit("search_text", " ".join(s.text.split())[:200]))
-            m.addSeparator()
-            m.addAction("교정 표시", lambda: self._redact_sel())
-        elif self.sel and self.sel.kind in ("annot", "widget"):
-            m.addAction("속성", lambda: self.requestDialog.emit("annot_props" if self.sel.kind == "annot" else "field_props", self.sel))
-            m.addAction("삭제", self.delete_selection)
-        elif self.sel and self.sel.kind == "block":
-            m.addAction("글자 고치기", lambda: self.requestDialog.emit("edit_block", self.sel))
-            m.addAction("삭제", self.delete_selection)
-        elif self.sel and self.sel.kind == "image":
-            m.addAction("이미지 바꾸기", lambda: self.requestDialog.emit("replace_image", self.sel))
-            m.addAction("이미지 저장", lambda: self.requestDialog.emit("save_image", self.sel))
-            m.addAction("삭제", self.delete_selection)
-        else:
-            m.addAction("모두 선택", lambda: self.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)))
-            if i >= 0:
-                m.addAction("이 쪽에 메모", lambda: self.requestDialog.emit("note", {"page": i, "point": self.to_page(i, sp)}))
-                m.addAction("북마크 추가", lambda: self.requestDialog.emit("bookmark_text", {"page": i, "text": ""}))
-            m.addSeparator()
-            m.addAction("확대", lambda: act("zoomin")); m.addAction("축소", lambda: act("zoomout"))
-            m.addSeparator()
-            m.addAction("첫 페이지", lambda: act("first")).setEnabled(self.current > 0)
-            m.addAction("마지막 페이지", lambda: act("last")).setEnabled(self.current < self.doc.page_count - 1)
-            m.addAction("이전 보기", self.back).setEnabled(bool(self._back))
-            m.addAction("다음 보기", self.forward).setEnabled(bool(self._fwd))
-            if i >= 0:
-                m.addSeparator()
-                m.addAction("왼쪽 회전", lambda: self.requestDialog.emit("rotate", {"pages": [i], "deg": -90}))
-                m.addAction("오른쪽 회전", lambda: self.requestDialog.emit("rotate", {"pages": [i], "deg": 90}))
-                m.addAction("이 쪽 삭제", lambda: self.requestDialog.emit("delete_pages", {"pages": [i]}))
-            m.addSeparator()
-            m.addAction("인쇄", lambda: act("print")); m.addAction("문서 속성", lambda: act("properties"))
-            if self.window().isFullScreen():
-                m.addAction("전체 화면 끝내기", lambda: act("fullscreen"))
-        m.exec(e.globalPosition().toPoint())
+        CM.build(self, i, sp).exec(e.globalPosition().toPoint())
 
     def _markup_sel(self, kind: str):
         if self.sel and self.sel.kind == "words":
