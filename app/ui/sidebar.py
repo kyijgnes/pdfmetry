@@ -1,12 +1,13 @@
 """왼쪽 패널: 썸네일 · 북마크 · 주석 목록 · 첨부 파일 · 검색 · 레이어 · (양식 칸 · 서명)."""
 from __future__ import annotations
 
+import os
 import queue
 import time
 
 import fitz
 from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QRectF, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemDelegate, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
                                QStyle, QStyledItemDelegate, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -291,6 +292,53 @@ class PageGrid(QListWidget):
         if order != list(range(len(order))):
             self.reordered.emit(order)
 
+    # 다른 문서 썸네일에서 끌어온 쪽(복사)·탐색기 PDF(그 자리에 끼움). accept_foreign 을 켠 칸만 받는다
+    pagesDropped = Signal(object, list, int)   # 끌어온 칸(PageGrid), 그 칸에서 고른 쪽, 끼울 자리
+    filesDropped = Signal(list, int)           # PDF 경로, 끼울 자리
+    accept_foreign = False
+
+    def _foreign(self, e) -> str | None:
+        if not self.accept_foreign:
+            return None
+        src = e.source()
+        if isinstance(src, PageGrid) and src is not self:
+            return "pages"
+        md = e.mimeData()
+        if src is None and md.hasUrls() and any(u.toLocalFile().lower().endswith(".pdf") for u in md.urls()):
+            return "files"
+        return None
+
+    def drop_index(self, pos) -> int:
+        """놓은 자리 → 끼울 쪽 번호(칸 오른쪽 절반이면 그 뒤)."""
+        idx = self.indexAt(pos)
+        if not idx.isValid():
+            return self.count()
+        return idx.row() + (1 if pos.x() > self.visualRect(idx).center().x() else 0)
+
+    def dragEnterEvent(self, e):
+        if self._foreign(e):
+            e.setDropAction(Qt.DropAction.CopyAction); e.accept(); return
+        super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if self._foreign(e):
+            e.setDropAction(Qt.DropAction.CopyAction); e.accept(); return
+        super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        kind = self._foreign(e)
+        if not kind:
+            return super().dropEvent(e)
+        at = self.drop_index(e.position().toPoint())
+        e.setDropAction(Qt.DropAction.CopyAction); e.accept()
+        if kind == "pages":
+            src = e.source()
+            pages = sorted(it.data(Qt.ItemDataRole.UserRole) for it in src.selectedItems())
+            QTimer.singleShot(0, lambda: self.pagesDropped.emit(src, pages, at))   # 끌기가 끝난 뒤에 문서를 고친다
+        else:
+            paths = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile().lower().endswith(".pdf")]
+            QTimer.singleShot(0, lambda: self.filesDropped.emit(paths, at))
+
 
 def kept_thumbs(lazy: "LazyThumbs", mapping: list[int | None] | None, dirty=()) -> dict[int, QPixmap]:
     """mapping[새 쪽] = 옛 쪽 으로 옮겨 쓸 썸네일. dirty 에 든 새 쪽은 빼고(다시 그림)."""
@@ -319,13 +367,51 @@ def fill_grid(grid: PageGrid, doc: Document, thumb_w: int, pad_w: int, pad_h: in
     grid.setUpdatesEnabled(True)
 
 
-class ThumbnailPanel(QWidget):
-    """썸네일: 눌러 이동, 끌어 순서 바꾸기, 오른쪽 클릭 메뉴."""
+page_clip: dict = {"data": None, "n": 0}   # 쪽 클립보드(앱 안 여러 탭·창이 같이 씀): 고른 쪽만 담은 PDF 바이트
+
+
+class _Prefs:
+    """창 설정을 읽고 쓰는 자리. DocTab 이 창 설정으로 바꿔 끼운다(탭이 다른 창으로 옮겨 가도 그때 창 것)."""
+    get_prefs = staticmethod(lambda: {})
+    save_prefs = staticmethod(lambda: None)
+
+    def pref(self, key: str, default=None):
+        return self.get_prefs().get(key, default)
+
+    def set_pref(self, key: str, value):
+        self.get_prefs()[key] = value
+        self.save_prefs()
+
+
+def _key_filter(e, keys) -> bool | None:
+    """창 단축키보다 먼저 이 칸이 받을 키(keys: (Key, 조합) → 할 일). 처리했으면 True."""
+    if e.type() not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+        return None
+    fn = keys.get((e.key(), e.modifiers() & ~Qt.KeyboardModifier.KeypadModifier))
+    if fn is None:
+        return None
+    e.accept()
+    if e.type() == QEvent.Type.KeyPress:
+        fn()
+    return True
+
+
+class ThumbnailPanel(_Prefs, QWidget):
+    """썸네일: 눌러 이동, 끌어 순서 바꾸기(다른 문서로 끌면 복사, 탐색기 PDF 는 끼움), 오른쪽 클릭 메뉴, 쪽 복사·붙여넣기."""
     pageClicked = Signal(int)
     reordered = Signal(list)       # 새 순서
-    pagesAction = Signal(str, list)  # 'rotate_left' 'rotate_right' 'delete' 'extract' 'insert_blank' 'insert_pdf' 'duplicate'
+    pagesAction = Signal(str, list)  # pages_action 열쇠(회전·삭제·복사·붙여넣기 등), 고른 쪽
+    pagesDropped = Signal(object, list, int)   # 끌어온 문서, 쪽, 끼울 자리
+    filesDropped = Signal(list, int)           # 탐색기 PDF, 끼울 자리
 
     STEPS = (60, 90, 120, 150, 180)   # 썸네일 폭(px) 다섯 단계, 처음은 120
+    MENU = (("복사", "copy"), ("붙여넣기", "paste"), ("삭제", "delete"), (None, None),
+            ("페이지 삽입", (("빈 페이지", "insert_blank"), ("PDF에서", "insert_pdf"))), ("페이지 복제", "duplicate"),
+            ("페이지 바꾸기", "replace"), ("페이지 내보내기", "extract"),
+            ("페이지 회전", (("왼쪽으로 회전", "rotate_left"), ("오른쪽으로 회전", "rotate_right"))),
+            ("OCR 페이지", "ocr"), ("페이지 크기", "resize"), ("페이지 박스", "pagebox"), ("페이지 레이블", "pagelabel"),
+            ("페이지 인쇄", "print"), ("페이지를 이미지로 추출", "export_images"), (None, None),
+            ("페이지 썸네일 확대", "zoom_in"), ("페이지 썸네일 축소", "zoom_out"))
 
     def __init__(self, doc: Document, thumb_w: int = 120, parent=None):
         super().__init__(parent)
@@ -334,17 +420,29 @@ class ThumbnailPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        head = panel_head("썸네일", (("zoomout", "작게", lambda: self.zoom(-1)), ("zoomin", "크게", lambda: self.zoom(1))))
-        self.zoom_out, self.zoom_in = head.findChildren(QToolButton)
+        head = panel_head("썸네일", (("more", "더 보기", self._more), ("zoomin", "확대", lambda: self.zoom(1)),
+                                    ("zoomout", "축소", lambda: self.zoom(-1)),
+                                    ("rotateleft", "왼쪽으로 회전", lambda: self._act("rotate_left")),
+                                    ("rotateright", "오른쪽으로 회전", lambda: self._act("rotate_right")),
+                                    ("delete", "삭제", lambda: self._act("delete"))))
+        self.more_btn, self.zoom_in, self.zoom_out, *_ = head.findChildren(QToolButton)
         lay.addWidget(head)
         self.list = PageGrid(3)
+        self.list.owner_doc = doc
+        self.list.accept_foreign = True
         self.list.itemClicked.connect(lambda it: self.pageClicked.emit(it.data(Qt.ItemDataRole.UserRole)))
         self.list.reordered.connect(self.reordered)
+        self.list.pagesDropped.connect(lambda src, pages, at: self.pagesDropped.emit(getattr(src, "owner_doc", None), pages, at))
+        self.list.filesDropped.connect(self.filesDropped)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.list.customContextMenuRequested.connect(self._menu)
+        self.list.customContextMenuRequested.connect(lambda pos: self._menu(self.list.mapToGlobal(pos)))
         lay.addWidget(self.list)
         self.thumbs = LazyThumbs(self.list, doc)
         self.list.viewport().installEventFilter(self)
+        self.list.installEventFilter(self)
+        C, N = Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.NoModifier
+        self._keys = {(Qt.Key.Key_C, C): lambda: self._act("copy"), (Qt.Key.Key_V, C): lambda: self._act("paste"),
+                      (Qt.Key.Key_A, C): self.list.selectAll, (Qt.Key.Key_Delete, N): lambda: self._act("delete")}
         self.reload()
 
     def set_width(self, w: int):
@@ -354,10 +452,22 @@ class ThumbnailPanel(QWidget):
     def zoom(self, step: int):
         """다음·앞 단계로. 양 끝에 닿으면 그쪽 단추가 꺼진다."""
         k = min(range(len(self.STEPS)), key=lambda i: abs(self.STEPS[i] - self.thumb_w))
-        self.set_width(self.STEPS[max(0, min(len(self.STEPS) - 1, k + step))])
+        w = self.STEPS[max(0, min(len(self.STEPS) - 1, k + step))]
+        if w != self.thumb_w:
+            self.set_width(w)
 
     def selected_pages(self) -> list[int]:
         return sorted(it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems())
+
+    def _pages(self) -> list[int]:
+        return self.selected_pages() or ([self.list.currentRow()] if self.list.currentRow() >= 0 else [])
+
+    def _act(self, key: str):
+        if key in ("zoom_in", "zoom_out"):
+            return self.zoom(1 if key == "zoom_in" else -1)
+        pages = self._pages()
+        if pages or key == "paste":
+            self.pagesAction.emit(key, pages)
 
     def reload(self, mapping: list[int | None] | None = None, dirty=()):
         keep = kept_thumbs(self.thumbs, mapping, dirty)
@@ -377,8 +487,18 @@ class ThumbnailPanel(QWidget):
                 it.setSizeHint(QSize(w, it.sizeHint().height()))
 
     def eventFilter(self, obj, e):
-        if obj is self.list.viewport() and e.type() == QEvent.Type.Resize:
-            QTimer.singleShot(0, self._fit_items)
+        if obj is self.list.viewport():
+            if e.type() == QEvent.Type.Resize:
+                QTimer.singleShot(0, self._fit_items)
+            elif e.type() == QEvent.Type.Wheel and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                dy = e.angleDelta().y()
+                if dy:
+                    self.zoom(1 if dy > 0 else -1)
+                return True
+        elif obj is self.list:
+            done = _key_filter(e, self._keys)
+            if done is not None:
+                return done
         return super().eventFilter(obj, e)
 
     def refresh_pages(self, pages: list[int] | None):
@@ -391,133 +511,352 @@ class ThumbnailPanel(QWidget):
             self.list.scrollToItem(self.list.item(i))
             self.list.blockSignals(False)
 
-    def _menu(self, pos):
-        pages = self.selected_pages() or ([self.list.currentRow()] if self.list.currentRow() >= 0 else [])
-        if not pages:
-            return
+    def _more(self):
+        b = self.more_btn
+        self._menu(b.mapToGlobal(b.rect().bottomLeft()))
+
+    def build_menu(self) -> QMenu:
+        pages = self._pages()
         m = QMenu(self)
-        for label, key in (("왼쪽 회전", "rotate_left"), ("오른쪽 회전", "rotate_right"), (None, None),
-                           ("빈 페이지 끼우기", "insert_blank"), ("PDF 에서 끼우기", "insert_pdf"), ("복제", "duplicate"),
-                           (None, None), ("내보내기", "extract"), ("삭제", "delete")):
-            if label is None:
-                m.addSeparator()
-            else:
-                m.addAction(label, lambda k=key: self.pagesAction.emit(k, pages))
-        m.exec(self.list.mapToGlobal(pos))
+
+        def fill(menu, items):
+            for label, key in items:
+                if label is None:
+                    menu.addSeparator()
+                elif isinstance(key, tuple):
+                    fill(menu.addMenu(label), key)
+                else:
+                    a = menu.addAction(label, lambda k=key: self._act(k))
+                    a.setObjectName(key)
+                    if key == "paste":
+                        a.setEnabled(bool(page_clip["data"]))
+                    elif key == "zoom_in":
+                        a.setEnabled(self.thumb_w < self.STEPS[-1])
+                    elif key == "zoom_out":
+                        a.setEnabled(self.thumb_w > self.STEPS[0])
+                    elif not pages:
+                        a.setEnabled(False)
+        fill(m, self.MENU)
+        return m
+
+    def _menu(self, gpos):
+        self.build_menu().exec(gpos)
 
     def close(self):
         self.thumbs.stop()
 
 
-class BookmarkPanel(QWidget):
+class BookmarkPanel(_Prefs, QWidget):
+    """북마크: 위 단추(더 보기·추가·이름 바꾸기·삭제·글자 키우기·줄이기), 굵게·기울임·색, 여러 개 끌어 옮기기,
+    비었으면 「북마크 없음」 과 [자동 북마크]. 설정 열쇠 bm_font_pt(글자 크기 pt) · bm_style(새 북마크 기본 모양)."""
     gotoPage = Signal(int, object)  # 쪽, 쪽 안 높이(pt) 또는 None
     changed = Signal()
+    autoRequested = Signal()       # 빈 목록의 [자동 북마크]
+    printRequested = Signal(int)   # 「페이지 인쇄」: 그 북마크 쪽
+    tocMade = Signal(int)          # 목차 쪽을 맨 앞에 끼움(끼운 쪽 수)
     DEST = Qt.ItemDataRole.UserRole + 1  # 쪽 안 자리(get_toc 넷째 칸)
+    STYLE = Qt.ItemDataRole.UserRole + 2  # {bold, italic, color "#RRGGBB"}
+    STEPS = (8.0, 9.0, 10.5, 12.0, 14.0, 16.0)   # 글자 크기 pt
+    NEW_NAME = "새 북마크"
 
     def __init__(self, doc: Document, get_current_page, parent=None):
         super().__init__(parent)
         self.doc = doc
         self.get_current_page = get_current_page
+        self.font_pt = 9.0
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(panel_head("북마크", (("add", "북마크 추가", self.add),)))
+        head = panel_head("북마크", (("more", "더 보기", self._more), ("add", "북마크 추가", self.add),
+                                    ("edit", "이름 바꾸기", self.rename_current), ("delete", "삭제", self.delete_selected),
+                                    ("zoomin", "글자 키우기", lambda: self.set_font(self._step(1))),
+                                    ("zoomout", "글자 줄이기", lambda: self.set_font(self._step(-1)))))
+        self.more_btn, self.add_btn, self.rename_btn, self.delete_btn, self.font_up, self.font_down = head.findChildren(QToolButton)
+        lay.addWidget(head)
         self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); _tidy_tree(self.tree, 0)
         self.tree.itemClicked.connect(self._clicked)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._menu)
+        self.tree.customContextMenuRequested.connect(lambda pos: self._menu(self.tree.mapToGlobal(pos), self.tree.itemAt(pos)))
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.tree.model().rowsMoved.connect(lambda *_: self._save())
-        self.tree.itemChanged.connect(lambda *_: self._save())
+        self._loading = False
+        self._pending = False
+        mdl = self.tree.model()
+        for sig in (mdl.rowsMoved, mdl.rowsInserted, mdl.rowsRemoved):   # 여러 개를 끌어 옮겨도 저장(되돌리기)은 한 번
+            sig.connect(self._queue_save)
+        self.tree.itemChanged.connect(self._queue_save)
+        self.tree.itemSelectionChanged.connect(self._sync_buttons)
+        self.tree.installEventFilter(self)
+        self.tree.viewport().installEventFilter(self)
+        self._keys = {(Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier): self.delete_selected}
         lay.addWidget(self.tree)
+        self.empty = QWidget(); el = QVBoxLayout(self.empty); el.setContentsMargins(10, 24, 10, 10); el.setSpacing(8)
+        msg = QLabel("북마크 없음"); msg.setObjectName("dim"); msg.setAlignment(Qt.AlignmentFlag.AlignCenter); el.addWidget(msg)
+        self.auto_btn = QPushButton("자동 북마크"); self.auto_btn.clicked.connect(self.autoRequested)
+        el.addWidget(self.auto_btn, 0, Qt.AlignmentFlag.AlignHCenter); el.addStretch(1)
+        lay.addWidget(self.empty)
         self.reload()
+
+    # ── 설정 ──
+    def apply_prefs(self):
+        """창 설정을 받은 뒤 한 번: 글자 크기."""
+        self.set_font(self.pref("bm_font_pt", 9.0), remember=False)
+
+    def default_style(self) -> dict:
+        from ..engine import outline as OL
+        return OL.norm_style(self.pref("bm_style"))
+
+    def _step(self, d: int) -> float:
+        k = min(range(len(self.STEPS)), key=lambda i: abs(self.STEPS[i] - self.font_pt))
+        return self.STEPS[max(0, min(len(self.STEPS) - 1, k + d))]
+
+    def set_font(self, pt, remember: bool = True):
+        try:
+            pt = float(pt)
+        except (TypeError, ValueError):
+            pt = 9.0
+        pt = min(self.STEPS, key=lambda s: abs(s - pt))
+        self.font_pt = pt
+        f = self.tree.font(); f.setPointSizeF(pt); self.tree.setFont(f)
+        self._walk(self._paint)
+        self.font_up.setEnabled(pt < self.STEPS[-1]); self.font_down.setEnabled(pt > self.STEPS[0])
+        if remember:
+            self.set_pref("bm_font_pt", pt)
+
+    # ── 그리기 ──
+    def _walk(self, fn, parent=None):
+        parent = parent or self.tree.invisibleRootItem()
+        for k in range(parent.childCount()):
+            it = parent.child(k)
+            fn(it)
+            self._walk(fn, it)
+
+    def _paint(self, it: QTreeWidgetItem):
+        """모양(굵게·기울임·색)을 항목에 그대로. 검정은 글자색을 두어 어두운 화면에서도 보이게."""
+        st = it.data(0, self.STYLE) or {}
+        was = self.tree.signalsBlocked(); self.tree.blockSignals(True)
+        f = QFont(self.tree.font()); f.setBold(bool(st.get("bold"))); f.setItalic(bool(st.get("italic")))
+        it.setFont(0, f)
+        c = st.get("color") or "#000000"
+        it.setForeground(0, QColor(c) if c.upper() != "#000000" else self.tree.palette().text())
+        self.tree.blockSignals(was)
+
+    def _item(self, title: str, page: int, dest=None, style: dict | None = None) -> QTreeWidgetItem:
+        from ..engine import outline as OL
+        it = QTreeWidgetItem([title])
+        it.setData(0, Qt.ItemDataRole.UserRole, page)
+        it.setData(0, self.DEST, {k: v for k, v in dest.items() if k not in ("bold", "italic", "color")} if dest else None)
+        it.setData(0, self.STYLE, OL.norm_style(style if style is not None else OL.style_of(dest)))
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+        self._paint(it)
+        return it
 
     def reload(self):
         # 문서가 바뀔 때마다 불린다. 여기서 신호를 다시 이으면 이름 하나 바꿀 때 저장이 그 횟수만큼 돈다.
+        self._loading = True
         self.tree.blockSignals(True)
         self.tree.clear()
 
         def add(parent, nodes: list[Bookmark]):
             for b in nodes:
-                it = QTreeWidgetItem([b.title])
-                it.setData(0, Qt.ItemDataRole.UserRole, b.page)
-                it.setData(0, self.DEST, b.dest)
-                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+                it = self._item(b.title, b.page, b.dest)
                 (parent.addChild if isinstance(parent, QTreeWidgetItem) else self.tree.addTopLevelItem)(it)
                 add(it, b.children)
         add(self.tree, self.doc.bookmarks())
         self.tree.expandAll()
         self.tree.blockSignals(False)
+        self._loading = False
+        self._show_empty()
+        self._sync_buttons()
+
+    def _show_empty(self):
+        none = self.tree.topLevelItemCount() == 0
+        self.tree.setVisible(not none); self.empty.setVisible(none)
+
+    def _sync_buttons(self):
+        sel = bool(self.tree.selectedItems())
+        self.rename_btn.setEnabled(sel or self.tree.currentItem() is not None)
+        self.delete_btn.setEnabled(sel)
 
     def _clicked(self, it, _):
         pg = it.data(0, Qt.ItemDataRole.UserRole)
         if pg is not None and pg >= 0:
             self.gotoPage.emit(pg, self.doc.bookmark_y(Bookmark(1, "", pg, dest=it.data(0, self.DEST))))
 
+    # ── 저장 ──
     def _collect(self) -> list[Bookmark]:
+        from ..engine import outline as OL
+
         def walk(parent) -> list[Bookmark]:
             out = []
             n = parent.childCount() if isinstance(parent, QTreeWidgetItem) else parent.topLevelItemCount()
             for k in range(n):
                 it = parent.child(k) if isinstance(parent, QTreeWidgetItem) else parent.topLevelItem(k)
-                b = Bookmark(1, it.text(0), it.data(0, Qt.ItemDataRole.UserRole) or 0, dest=it.data(0, self.DEST))
+                pg = it.data(0, Qt.ItemDataRole.UserRole)
+                b = Bookmark(1, it.text(0), 0 if pg is None else pg,
+                             dest=OL.with_style(it.data(0, self.DEST), it.data(0, self.STYLE) or {}))
                 b.children = walk(it)
                 out.append(b)
             return out
         return walk(self.tree)
 
+    def _queue_save(self, *_):
+        if self._loading or self._pending:
+            return
+        self._pending = True
+        QTimer.singleShot(0, self._flush)
+
+    def _flush(self):
+        if self._pending:
+            self._save()
+
     def _save(self):
+        self._pending = False
         self.doc.set_bookmarks(self._collect())
+        self._show_empty()
         self.changed.emit()
 
+    # ── 일 ──
     def rename_current(self):
-        it = self.tree.currentItem()
+        it = self.tree.currentItem() or next(iter(self.tree.selectedItems()), None)
         if it:
             self.tree.editItem(it, 0)
 
+    def _insert(self, it: QTreeWidgetItem, parent: QTreeWidgetItem | None = None):
+        if parent is not None:
+            parent.addChild(it); parent.setExpanded(True)
+        else:
+            cur = self.tree.currentItem()
+            if cur and cur.parent():
+                cur.parent().insertChild(cur.parent().indexOfChild(cur) + 1, it)
+            elif cur:
+                self.tree.insertTopLevelItem(self.tree.indexOfTopLevelItem(cur) + 1, it)
+            else:
+                self.tree.addTopLevelItem(it)
+        self._show_empty()
+        self.tree.clearSelection()
+        self.tree.setCurrentItem(it)
+        self._save()
+        self.tree.editItem(it, 0)   # 창을 띄우지 않고 이름 칸을 바로 연다
+
     def add(self, title: str = "", page: int | None = None):
-        """지금 쪽(또는 page)에 북마크. title 을 주면(고른 글자) 그것을 이름 칸에 미리 넣는다."""
+        """지금 쪽(또는 page)에 「새 북마크」(고른 글자가 있으면 그 글자)를 바로 만들고 이름 칸을 연다."""
         pg = self.get_current_page() if page is None else page
         title = title if isinstance(title, str) else ""   # 단추·메뉴 신호는 checked(bool) 를 넘긴다
-        title, ok = QInputDialog.getText(self, "북마크 추가", "이름", text=(title.strip()[:255] or f"{pg + 1}쪽"))
-        if not ok or not title.strip():
-            return
-        it = QTreeWidgetItem([title.strip()])
-        it.setData(0, Qt.ItemDataRole.UserRole, pg)
-        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
-        cur = self.tree.currentItem()
-        if cur and cur.parent():
-            cur.parent().insertChild(cur.parent().indexOfChild(cur) + 1, it)
-        elif cur:
-            self.tree.insertTopLevelItem(self.tree.indexOfTopLevelItem(cur) + 1, it)
-        else:
-            self.tree.addTopLevelItem(it)
-        self.tree.setCurrentItem(it)   # 바로 F2 로 이름을 고칠 수 있게
-        self._save()
-
-    def _menu(self, pos):
-        it = self.tree.itemAt(pos)
-        m = QMenu(self)
-        m.addAction("북마크 추가", self.add)
-        if it:
-            m.addAction("이름 바꾸기", lambda: self.tree.editItem(it, 0))
-            m.addAction("지금 쪽으로 자리 바꾸기", lambda: self._repoint(it))
-            m.addAction("아래 북마크 추가(하위)", lambda: self._add_child(it))
-            m.addSeparator()
-            m.addAction("삭제", lambda: (((it.parent() or self.tree.invisibleRootItem()).removeChild(it)), self._save()))
-        m.exec(self.tree.mapToGlobal(pos))
-
-    def _repoint(self, it: QTreeWidgetItem):
-        self.tree.blockSignals(True)
-        it.setData(0, self.DEST, None)  # 옛 쪽 안 자리는 버리고 새 쪽 맨 위로
-        self.tree.blockSignals(False)
-        it.setData(0, Qt.ItemDataRole.UserRole, self.get_current_page())  # itemChanged 가 저장
+        self._insert(self._item(" ".join(title.split())[:255] or self.NEW_NAME, pg, style=self.default_style()))
 
     def _add_child(self, parent: QTreeWidgetItem):
-        pg = self.get_current_page()
-        title, ok = QInputDialog.getText(self, "하위 북마크", "이름", text=f"{pg + 1}쪽")
-        if ok and title.strip():
-            it = QTreeWidgetItem([title.strip()]); it.setData(0, Qt.ItemDataRole.UserRole, pg)
-            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
-            parent.addChild(it); parent.setExpanded(True); self._save()
+        self._insert(self._item(self.NEW_NAME, self.get_current_page(), style=self.default_style()), parent)
+
+    def _top_selected(self) -> list[QTreeWidgetItem]:
+        """고른 것 가운데 위 항목이 같이 골린 것은 뺀다(위를 지우면 아래도 지워진다)."""
+        sel = set(map(id, self.tree.selectedItems()))
+        out = []
+        for it in self.tree.selectedItems():
+            p = it.parent()
+            while p is not None and id(p) not in sel:
+                p = p.parent()
+            if p is None:
+                out.append(it)
+        return out
+
+    def delete_selected(self):
+        items = self._top_selected() or ([self.tree.currentItem()] if self.tree.currentItem() else [])
+        if not items:
+            return
+        self._loading = True
+        for it in items:
+            (it.parent() or self.tree.invisibleRootItem()).removeChild(it)
+        self._loading = False
+        self._save()
+
+    def _repoint(self, it: QTreeWidgetItem):
+        if QMessageBox.question(self, "북마크 대상", "북마크 대상을 현재 페이지로 설정하시겠습니까?") != QMessageBox.StandardButton.Yes:
+            return
+        self.tree.blockSignals(True)
+        it.setData(0, self.DEST, None)  # 옛 쪽 안 자리는 버리고 새 쪽 맨 위로
+        it.setData(0, Qt.ItemDataRole.UserRole, self.get_current_page())
+        self.tree.blockSignals(False)
+        self._save()
+
+    def set_style(self, items: list[QTreeWidgetItem], st: dict):
+        from ..engine import outline as OL
+        st = OL.norm_style(st)
+        for it in items:
+            self.tree.blockSignals(True); it.setData(0, self.STYLE, dict(st)); self.tree.blockSignals(False)
+            self._paint(it)
+        self._save()
+
+    def open_props(self, items: list[QTreeWidgetItem] | None = None):
+        from .dlg_bookmark import BookmarkPropsDialog
+        items = items or self.tree.selectedItems()
+        if not items:
+            return
+        dlg = BookmarkPropsDialog(self, items[0].data(0, self.STYLE), lambda st: self.set_pref("bm_style", st))
+        if dlg.exec():
+            self.set_style(items, dlg.values())
+
+    def make_toc(self):
+        from ..engine import outline as OL
+        from .dlg_bookmark import TocDialog
+        entries = self.doc.flat_toc()
+        if not entries:
+            return
+        dlg = TocDialog(self)
+        if not dlg.exec():
+            return
+        try:
+            n = OL.make_toc_pages(self.doc, entries, dlg.values())
+        except ValueError as e:
+            QMessageBox.warning(self, "목차 페이지", str(e)); return
+        self.tocMade.emit(n)
+
+    def _has_children(self) -> bool:
+        found = []
+        self._walk(lambda it: found.append(it) if it.childCount() else None)
+        return bool(found)
+
+    def build_menu(self, it: QTreeWidgetItem | None = None) -> QMenu:
+        sel = self.tree.selectedItems()
+        one = sel[0] if len(sel) == 1 else (it if it is not None and not sel else None)
+        m = QMenu(self)
+
+        def act(label, fn, on=True, name=""):
+            a = m.addAction(label, fn); a.setEnabled(bool(on)); a.setObjectName(name)
+            return a
+        act("북마크 삭제", self.delete_selected, sel or it, "delete")
+        act("북마크 이름 바꾸기", lambda: self.tree.editItem(one or sel[0], 0), one or sel, "rename")
+        act("북마크 추가", self.add, True, "add")
+        act("하위 북마크 추가", lambda: self._add_child(one), one, "add_child")
+        act("대상 설정", lambda: self._repoint(one), one, "repoint")
+        m.addSeparator()
+        kids = self._has_children()
+        act("모든 북마크 확장", self.tree.expandAll, kids, "expand")
+        act("모든 북마크 축소", self.tree.collapseAll, kids, "collapse")
+        m.addSeparator()
+        act("북마크에서 목차 페이지 만들기", self.make_toc, self.tree.topLevelItemCount(), "toc")
+        act("페이지 인쇄", lambda: self.printRequested.emit(max(0, one.data(0, Qt.ItemDataRole.UserRole) or 0)), one, "print")
+        m.addSeparator()
+        act("속성", lambda: self.open_props(sel or [one]), sel or one, "props")
+        act("현재 모양을 새 기본값으로 사용", lambda: self.set_pref("bm_style", dict(one.data(0, self.STYLE))), one, "set_default")
+        return m
+
+    def _menu(self, gpos, it=None):
+        self.build_menu(it).exec(gpos)
+
+    def _more(self):
+        b = self.more_btn
+        self._menu(b.mapToGlobal(b.rect().bottomLeft()), self.tree.currentItem())
+
+    def eventFilter(self, obj, e):
+        if obj is self.tree.viewport() and e.type() == QEvent.Type.Wheel and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            dy = e.angleDelta().y()
+            if dy:
+                self.set_font(self._step(1 if dy > 0 else -1))
+            return True
+        if obj is self.tree and self.tree.state() != QAbstractItemView.State.EditingState:
+            done = _key_filter(e, self._keys)
+            if done is not None:
+                return done
+        return super().eventFilter(obj, e)
 
 
 class _FoundText(QStyledItemDelegate):
@@ -879,88 +1218,361 @@ class AnnotPanel(QWidget):
             self.importExport.emit(key)
 
 
-class AttachmentPanel(QWidget):
+ATTACH_BLOCKED = (".exe", ".bat", ".cmd", ".js", ".vbs", ".ps1", ".msi", ".scr")   # 늘 막고 저장만 된다
+
+
+class AttachmentPanel(_Prefs, QWidget):
+    """첨부 파일: 문서 첨부 + 쪽에 붙은 첨부(「N 페이지」 아래). 두 번 누르면 열기.
+    PDF 첨부는 앱 새 탭으로, 다른 파일은 이번만·항상·안 함을 묻고(attach_allow 에 확장자별 기억), 실행 파일은 막는다."""
     changed = Signal()
+    openPdf = Signal(str)   # 임시 폴더에 꺼낸 PDF 경로
+    KIND = Qt.ItemDataRole.UserRole       # "doc" · "annot" · "page"(묶음 머리)
+    KEY = Qt.ItemDataRole.UserRole + 1    # 문서 첨부 이름 또는 (쪽, xref)
+    FILE = Qt.ItemDataRole.UserRole + 2   # 보여 줄 파일 이름
 
     def __init__(self, doc: Document, parent=None):
         super().__init__(parent)
         self.doc = doc
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(panel_head("첨부 파일", (("add", "첨부 파일 추가", self.add),)))
-        self.list = QListWidget()
-        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.list.customContextMenuRequested.connect(self._menu)
-        self.list.itemDoubleClicked.connect(lambda it: self.save(it.text()))
-        lay.addWidget(self.list)
+        head = panel_head("첨부 파일", (("more", "더 보기", self._more), ("open", "열기", self.open_current),
+                                       ("add", "첨부 파일 추가", self.add), ("edit", "설명 편집", self.edit_desc),
+                                       ("delete", "삭제", self.delete_current), ("saveas", "다른 이름으로 저장", self.save)))
+        (self.more_btn, self.open_btn, self.add_btn, self.desc_btn, self.delete_btn,
+         self.save_btn) = head.findChildren(QToolButton)
+        lay.addWidget(head)
+        self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); _tidy_tree(self.tree, 0)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(lambda pos: self._menu(self.tree.mapToGlobal(pos)))
+        self.tree.itemDoubleClicked.connect(lambda it, _: self.open_current() if it.data(0, self.KIND) != "page" else None)
+        self.tree.currentItemChanged.connect(lambda *_: self._sync_buttons())
+        lay.addWidget(self.tree)
         self.reload()
 
+    # ── 목록 ──
+    @staticmethod
+    def _label(filename: str, size: int, desc: str) -> str:
+        return f"{filename}  ({size / 1024:.0f} KB)" + (f" · {desc}" if desc else "")
+
+    def page_attachments(self) -> list[dict]:
+        """쪽에 붙은 첨부(FileAttachment 주석)."""
+        out = []
+        with self.doc.lock:
+            for i in range(self.doc.page_count):
+                for a in self.doc.fitz[i].annots(types=[fitz.PDF_ANNOT_FILE_ATTACHMENT]) or []:
+                    try:
+                        fi = a.file_info
+                    except Exception:  # noqa: BLE001
+                        continue
+                    name = fi.get("filename") or "첨부"
+                    out.append({"page": i, "xref": a.xref, "filename": name, "size": fi.get("length") or fi.get("size") or 0,
+                                "desc": fi.get("description") or a.info.get("content", "")})
+        return out
+
     def reload(self):
-        self.list.clear()
+        self.tree.clear()
         for a in self.doc.attachments():
             desc = a["desc"] if a["desc"] and a["desc"] not in (a["filename"], a["name"]) else ""
-            self.list.addItem(f"{a['filename']}  ({a['size'] / 1024:.0f} KB)" + (f" · {desc}" if desc else ""))
-            it = self.list.item(self.list.count() - 1)
-            it.setData(Qt.ItemDataRole.UserRole, a["name"])
-            it.setData(Qt.ItemDataRole.UserRole + 1, a["filename"])
+            it = QTreeWidgetItem([self._label(a["filename"], a["size"], desc)])
+            it.setData(0, self.KIND, "doc"); it.setData(0, self.KEY, a["name"]); it.setData(0, self.FILE, a["filename"])
+            self.tree.addTopLevelItem(it)
+        groups: dict[int, QTreeWidgetItem] = {}
+        for a in self.page_attachments():
+            g = groups.get(a["page"])
+            if g is None:
+                g = groups[a["page"]] = QTreeWidgetItem([f"{a['page'] + 1} 페이지"])
+                g.setData(0, self.KIND, "page")
+                self.tree.addTopLevelItem(g)
+            it = QTreeWidgetItem([self._label(a["filename"], a["size"], a["desc"] if a["desc"] != a["filename"] else "")])
+            it.setData(0, self.KIND, "annot"); it.setData(0, self.KEY, (a["page"], a["xref"])); it.setData(0, self.FILE, a["filename"])
+            g.addChild(it)
+        self.tree.expandAll()
+        self._sync_buttons()
 
+    def _current(self) -> QTreeWidgetItem | None:
+        it = self.tree.currentItem()
+        return it if it is not None and it.data(0, self.KIND) in ("doc", "annot") else None
+
+    def _sync_buttons(self):
+        on = self._current() is not None
+        for b in (self.open_btn, self.desc_btn, self.delete_btn, self.save_btn):
+            b.setEnabled(on)
+
+    def _annot(self, key):
+        """(쪽, 주석). 쪽을 같이 쥐고 있어야 주석이 쪽에서 떨어지지 않는다."""
+        page = self.doc.fitz[key[0]]
+        return page, page.load_annot(key[1])
+
+    def data_of(self, it: QTreeWidgetItem) -> bytes:
+        with self.doc.lock:
+            if it.data(0, self.KIND) == "doc":
+                return self.doc.fitz.embfile_get(it.data(0, self.KEY))
+            _, a = self._annot(it.data(0, self.KEY))
+            return a.get_file()
+
+    # ── 일 ──
     def add(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "첨부할 파일")
+        done = False
+        have = {a["filename"]: a["name"] for a in self.doc.attachments()}
         for p in paths:
-            self.doc.add_attachment(p)
-        if paths:
+            base = os.path.basename(p)
+            if base in have:
+                if QMessageBox.question(self, "첨부 파일", f"「{base}」 첨부 파일이 이미 있습니다. 바꾸시겠습니까?") \
+                        != QMessageBox.StandardButton.Yes:
+                    continue
+                with open(p, "rb") as fh:
+                    data = fh.read()
+                self.doc.snapshot()
+                with self.doc.lock:   # embfile_upd 는 내용 바꾸기가 깨져 있어(1.27) 지우고 같은 이름·설명으로 다시 넣는다
+                    f = self.doc.fitz
+                    desc = f.embfile_info(have[base]).get("description", "")
+                    f.embfile_del(have[base])
+                    f.embfile_add(have[base], data, filename=have[base], ufilename=base, desc=desc)
+            else:
+                self.doc.add_attachment(p)
+            done = True
+        if done:
             self.reload(); self.changed.emit()
 
-    def save(self, _):
-        it = self.list.currentItem()
+    def save(self, *_):
+        it = self._current()
         if not it:
             return
-        name = it.data(Qt.ItemDataRole.UserRole)
-        out, _ = QFileDialog.getSaveFileName(self, "첨부 파일 저장", it.data(Qt.ItemDataRole.UserRole + 1) or name)
+        out, _ = QFileDialog.getSaveFileName(self, "첨부 파일 저장", it.data(0, self.FILE) or "첨부")
         if out:
-            open(out, "wb").write(self.doc.get_attachment(name))
+            with open(out, "wb") as fh:
+                fh.write(self.data_of(it))
 
-    def _menu(self, pos):
-        it = self.list.itemAt(pos)
+    def delete_current(self):
+        it = self._current()
+        if not it:
+            return
+        self.doc.snapshot()
+        with self.doc.lock:
+            if it.data(0, self.KIND) == "doc":
+                self.doc.fitz.embfile_del(it.data(0, self.KEY))
+            else:
+                page, a = self._annot(it.data(0, self.KEY))
+                page.delete_annot(a)
+        self.reload(); self.changed.emit()
+
+    def edit_desc(self):
+        it = self._current()
+        if not it:
+            return
+        with self.doc.lock:
+            if it.data(0, self.KIND) == "doc":
+                old = self.doc.fitz.embfile_info(it.data(0, self.KEY)).get("description", "")
+            else:
+                _page, a = self._annot(it.data(0, self.KEY))
+                old = a.file_info.get("description") or a.info.get("content", "")
+        text, ok = QInputDialog.getText(self, "설명 편집", "설명", text=old if old != it.data(0, self.FILE) else "")
+        if not ok or text == old:
+            return
+        self.doc.snapshot()
+        with self.doc.lock:
+            if it.data(0, self.KIND) == "doc":
+                self.doc.fitz.embfile_upd(it.data(0, self.KEY), desc=text)
+            else:
+                _page, a = self._annot(it.data(0, self.KEY))
+                a.update_file(desc=text); a.set_info(content=text); a.update()
+        self.reload(); self.changed.emit()
+
+    def allow(self, ext: str) -> bool:
+        """그 확장자를 열어도 되는지 묻는다(「항상」·「안 함」 은 attach_allow 에 기억)."""
+        rule = (self.pref("attach_allow") or {}).get(ext)
+        if rule == "always":
+            return True
+        if rule == "never":
+            QMessageBox.information(self, "첨부 파일 열기", f"{ext} 첨부는 열지 않도록 정해 두었습니다. [다른 이름으로 저장]으로 꺼낼 수 있습니다.")
+            return False
+        box = QMessageBox(QMessageBox.Icon.Question, "첨부 파일 열기",
+                          f"{ext} 첨부 파일을 엽니다. 믿을 수 있는 파일만 여십시오.", parent=self)
+        once = box.addButton("이번만 허용", QMessageBox.ButtonRole.AcceptRole)
+        always = box.addButton("항상 허용", QMessageBox.ButtonRole.AcceptRole)
+        never = box.addButton("허용 안 함", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(once)
+        box.exec()
+        hit = box.clickedButton()
+        if hit in (always, never):
+            rules = dict(self.pref("attach_allow") or {})
+            rules[ext] = "always" if hit is always else "never"
+            self.set_pref("attach_allow", rules)
+        return hit in (once, always)
+
+    def open_current(self):
+        import tempfile
+        it = self._current()
+        if not it:
+            return
+        name = os.path.basename(it.data(0, self.FILE) or "첨부") or "첨부"
+        ext = os.path.splitext(name)[1].lower()
+        if ext in ATTACH_BLOCKED:
+            QMessageBox.warning(self, "첨부 파일 열기", "실행할 수 있는 첨부 파일은 열 수 없습니다. [다른 이름으로 저장]만 됩니다.")
+            return
+        if ext != ".pdf" and not self.allow(ext):
+            return
+        path = os.path.join(tempfile.mkdtemp(prefix="pdfmetry_attach_"), name)
+        with open(path, "wb") as fh:
+            fh.write(self.data_of(it))
+        if ext == ".pdf":
+            self.openPdf.emit(path)
+        else:
+            try:
+                os.startfile(path)  # noqa: S606  사용자가 허용한 형식만
+            except OSError as e:
+                QMessageBox.warning(self, "첨부 파일 열기", f"열지 못했습니다: {e}")
+
+    def build_menu(self) -> QMenu:
+        on = self._current() is not None
         m = QMenu(self)
-        m.addAction("첨부 파일 추가", self.add)
-        if it:
-            m.addAction("저장", lambda: self.save(None))
-            m.addAction("삭제", lambda: (self.doc.remove_attachment(it.data(Qt.ItemDataRole.UserRole)), self.reload(), self.changed.emit()))
-        m.exec(self.list.mapToGlobal(pos))
+        for label, fn, en, name in (("첨부 파일 열기", self.open_current, on, "open"), ("첨부 파일 저장", self.save, on, "save"),
+                                    ("첨부 파일 추가", self.add, True, "add"), ("설명 편집", self.edit_desc, on, "desc"),
+                                    ("삭제", self.delete_current, on, "delete"), (None, None, None, None),
+                                    ("모두 펼치기", self.tree.expandAll, True, "expand"),
+                                    ("모두 접기", self.tree.collapseAll, True, "collapse")):
+            if label is None:
+                m.addSeparator(); continue
+            a = m.addAction(label, fn); a.setEnabled(en); a.setObjectName(name)
+        return m
+
+    def _menu(self, gpos):
+        self.build_menu().exec(gpos)
+
+    def _more(self):
+        b = self.more_btn
+        self._menu(b.mapToGlobal(b.rect().bottomLeft()))
 
 
 class LayerPanel(QWidget):
+    """레이어: 체크로 보이기(잠김·상위 꺼짐이면 흐리게 막고 이름 뒤에 까닭), 이름 바꾸기·삭제·속성,
+    ⋯ 메뉴에서 모든 쪽 / 보이는 쪽 레이어 · 처음 상태로 · 모두 펼치기·접기."""
     changed = Signal()  # 보기만 바뀜(문서는 그대로)
+    edited = Signal()   # 레이어 정의가 바뀜(문서 고침)
+    XREF = Qt.ItemDataRole.UserRole + 1
+    NAME = Qt.ItemDataRole.UserRole + 2
+    get_current_page = staticmethod(lambda: 0)   # DocTab 이 보는 쪽으로 바꿔 끼운다
 
     def __init__(self, doc: Document, parent=None):
         super().__init__(parent)
         self.doc = doc
+        self.scope = "all"   # "all" 모든 쪽 · "visible" 보이는 쪽
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        lay.addWidget(panel_head("레이어"))
-        self.list = QListWidget(); self.list.itemChanged.connect(self._toggle)
-        lay.addWidget(self.list)
+        head = panel_head("레이어", (("more", "더 보기", self._more),))
+        self.more_btn = head.findChild(QToolButton)
+        lay.addWidget(head)
+        self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); _tidy_tree(self.tree, 0)
+        self.tree.itemChanged.connect(self._toggle)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(lambda pos: self._menu(self.tree.mapToGlobal(pos), self.tree.itemAt(pos)))
+        lay.addWidget(self.tree)
         self.empty = QLabel("이 문서에는 레이어가 없습니다"); self.empty.setObjectName("dim")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter); lay.addWidget(self.empty)
         self.reload()
 
     def reload(self):
-        self.list.blockSignals(True)
-        self.list.clear()
-        layers = self.doc.layers()
-        self.empty.setVisible(not layers)
-        for l in layers:
-            it = QListWidgetItem("    " * l["depth"] + l["name"])
-            if not l["locked"]:
+        from ..engine import outline as OL
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        rows = OL.layer_rows(self.doc)
+        if self.scope == "visible" and rows:
+            used = OL.page_layers(self.doc, max(0, min(self.doc.page_count - 1, self.get_current_page())))
+            rows = [r for r in rows if r["xref"] in used]
+        self.empty.setVisible(not rows)
+        self.tree.setVisible(bool(rows))
+        stack: list[tuple[int, QTreeWidgetItem]] = []
+        dim = QColor(theme.CUR["TEXT_DIM"])
+        for r in rows:
+            why = " (잠김)" if r["locked"] else " (상위 꺼짐)" if r["parent_off"] else ""
+            it = QTreeWidgetItem([r["name"] + why])
+            it.setData(0, Qt.ItemDataRole.UserRole, r["number"])
+            it.setData(0, self.XREF, r["xref"])
+            it.setData(0, self.NAME, r["name"])
+            if why:   # 못 바꾸는 체크칸은 흐리게(까닭은 이름 뒤에 그대로)
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                it.setForeground(0, dim)
+            else:
                 it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(Qt.CheckState.Checked if l["on"] else Qt.CheckState.Unchecked)
-            it.setData(Qt.ItemDataRole.UserRole, l["number"])
-            self.list.addItem(it)
-        self.list.blockSignals(False)
+            it.setCheckState(0, Qt.CheckState.Checked if r["on"] else Qt.CheckState.Unchecked)
+            while stack and stack[-1][0] >= r["depth"]:
+                stack.pop()
+            (stack[-1][1].addChild if stack else self.tree.addTopLevelItem)(it)
+            stack.append((r["depth"], it))
+        self.tree.expandAll()
+        self.tree.blockSignals(False)
 
-    def _toggle(self, it):
-        self.doc.set_layer(it.data(Qt.ItemDataRole.UserRole), it.checkState() == Qt.CheckState.Checked)
+    def _toggle(self, it, _col=0):
+        self.doc.set_layer(it.data(0, Qt.ItemDataRole.UserRole), it.checkState(0) == Qt.CheckState.Checked)
         self.changed.emit()
-        self.reload()  # 묶음(라디오) 레이어는 하나를 켜면 다른 것이 꺼진다
+        QTimer.singleShot(0, self.reload)  # 묶음(라디오) 레이어는 하나를 켜면 다른 것이 꺼진다
+
+    def set_scope(self, scope: str):
+        self.scope = scope
+        self.reload()
+
+    def rename(self, it: QTreeWidgetItem):
+        from ..engine import outline as OL
+        name, ok = QInputDialog.getText(self, "레이어 이름 바꾸기", "이름", text=it.data(0, self.NAME))
+        if ok and name.strip() and name.strip() != it.data(0, self.NAME) and it.data(0, self.XREF) is not None:
+            OL.rename_layer(self.doc, it.data(0, self.XREF), name)
+            self.edited.emit()
+
+    def delete(self, it: QTreeWidgetItem):
+        from ..engine import outline as OL
+        if it.data(0, self.XREF) is None:
+            return
+        if QMessageBox.question(self, "레이어 삭제", f"「{it.data(0, self.NAME)}」 레이어를 삭제할까요? 레이어로 묶였던 내용은 늘 보입니다.") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        OL.delete_layer(self.doc, it.data(0, self.XREF))
+        self.edited.emit()
+
+    def open_props(self, it: QTreeWidgetItem):
+        from ..engine import outline as OL
+        from .dlg_layer import LayerPropsDialog
+        if it.data(0, self.XREF) is None:
+            return
+        dlg = LayerPropsDialog(self, OL.layer_props(self.doc, it.data(0, self.XREF)))
+        if dlg.exec():
+            OL.set_layer_props(self.doc, it.data(0, self.XREF), dlg.values())
+            self.edited.emit()
+
+    def reset(self):
+        from ..engine import outline as OL
+        OL.reset_layers(self.doc)
+        self.reload(); self.changed.emit()
+
+    def build_menu(self, it: QTreeWidgetItem | None, options: bool = False) -> QMenu:
+        m = QMenu(self)
+
+        def act(label, fn, on=True, name=""):
+            a = m.addAction(label, fn); a.setEnabled(bool(on)); a.setObjectName(name)
+            return a
+        if options:
+            for label, scope in (("모든 페이지의 레이어 목록", "all"), ("보이는 페이지의 레이어 목록", "visible")):
+                a = act(label, lambda s=scope: self.set_scope(s), True, "scope_" + scope)
+                a.setCheckable(True); a.setChecked(self.scope == scope)
+            m.addSeparator()
+            act("처음 상태로 되돌리기", self.reset, True, "reset")
+            act("모두 펼치기", self.tree.expandAll, True, "expand")
+            act("모두 접기", self.tree.collapseAll, True, "collapse")
+            m.addSeparator()
+        if it is not None and not options:
+            a = act("레이어 보이기", lambda: it.setCheckState(0, Qt.CheckState.Unchecked if it.checkState(0) == Qt.CheckState.Checked
+                                                             else Qt.CheckState.Checked),
+                    bool(it.flags() & Qt.ItemFlag.ItemIsUserCheckable), "show")
+            a.setCheckable(True); a.setChecked(it.checkState(0) == Qt.CheckState.Checked)
+            act("이름 바꾸기", lambda: self.rename(it), True, "rename")
+        act("레이어 삭제", lambda: self.delete(it), it is not None, "delete")
+        act("레이어 속성", lambda: self.open_props(it), it is not None, "props")
+        return m
+
+    def _menu(self, gpos, it=None, options: bool = False):
+        self.build_menu(it, options).exec(gpos)
+
+    def _more(self):
+        b = self.more_btn
+        self._menu(b.mapToGlobal(b.rect().bottomLeft()), self.tree.currentItem(), options=True)
 
 
 class FieldPanel(QWidget):
