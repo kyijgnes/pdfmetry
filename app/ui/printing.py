@@ -40,6 +40,7 @@ ORDERS = [("h", "가로"), ("hr", "가로 역순"), ("v", "세로"), ("vr", "세
 BOOKLET_SUBSETS = [("both", "양면"), ("front", "앞면"), ("back", "뒷면")]
 MANUAL_TIP = "앞면 인쇄가 끝났습니다. 나온 종이를 뒤집어 용지함에 다시 넣고 [확인] 을 누르면 뒷면을 인쇄합니다."
 CM = 72 / 2.54
+_UNITS = {"cm": CM, "mm": 72 / 25.4, "in": 72.0, "pt": 1.0}  # 단위 하나가 몇 pt
 MAX_DPI = 600  # 그 이상은 글자가 더 좋아지지 않고 그림만 커진다
 
 
@@ -675,14 +676,18 @@ def _page_icon(landscape: bool, color: str) -> QIcon:
 # ── 인쇄 창 ──────────────────────────────────────────────────────
 class PrintDialog(QDialog):
     COL_W = 268  # 왼쪽·가운데 칸 폭(창 안쪽 1061×637)
+    _last_landscape = False  # 방향은 늘 세로로 시작하고, 이 프로그램을 켜 둔 동안만 마지막 선택을 기억
+    MAX_COPIES, MAX_SCALE, MAX_GRID = 9999, 800, 99
+    MAX_OVERLAP_IN = 2.0
 
     def __init__(self, parent, doc: fitz.Document, current: int, remember: dict | None = None, lock=None,
-                 view: tuple | None = None, name: str = ""):
+                 view: tuple | None = None, name: str = "", unit: str = "cm"):
         super().__init__(parent)
         self.setWindowTitle("인쇄")
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setObjectName("printdlg")
         self.doc, self.lock, self.current, self.view, self.name = doc, lock, current, view, name
+        self.unit = unit if unit in _UNITS else "cm"
         r = dict(remember or {})
         self._remember = r
         n = len(doc)
@@ -714,8 +719,9 @@ class PrintDialog(QDialog):
         lv.addWidget(self.source_size)
         crow = QHBoxLayout(); crow.setSpacing(6)
         cic = QLabel(); cic.setPixmap(icons.icon("copy", 16).pixmap(16, 16)); crow.addWidget(cic)
-        self.copies = QSpinBox(); self.copies.setRange(1, 999); self.copies.setFixedWidth(64); crow.addWidget(self.copies)
+        self.copies = QSpinBox(); self.copies.setRange(1, self.MAX_COPIES); self.copies.setFixedWidth(64); crow.addWidget(self.copies)
         crow.addStretch(); lv.addLayout(crow)
+        self.collate = QCheckBox("정렬 인쇄"); self.collate.setChecked(True); lv.addWidget(self.collate)  # 열 때마다 켠다
         irow = QHBoxLayout(); irow.setSpacing(6)
         self.as_image = QCheckBox("이미지로 인쇄"); self.as_image.setChecked(r.get("as_image", False))
         self.dpi = QComboBox()
@@ -733,14 +739,13 @@ class PrintDialog(QDialog):
             b.setObjectName("orient"); b.setCheckable(True); b.setIcon(_page_icon(land, theme.CUR["TEXT"]))
             b.setFixedSize(26, 24); self.orient_group.addButton(b); orow.addWidget(b)
         orow.addStretch(); lv.addLayout(orow)
-        land = n and doc[min(current, n - 1)].rect.width > doc[min(current, n - 1)].rect.height
-        (self.landscape_btn if land else self.portrait_btn).setChecked(True)
+        (self.landscape_btn if PrintDialog._last_landscape else self.portrait_btn).setChecked(True)
 
         self._head(lv, "페이지 범위")
         self.r_cur = QRadioButton("현재 페이지"); self.r_view = QRadioButton("최근 보기")
         self.r_all = QRadioButton("모든 페이지"); self.r_custom = QRadioButton("사용자 정의")
         self.r_all.setChecked(True)
-        self.r_view.setEnabled(view is not None)
+        self.r_view.setVisible(view is not None)
         for b in (self.r_cur, self.r_view, self.r_all):
             lv.addWidget(b)
         rrow = QHBoxLayout(); rrow.setSpacing(6)
@@ -790,15 +795,18 @@ class PrintDialog(QDialog):
         for k, label in FITS:
             b = QRadioButton(label); self.fit_btns[k] = b; v.addWidget(b)
         self.fit_btns.get(r.get("fit", "fit"), self.fit_btns["fit"]).setChecked(True)
-        self.scale = QSpinBox(); self.scale.setRange(1, 1000); self.scale.setValue(int(r.get("scale", 100))); v.addWidget(self.scale)
+        self.scale = QSpinBox(); self.scale.setRange(1, self.MAX_SCALE); self.scale.setValue(int(r.get("scale", 100))); v.addWidget(self.scale)
         self._common_checks(v)
         # 포스터
         pg, v = self._page()
         v.addWidget(QLabel("타일 스케일"))
-        self.poster_scale = QSpinBox(); self.poster_scale.setRange(10, 1000); self.poster_scale.setValue(100); v.addWidget(self.poster_scale)
+        self.poster_scale = QSpinBox(); self.poster_scale.setRange(1, self.MAX_SCALE); self.poster_scale.setValue(int(r.get("poster_scale", 100))); v.addWidget(self.poster_scale)
         v.addWidget(QLabel("겹침"))
-        self.overlap = QDoubleSpinBox(); self.overlap.setRange(0, 10); self.overlap.setDecimals(1); self.overlap.setSingleStep(0.5)
-        self.overlap.setSuffix(" (cm)"); v.addWidget(self.overlap)
+        k = _UNITS[self.unit]
+        self.overlap = QDoubleSpinBox(); self.overlap.setRange(0, round(self.MAX_OVERLAP_IN * 72 / k, 2))
+        self.overlap.setDecimals(2 if self.unit in ("cm", "in") else 1); self.overlap.setSingleStep(0.1 if self.unit in ("cm", "in") else 1)
+        self.overlap.setSuffix(f" ({self.unit})"); self.overlap.setValue(round(float(r.get("overlap_mm", 0)) / 25.4 * 72 / k, 2))
+        v.addWidget(self.overlap)
         self.cut_marks = QCheckBox("컷 마크"); self.labels = QCheckBox("레이블")
         v.addWidget(self.cut_marks); v.addWidget(self.labels)
         prot = QCheckBox("자동 회전"); prot.setChecked(True); prot.setEnabled(False); v.addWidget(prot)
@@ -811,7 +819,7 @@ class PrintDialog(QDialog):
         for k, label in NUPS:
             self.nup.addItem(label, k)
         self.nup.setFixedWidth(76)
-        self.nup_cols = QSpinBox(); self.nup_cols.setRange(1, 10); self.nup_rows = QSpinBox(); self.nup_rows.setRange(1, 10)
+        self.nup_cols = QSpinBox(); self.nup_cols.setRange(1, self.MAX_GRID); self.nup_rows = QSpinBox(); self.nup_rows.setRange(1, self.MAX_GRID)
         nrow.addWidget(self.nup); nrow.addWidget(self.nup_cols, 1); nrow.addWidget(QLabel("X")); nrow.addWidget(self.nup_rows, 1)
         v.addLayout(nrow)
         v.addWidget(QLabel("페이지 순서"))
@@ -842,6 +850,7 @@ class PrintDialog(QDialog):
             b.setChecked(r.get("auto_rotate", True))
         for b in self._center_boxes:
             b.setChecked(r.get("center", True))
+        self._restore(r)
         mv.addStretch()
         body.addWidget(mid)
 
@@ -879,12 +888,13 @@ class PrintDialog(QDialog):
         self._pages: list[int] = []
         self._cdoc_key, self._cdoc = None, doc
         self._advanced = bool(r.get("advanced", True))
-        self.mode_btns["size"].setChecked(True); self.stack.setCurrentIndex(0)
+        mode0 = r.get("mode") if r.get("mode") in self.mode_btns else "size"
+        self.mode_btns[mode0].setChecked(True); self.stack.setCurrentIndex([k for k, _ in MODES].index(mode0))
         self._printer_changed()
         self.printer.currentTextChanged.connect(self._printer_changed)
         for w in (self.duplex, self.paper, self.dpi, self.subset, self.nup, self.nup_order, self.booklet_subset):
             w.currentIndexChanged.connect(self._refresh)
-        for w in (self.gray, self.source_size, self.as_image, self.c_doc, self.c_annot, self.c_form, self.reverse,
+        for w in (self.gray, self.collate, self.source_size, self.as_image, self.c_doc, self.c_annot, self.c_form, self.reverse,
                   self.cut_marks, self.labels, self.b_left, self.r_cur, self.r_view, self.r_all, self.r_custom,
                   *self.fit_btns.values()):
             w.toggled.connect(self._refresh)
@@ -1057,6 +1067,7 @@ class PrintDialog(QDialog):
         view = self.r_view.isChecked() and self.view is not None
         # 켜고 끄기
         self.range_edit.setEnabled(self.r_custom.isChecked())
+        self.collate.setVisible(self.copies.value() >= 2)
         self.subset.setEnabled(not view)
         for k in ("multi", "booklet"):
             self.mode_btns[k].setEnabled(not view)
@@ -1083,6 +1094,8 @@ class PrintDialog(QDialog):
         except ValueError as e:
             self._pages = []
             self.err.setText(str(e))
+            if self.subset.currentIndex() != 0:   # 범위가 틀리면 홀짝 고르기를 「모든 페이지」 로 되돌린다
+                self.subset.blockSignals(True); self.subset.setCurrentIndex(0); self.subset.blockSignals(False)
         total = booklet_sheets(len(self._pages))
         for sb in (self.b_from, self.b_to):
             sb.blockSignals(True)
@@ -1137,6 +1150,7 @@ class PrintDialog(QDialog):
             self.accept()
 
     def done(self, r):
+        PrintDialog._last_landscape = self.landscape_btn.isChecked()
         if self._cdoc is not self.doc:
             self._cdoc.close(); self._cdoc = self.doc
         super().done(r)
@@ -1144,7 +1158,7 @@ class PrintDialog(QDialog):
     def options(self) -> PrintOptions:
         view = self.view if (self.r_view.isChecked() and self.view is not None) else None
         return PrintOptions(
-            printer=self.printer.currentText(), pages=list(self._pages), copies=self.copies.value(),
+            printer=self.printer.currentText(), pages=list(self._pages), copies=self.copies.value(), collate=self.collate.isChecked(),
             mode=self._mode(), fit=next((k for k, b in self.fit_btns.items() if b.isChecked()), "fit"),
             scale=self.scale.value(), auto_rotate=self._rot_boxes[0].isChecked(), center=self._center_boxes[0].isChecked(),
             orient="landscape" if self.landscape_btn.isChecked() else "portrait",
@@ -1153,16 +1167,30 @@ class PrintDialog(QDialog):
             duplex=self.duplex.currentData() or "none", color=not self.gray.isChecked(),
             content=self.c_doc.isChecked(), annots=self.c_annot.isChecked(), forms=self.c_form.isChecked(),
             as_image=self.as_image.isChecked(), dpi=self.dpi.currentData() or 300, view=view,
-            poster_scale=self.poster_scale.value(), overlap=self.overlap.value(), cut_marks=self.cut_marks.isChecked(),
+            poster_scale=self.poster_scale.value(), overlap=self.overlap.value() * _UNITS[self.unit] / CM, cut_marks=self.cut_marks.isChecked(),
             labels=self.labels.isChecked(), nup=self.nup.currentData() or 0, nup_cols=self.nup_cols.value(),
             nup_rows=self.nup_rows.value(), nup_order=self.nup_order.currentData() or "h",
             booklet_subset=self.booklet_subset.currentData() or "both", booklet_from=self.b_from.value(),
             booklet_to=self.b_to.value(), booklet_right=self.b_right.isChecked(),
             margins=getattr(self, "_margins", None), doc_name=self.name)
 
+    def _restore(self, r: dict):
+        """기억해 둔 인쇄 모드별 값을 칸에 채운다."""
+        self.reverse.setChecked(bool(r.get("reverse", False)))
+        for combo, key in ((self.subset, "subset"), (self.nup, "nup"), (self.nup_order, "nup_order"), (self.booklet_subset, "booklet_subset")):
+            if key in r:
+                combo.setCurrentIndex(max(0, combo.findData(r[key])))
+        self.cut_marks.setChecked(bool(r.get("cut_marks", False))); self.labels.setChecked(bool(r.get("labels", False)))
+        self.nup_cols.setValue(int(r.get("nup_cols", self.nup_cols.value()))); self.nup_rows.setValue(int(r.get("nup_rows", self.nup_rows.value())))
+        (self.b_right if r.get("booklet_right") else self.b_left).setChecked(True)
+
     def remember(self) -> dict:
-        """다음에 열 때 그대로 쓸 설정(쪽 범위·매수·인쇄 모드는 뺀다)."""
+        """다음에 열 때 그대로 쓸 설정(쪽 범위·매수는 뺀다). 인쇄 모드와 모드별 값은 남긴다."""
         o = self.options()
         return {"printer": o.printer, "paper": o.paper, "duplex": o.duplex, "color": o.color, "source_size": o.source_size,
                 "as_image": o.as_image, "dpi": o.dpi, "content": o.content, "annots": o.annots, "forms": o.forms,
-                "fit": o.fit, "scale": o.scale, "auto_rotate": o.auto_rotate, "center": o.center, "advanced": self._advanced}
+                "fit": o.fit, "scale": o.scale, "auto_rotate": o.auto_rotate, "center": o.center, "advanced": self._advanced,
+                "mode": o.mode, "reverse": self.reverse.isChecked(), "subset": self.subset.currentData() or "all",
+                "poster_scale": o.poster_scale, "overlap_mm": round(o.overlap * 10, 2), "cut_marks": o.cut_marks, "labels": o.labels,
+                "nup": o.nup, "nup_cols": o.nup_cols, "nup_rows": o.nup_rows, "nup_order": o.nup_order,
+                "booklet_subset": o.booklet_subset, "booklet_right": o.booklet_right}

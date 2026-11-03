@@ -179,30 +179,102 @@ def _com_message(e: BaseException) -> str:
 
 
 # ── PDF → 그림 ─────────────────────────────────────────────────────────
-def to_images(doc: fitz.Document, out_dir: str, fmt: str = "png", dpi: int = 150, pages=None,
-              progress: Progress = None, stem: str = "page") -> list[str]:
-    """쪽마다 그림 파일 하나(<stem>_p0001.png). 만든 파일 경로 목록."""
+IMAGE_FORMATS = ("png", "jpg", "bmp", "gif", "tiff")
+_IMG_ALIAS = {"jpeg": "jpg", "tif": "tiff"}
+
+
+def source_dpi(page: fitz.Page, default: int = 150) -> int:
+    """쪽에 놓인 그림 가운데 가장 큰 것의 해상도(그림 화소 ÷ 놓인 인치). 그림이 없으면 default."""
+    best = 0.0
+    try:
+        for info in page.get_image_info():
+            w, h = info.get("width") or 0, info.get("height") or 0
+            bb = fitz.Rect(info.get("bbox") or (0, 0, 0, 0))
+            if w and bb.width > 1 and bb.height > 1:
+                best = max(best, (w / (bb.width / 72) + h / (bb.height / 72)) / 2)
+    except Exception:  # noqa: BLE001
+        return default
+    return int(max(72, min(600, round(best)))) if best else default
+
+
+def _save_image(im, path: str, fmt: str, quality: int = 90) -> None:
+    if fmt == "png":
+        im.save(path, "PNG")
+    elif fmt == "jpg":
+        im.save(path, "JPEG", quality=quality)
+    elif fmt == "gif":
+        im.convert("P", palette=1).save(path, "GIF")
+    elif fmt == "tiff":
+        im.save(path, "TIFF")
+    else:
+        im.save(path, "BMP")
+
+
+def to_images(doc: fitz.Document, out_dir: str, fmt: str = "png", dpi: int | None = 150, pages=None,
+              progress: Progress = None, stem: str = "page", merge: bool = False, quality: int = 90) -> list[str]:
+    """쪽마다 그림 파일 하나(<stem>_p0001.png). merge 면 쪽을 위아래로 이어 한 장(<stem>.png).
+    dpi 가 None 이면 쪽마다 가장 큰 그림의 해상도(없으면 150). 만든 파일 경로 목록."""
+    from PIL import Image
     fmt = fmt.lower().lstrip(".")
-    if fmt == "jpeg":
-        fmt = "jpg"
-    if fmt not in ("png", "jpg", "bmp", "tiff", "tif"):
+    fmt = _IMG_ALIAS.get(fmt, fmt)
+    if fmt not in IMAGE_FORMATS:
         raise EngineError(f"지원하지 않는 그림 형식입니다: {fmt}")
     os.makedirs(out_dir, exist_ok=True)
     targets = _pages(doc, pages)
     out: list[str] = []
+    strips = []
     for k, pno in enumerate(targets):
         _say(progress, k, len(targets), f"그림으로 뜨는 중 {pno + 1}쪽")
         page = doc[pno]
-        pix = page.get_pixmap(dpi=dpi, alpha=False)
+        pix = page.get_pixmap(dpi=dpi or source_dpi(page), alpha=False)
+        im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        if merge:
+            strips.append(im)
+            continue
         path = os.path.join(out_dir, f"{stem}_p{pno + 1:04d}.{fmt}")
-        if fmt in ("png", "jpg"):
-            pix.save(path, output="png" if fmt == "png" else "jpeg", jpg_quality=90)
-        else:
-            from PIL import Image
-            im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            im.save(path, "TIFF" if fmt in ("tif", "tiff") else "BMP")
+        _save_image(im, path, fmt, quality)
+        out.append(path)
+    if merge and strips:
+        w, h = max(i.width for i in strips), sum(i.height for i in strips)
+        if w * h > 178_000_000:
+            raise EngineError("한 장으로 합치기에는 그림이 너무 큽니다. 해상도를 낮추거나 쪽을 줄여 주세요")
+        sheet = Image.new("RGB", (w, h), (255, 255, 255))
+        y = 0
+        for im in strips:
+            sheet.paste(im, ((w - im.width) // 2, y)); y += im.height
+        path = os.path.join(out_dir, f"{stem}.{fmt}")
+        _save_image(sheet, path, fmt, quality)
         out.append(path)
     _say(progress, len(targets), len(targets), "그림 변환 끝")
+    return out
+
+
+def extract_images(doc: fitz.Document, out_dir: str, pages=None, progress: Progress = None, stem: str = "image") -> list[str]:
+    """PDF 속 그림을 원래 형식 그대로 꺼내 파일로(<stem>_p0001_1.png). 같은 그림은 한 번만."""
+    os.makedirs(out_dir, exist_ok=True)
+    targets = _pages(doc, pages)
+    seen: set[int] = set()
+    out: list[str] = []
+    for k, pno in enumerate(targets):
+        _say(progress, k, len(targets), f"그림을 꺼내는 중 {pno + 1}쪽")
+        n = 0
+        for img in doc[pno].get_images(full=True):
+            xref = img[0]
+            if xref in seen:
+                continue
+            seen.add(xref)
+            try:
+                info = doc.extract_image(xref)
+            except Exception:  # noqa: BLE001
+                continue
+            if not info or not info.get("image"):
+                continue
+            n += 1
+            path = os.path.join(out_dir, f"{stem}_p{pno + 1:04d}_{n}.{info.get('ext') or 'png'}")
+            with open(path, "wb") as f:
+                f.write(info["image"])
+            out.append(path)
+    _say(progress, len(targets), len(targets), "그림 꺼내기 끝")
     return out
 
 
@@ -239,6 +311,29 @@ def to_html(doc: fitz.Document, out_path: str, pages=None) -> str:
         parts.append(_xhtml_body(doc[pno]))
         parts.append("</div>")
     parts.append("</body></html>")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
+    return out_path
+
+
+def to_xml(doc: fitz.Document, out_path: str, pages=None) -> str:
+    """글자와 자리를 담은 XML: <page> 아래 <line bbox> 와 <word bbox> (좌표는 pt, 왼쪽 위가 0)."""
+    from xml.sax.saxutils import escape, quoteattr
+    _ensure_dir(out_path)
+    parts = ['<?xml version="1.0" encoding="utf-8"?>', "<document>"]
+    for pno in _pages(doc, pages):
+        page = doc[pno]
+        r = page.rect
+        parts.append(f'  <page number="{pno + 1}" width="{r.width:.2f}" height="{r.height:.2f}">')
+        for b in page.get_text("dict").get("blocks", []):
+            for ln in b.get("lines", []):
+                text = _clean("".join(sp.get("text", "") for sp in ln.get("spans", [])))
+                if not text.strip():
+                    continue
+                x0, y0, x1, y1 = ln["bbox"]
+                parts.append(f"    <line bbox={quoteattr(f'{x0:.2f} {y0:.2f} {x1:.2f} {y1:.2f}')}>{escape(text)}</line>")
+        parts.append("  </page>")
+    parts.append("</document>")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(parts))
     return out_path
