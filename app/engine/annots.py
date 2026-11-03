@@ -507,8 +507,9 @@ def erase_ink_at(doc: Document, page: int, point: fitz.Point, radius: float = 6,
 # ── 글 상자 · 노트 ────────────────────────────────────────────────
 def free_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float = 11, text_color: Color = (0, 0, 0),
               fill: Color | None = None, border: Color | None = None, width: float = 0, opacity: float = 1.0,
-              callout=None, author: str = "", typewriter: bool = False) -> int:
+              callout=None, author: str = "", typewriter: bool = False, rotate: int | None = None) -> int:
     """텍스트 박스(테두리·바탕 있음) · 타자기(typewriter=True, 테두리 없음) · 말풍선(callout).
+    rotate: 글 방향(없으면 쪽 회전, 보기 회전으로 돌린 화면에서는 그 화면에 바로 서게 넘겨 받는다).
 
     callout 은 지시선 끝 점 하나(상자 위 가운데로 잇는다) 또는 끝 점부터 상자까지의 꼭짓점 목록.
     지시선 끝은 열린 화살촉. PyMuPDF 는 richtext 가 아니면 테두리 색을 따로 못 준다(테두리는 글자색).
@@ -522,7 +523,7 @@ def free_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float
         if typewriter:
             fill, border, width = None, None, 0
         return _add_free_text(p, r, text, fontsize, text_color, fill, border, width, opacity, callout,
-                              p.rotation, author).xref  # 회전된 쪽에서도 보이는 화면에 바로 서게
+                              p.rotation if rotate is None else rotate % 360, author).xref  # 회전된 쪽에서도 보이는 화면에 바로 서게
 
 
 def _add_free_text(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, text_color: Color, fill: Color | None,
@@ -1384,13 +1385,15 @@ def text_box_size(text: str, fontsize: float, bold: bool = False, min_width: flo
 
 
 def add_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float = 10, color: Color = (0, 0, 0),
-             bold: bool = False, align: int = 0, italic: bool = False) -> bool:
-    """쪽 내용에 글자를 직접 넣는다(주석 아님). 빈 글이면 아무것도 안 하고 False(실행 취소 자리도 안 만듦)."""
+             bold: bool = False, align: int = 0, italic: bool = False, rotate: int | None = None) -> bool:
+    """쪽 내용에 글자를 직접 넣는다(주석 아님). 빈 글이면 아무것도 안 하고 False(실행 취소 자리도 안 만듦).
+    rotate: 글 방향(없으면 쪽 회전)."""
     if not text.strip():
         return False
     doc.snapshot()
     with doc.lock:
-        _insert_box(doc.fitz[page], r, text, fontsize, color, bold, align, italic=italic)
+        _insert_box(doc.fitz[page], r, text, fontsize, color, bold, align, italic=italic,
+                    rotate=None if rotate is None else rotate % 360)
     return True
 
 
