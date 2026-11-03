@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 
 import fitz
-from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter,
                            QPainterPath, QPen, QPixmap, QPolygonF, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsScene, QGraphicsView, QInputDialog, QMenu,
@@ -26,12 +26,93 @@ from . import theme
 
 GAP = 12  # 쪽 사이 간격(px)
 MARGIN = 20
+ZOOM_MIN, ZOOM_MAX = 0.05, 16.0   # 확대 범위 5%~1600%
+RENDER_MAX_PX = 48e6   # 쪽 그림 한 장 화소 상한. 넘으면 이 크기로 그려 늘려 보인다(1600% 면 A4 한 장이 1억 화소를 넘는다)
+RULER = 18             # 눈금자 두께(px)
+ZOOM_FITS = {"창 너비": "fit_width", "창 높이": "fit_height", "창 크기": "fit_page", "실제 크기": "actual"}   # 배율 칸 맞추기 항목
+
+
+def pct_text(z: float) -> str:
+    """배율 글자: 100% · 33.3% (소수 한 자리는 딱 떨어지지 않을 때만)."""
+    v = z * 100
+    return f"{round(v)}%" if abs(v - round(v)) < 0.05 else f"{v:.1f}%"
+
+
+# 배경: 문서 뒤 바탕(None 이면 테마 바탕) · 쪽 그림에 곱할 색(None 이면 그대로) · 밝기 뒤집기
+BG_MODES = {
+    "default": (None, None, False),
+    "day": ("#FFFFFF", None, False),
+    "eye": ("#B9D3BC", (204, 232, 207), False),
+    "night": ("#3A3A3E", (215, 215, 215), True),
+    "parchment": ("#D6C9AA", (245, 236, 214), False),
+}
+UNIT_PT = {"cm": 72 / 2.54, "mm": 72 / 25.4, "in": 72.0, "pt": 1.0, "pc": 12.0}
+# 눈금자: 단위마다 (큰 눈금 간격(단위), 작은 눈금 수)
+RULER_TICKS = {"cm": (1, 10), "mm": (10, 10), "in": (1, 8), "pt": (72, 6), "pc": (6, 6)}
+GRID_DEFAULT = {"w": 1.0, "h": 1.0, "left": 0.0, "top": 0.0, "sub": 3, "color": "#FF0000"}
+
+
+def _num_pt(v, unit: str, default: float) -> float:
+    """격자 값 하나를 pt 로. 숫자면 unit 단위, 「1cm」 처럼 단위를 붙인 글자도 받는다."""
+    if isinstance(v, str):
+        t = v.strip().lower()
+        u = next((k for k in sorted(UNIT_PT, key=len, reverse=True) if t.endswith(k)), None)
+        if u:
+            t, unit = t[:-len(u)].strip(), u
+        try:
+            v = float(t)
+        except ValueError:
+            v = default
+    elif not isinstance(v, (int, float)):
+        v = default
+    return float(v) * UNIT_PT.get(unit, UNIT_PT["cm"])
+
+
+def _color(c, default: str = "#FF0000") -> QColor:
+    if isinstance(c, (list, tuple)) and len(c) >= 3:
+        if all(isinstance(x, (int, float)) and 0 <= x <= 1 for x in c[:3]) and any(isinstance(x, float) for x in c[:3]):
+            return QColor.fromRgbF(*c[:3])
+        return QColor(*(int(x) for x in c[:3]))
+    q = QColor(c) if isinstance(c, str) else QColor()
+    return q if q.isValid() else QColor(default)
+
+
+def grid_spec(prefs: dict | None) -> dict:
+    """환경 설정의 unit·grid 를 그리기 값으로: 간격·오프셋은 pt, 세분 수, 색."""
+    prefs = prefs or {}
+    unit = prefs.get("unit") if prefs.get("unit") in UNIT_PT else "cm"
+    g = {**GRID_DEFAULT, **(prefs.get("grid") or {})}
+    w = _num_pt(g.get("w"), unit, 1.0)
+    h = _num_pt(g.get("h"), unit, 1.0)
+    try:
+        sub = max(1, min(20, int(g.get("sub") or 1)))
+    except (TypeError, ValueError):
+        sub = 3
+    return {"w": w if w > 0.5 else UNIT_PT["cm"], "h": h if h > 0.5 else UNIT_PT["cm"],
+            "left": _num_pt(g.get("left"), unit, 0.0), "top": _num_pt(g.get("top"), unit, 0.0),
+            "sub": sub, "color": _color(g.get("color"))}
+
+
+def tint_image(img: QImage, mode: str) -> QImage:
+    """배경 모드대로 쪽 그림 색을 바꾼다(밤은 밝기를 뒤집은 뒤 곱하기)."""
+    _, tint, invert = BG_MODES.get(mode, BG_MODES["default"])
+    if tint is None and not invert:
+        return img
+    out = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    if invert:
+        out.invertPixels(QImage.InvertMode.InvertRgb)
+    if tint is not None:
+        p = QPainter(out)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+        p.fillRect(out.rect(), QColor(*tint))
+        p.end()
+    return out
 
 TOOLS_MARKUP = {"highlight": "Highlight", "underline": "Underline", "strike": "StrikeOut", "squiggly": "Squiggly"}
 TOOLS_SHAPE = {"rect", "oval", "line", "arrow", "polygon", "polyline", "cloud", "areahl", "redact", "link", "crop",
                "addtext", "addimage", "textbox", "callout", "typewriter", "stamp", "signature", "snapshot", "ocrarea",
                "ftext", "fcheck", "fradio", "fcombo", "flist", "fbutton", "fimage", "fsign", "fdate",
-               "m_distance", "m_perimeter", "m_area", *SH.SHAPES}
+               "m_distance", "m_perimeter", "m_area", "zoomarea", *SH.SHAPES}
 SQUARE_TOOLS = {"rect", "oval", "areahl", *SH.SHAPES}
 MEASURE_TOOLS = ("m_distance", "m_perimeter", "m_area")
 SNAP_PX = 8   # 측정 스냅이 붙는 거리(화면 px)   # Shift 를 누르고 끌면 가로세로 같게
@@ -195,13 +276,31 @@ class PageItem(QGraphicsItem):
         # 부드러운 그림자: 바깥으로 갈수록 옅은 테를 겹쳐 종이가 바탕에서 떠 보이게(한 겹 그림자는 밋밋했다)
         for k, a in ((6, 6), (4, 10), (2, 16), (1, 22)):
             p.fillRect(r.adjusted(-k + 1, -k + 3, k + 1, k + 3), QColor(0, 0, 0, a))
-        p.fillRect(r, Qt.GlobalColor.white)
+        p.fillRect(r, self.view.page_color())
         if self.pm is not None:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.pm_zoom != self.view.zoom)
             p.drawPixmap(r, self.pm, QRectF(self.pm.rect()))
         else:
             self.view.need_render(self.index)
+        if self.view.show_grid:
+            self.view.paint_grid(p, self)
         self.view.paint_overlay(p, self.index)
+
+
+class Ruler(QWidget):
+    """보기 위·왼쪽 눈금자(뷰포트 여백 자리에 얹는다). 그리기는 PageView.paint_ruler."""
+    def __init__(self, view: "PageView", horizontal: bool):
+        super().__init__(view)
+        self.view = view
+        self.horizontal = horizontal
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        try:
+            self.view.paint_ruler(p, self.horizontal, self.width(), self.height())
+        finally:
+            p.end()
 
 
 @dataclass
@@ -225,6 +324,7 @@ class PageView(QGraphicsView):
     toolDone = Signal(str)  # 도구 하나 쓰고 나서(스탬프 등은 계속 쓰기)
     requestDialog = Signal(str, object)  # 화면에 대화상자를 부탁(종류, 자료)
     toolChanged = Signal(str)  # 속성 패널이 그 도구의 기억해 둔 모양을 얹는다
+    shared_prefs: dict | None = None   # 마지막으로 받은 환경 설정(sync_prefs). 새로 여는 문서도 같은 배경·격자로 시작
 
     def __init__(self, doc: Document, parent=None):
         super().__init__(parent)
@@ -256,6 +356,17 @@ class PageView(QGraphicsView):
         self.form_mode = False      # 양식 칸 만들기·편집
         self.read_mode = False
         self.show_annots = True
+        self.cover_separate = False   # 두 쪽 보기에서 첫 쪽(표지)만 혼자
+        self.bg_mode = "default"      # 배경 모드(BG_MODES)
+        self.show_grid = False
+        self.show_ruler = False
+        self.smooth_scroll = True     # 휠 스크롤을 부드럽게
+        self.unit = "cm"              # 눈금자 단위
+        self.grid = grid_spec(None)
+        self._scroll_anim: QPropertyAnimation | None = None
+        self._rulers: tuple = ()
+        if PageView.shared_prefs is not None:   # 앞서 연 문서가 받은 환경 설정(새 탭이 처음부터 같은 배경으로 그리게)
+            self._read_prefs(PageView.shared_prefs)
         self.rotation_cache: dict[int, int] = {}
         self.words_cache: dict[int, list[tuple]] = {}
         self.blocks_cache: dict[int, list[dict]] = {}  # 편집 모드 글자 덩어리(문서가 바뀌면 비움)
@@ -317,6 +428,164 @@ class PageView(QGraphicsView):
         if hasattr(self, "worker"):
             self.worker.annots = on
 
+    # ── 보기 설정(배경·격자·눈금자·부드러운 스크롤) ──────────────────
+    def _read_prefs(self, prefs: dict):
+        self.bg_mode = prefs.get("view_bg") if prefs.get("view_bg") in BG_MODES else "default"
+        self.smooth_scroll = bool(prefs.get("smooth_scroll", True))
+        self.unit = prefs.get("unit") if prefs.get("unit") in UNIT_PT else "cm"
+        self.grid = grid_spec(prefs)
+
+    def sync_prefs(self, prefs: dict):
+        """환경 설정이 바뀌었으면 얹는다(배경이 바뀌면 쪽을 다시 그림). 바뀐 것이 없으면 아무 일도 안 한다."""
+        PageView.shared_prefs = prefs
+        old = (self.bg_mode, self.smooth_scroll, self.unit, self.grid)
+        self._read_prefs(prefs)
+        if old == (self.bg_mode, self.smooth_scroll, self.unit, self.grid):
+            return
+        if old[0] != self.bg_mode:
+            self._repaint_pages()
+        self.viewport().update()
+
+    def set_bg_mode(self, mode: str):
+        if mode not in BG_MODES or mode == self.bg_mode:
+            return
+        self.bg_mode = mode
+        self._repaint_pages()
+
+    def _repaint_pages(self):
+        """쪽 그림을 버리고 다시 그린다(문서는 그대로라 docChanged 는 안 낸다)."""
+        self.worker.invalidate()
+        self._pending.clear()
+        for it in self.items:
+            it.pm = None
+            it.update()
+        self.viewport().update()
+        QTimer.singleShot(0, self._request_visible)
+
+    def page_color(self) -> QColor:
+        """그림이 오기 전 쪽 자리 색(흰 종이에 배경 모드를 얹은 색)."""
+        _, tint, invert = BG_MODES.get(self.bg_mode, BG_MODES["default"])
+        base = 0 if invert else 255
+        if tint is None:
+            return QColor(base, base, base)
+        return QColor(*(base * c // 255 for c in tint))
+
+    def drawBackground(self, p: QPainter, rect: QRectF):
+        canvas = BG_MODES.get(self.bg_mode, BG_MODES["default"])[0]
+        if canvas is None:   # 기본은 테마 바탕(창이 setBackgroundBrush 로 정함)
+            super().drawBackground(p, rect)
+        else:
+            p.fillRect(rect, QColor(canvas))
+
+    def set_grid(self, on: bool):
+        self.show_grid = bool(on)
+        self.viewport().update()
+
+    def set_ruler(self, on: bool):
+        self.show_ruler = bool(on)
+        if on and not self._rulers:
+            self._rulers = (Ruler(self, True), Ruler(self, False))
+        self.setViewportMargins(RULER if on else 0, RULER if on else 0, 0, 0)
+        for r in self._rulers:
+            r.setVisible(self.show_ruler)
+        self._place_rulers()
+        self._update_rulers()
+
+    def paint_grid(self, p: QPainter, it: "PageItem"):
+        """쪽 위 격자(쪽 왼쪽 위에서 오프셋만큼 떨어져 간격마다, 사이는 세분한 옅은 선)."""
+        g = self.grid
+        z = self.zoom
+        r = it.page_rect()
+        col = QColor(g["color"])
+        sub = QColor(col); sub.setAlpha(60)
+        col.setAlpha(150)
+        p.save()
+        p.setClipRect(r)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        for step, off, horizontal in ((g["w"], g["left"], False), (g["h"], g["top"], True)):
+            minor = step / g["sub"]
+            if minor * z < 3:   # 너무 촘촘하면 세분 선은 건너뛴다
+                minor = step
+            length = r.height() if not horizontal else r.width()
+            end = (r.width() if not horizontal else r.height()) / z
+            k = math.floor(-off / minor)
+            while True:
+                v = off + k * minor
+                if v > end:
+                    break
+                if v >= 0:
+                    major = abs((v - off) / step - round((v - off) / step)) < 1e-6
+                    p.setPen(QPen(col if major else sub, 0))
+                    x = v * z
+                    if horizontal:
+                        p.drawLine(QPointF(0, x), QPointF(length, x))
+                    else:
+                        p.drawLine(QPointF(x, 0), QPointF(x, length))
+                k += 1
+        p.restore()
+
+    def _place_rulers(self):
+        if not self._rulers:
+            return
+        top, left = self._rulers
+        vp = self.viewport().geometry()
+        top.setGeometry(vp.left() - RULER, vp.top() - RULER, vp.width() + RULER, RULER)
+        left.setGeometry(vp.left() - RULER, vp.top(), RULER, vp.height())
+        top.raise_(); left.raise_()
+
+    def _update_rulers(self):
+        for r in self._rulers:
+            r.update()
+
+    def paint_ruler(self, p: QPainter, horizontal: bool, w: int, h: int):
+        """눈금자 하나(지금 쪽 왼쪽 위가 0, 환경 설정 단위). 위 눈금자는 왼쪽 RULER px 가 모서리."""
+        p.fillRect(0, 0, w, h, QColor("#F3F3F3"))
+        p.setPen(QPen(QColor("#B0B0B0"), 0))
+        if horizontal:
+            p.drawLine(0, h - 1, w, h - 1)
+        else:
+            p.drawLine(w - 1, 0, w - 1, h)
+        if not self.items:
+            return
+        i = max(0, min(self.current, len(self.items) - 1))
+        origin = self.mapFromScene(self.items[i].pos())
+        unit_pt = UNIT_PT.get(self.unit, UNIT_PT["cm"])
+        major_u, minor_n = RULER_TICKS.get(self.unit, (1, 10))
+        px_unit = unit_pt * self.zoom
+        mult = 1
+        while major_u * mult * px_unit < 40:   # 숫자가 겹치지 않게 큰 눈금을 1·2·5·10… 배로 넓힌다
+            mult = mult * 5 // 2 if str(mult)[0] == "2" else mult * 2
+        major = major_u * mult
+        minor = major / (minor_n if mult == 1 else 5 if str(mult)[0] in "15" else 4)
+        f = QFont(self.font()); f.setPixelSize(9); p.setFont(f)
+        p.setPen(QPen(QColor("#505050"), 0))
+        shift = RULER if horizontal else 0
+        o = origin.x() if horizontal else origin.y()
+        length = (w - shift) if horizontal else h
+        step_px = minor * px_unit
+        k = math.floor(-o / step_px)
+        while True:
+            pos = o + k * step_px
+            if pos > length:
+                break
+            if pos >= 0:
+                v = k * minor
+                is_major = abs(v / major - round(v / major)) < 1e-6
+                tick = 8 if is_major else 4
+                if horizontal:
+                    x = shift + pos
+                    p.drawLine(QPointF(x, h - tick), QPointF(x, h - 1))
+                    if is_major:
+                        p.drawText(QPointF(x + 2, 9), f"{round(v):g}")
+                else:
+                    p.drawLine(QPointF(w - tick, pos), QPointF(w - 1, pos))
+                    if is_major:
+                        p.save(); p.translate(3, pos + 2); p.rotate(90)
+                        p.drawText(QPointF(0, 0), f"{round(v):g}"); p.restore()
+            k += 1
+        if horizontal:
+            p.fillRect(0, 0, RULER - 1, h - 1, QColor("#F3F3F3"))
+
     # ── 배치 ──────────────────────────────────────────────────
     def close(self):
         # 닫은 뒤에도 창 맞춤 타이머·singleShot 이 돌아 닫힌 문서를 읽다 「document closed」 가 났다
@@ -359,9 +628,15 @@ class PageView(QGraphicsView):
         if self.layout_mode == "single":
             return [self.current]
         if self.layout_mode == "facing":
-            a = self.current - (self.current % 2)
-            return [i for i in (a, a + 1) if i < n]
+            a = self.row_start(self.current)
+            return [i for i in ((a,) if self.cover_separate and a == 0 else (a, a + 1)) if i < n]
         return list(range(n))
+
+    def row_start(self, i: int) -> int:
+        """두 쪽 보기에서 i 쪽이 든 줄의 첫 쪽(표지 따로면 0쪽 혼자, 그다음부터 둘씩)."""
+        if not self.cover_separate:
+            return i - i % 2
+        return 0 if i <= 0 else i - (i - 1) % 2
 
     def relayout(self):
         z = self.zoom
@@ -385,9 +660,15 @@ class PageView(QGraphicsView):
                 it.setPos((maxw - it.w) / 2 + MARGIN, it.pos().y())
             self.scene_.setSceneRect(0, 0, maxw + 2 * MARGIN, y + MARGIN)
         else:
-            rows = [pages[k:k + 2] for k in range(0, len(pages), 2)]
+            if self.cover_separate and pages and pages[0] == 0:
+                rest = pages[1:]
+                rows = [[0]] + [rest[k:k + 2] for k in range(0, len(rest), 2)]
+            else:
+                rows = [pages[k:k + 2] for k in range(0, len(pages), 2)]
             for row in rows:
                 x = MARGIN
+                if row == [0] and self.cover_separate:   # 표지는 오른쪽 칸(책을 펼친 모양)
+                    x += self.page_rect_pt(0).width * z + GAP
                 rh = 0
                 for i in row:
                     it = self.items[i]
@@ -403,6 +684,7 @@ class PageView(QGraphicsView):
         self._shown = list(pages)
         self._tops = [self.items[i].pos().y() for i in pages]
         self.viewport().update()
+        self._update_rulers()
         QTimer.singleShot(0, self._request_visible)
 
     def set_layout_mode(self, mode: str):
@@ -410,9 +692,14 @@ class PageView(QGraphicsView):
         self.relayout()
         self.goto(self.current)
 
+    def set_cover_separate(self, on: bool):
+        self.cover_separate = bool(on)
+        self.relayout()
+        self.goto(self.current, remember=False)
+
     # ── 확대 ──────────────────────────────────────────────────
     def set_zoom(self, z: float, anchor: QPointF | None = None):
-        z = max(0.1, min(8.0, z))
+        z = max(ZOOM_MIN, min(ZOOM_MAX, z))
         if abs(z - self.zoom) < 1e-4:
             return
         old = self.zoom
@@ -428,8 +715,8 @@ class PageView(QGraphicsView):
         self.centerOn(new_pt + (QPointF(self.viewport().width() / 2, self.viewport().height() / 2) - vp))
         self.zoomChanged.emit(z)
 
-    # 확대·축소 단추가 건너는 배율(단계표에서 10~800% 만). Ctrl+휠은 1.1배씩 부드럽게
-    STEPS = (0.10, 0.15, 0.25, 1 / 3, 0.50, 0.75, 1.00, 1.25, 1.50, 2.00, 3.00, 4.00, 6.00, 8.00)
+    # 확대·축소 단추가 건너는 배율(단계표에서 5~1600% 만). Ctrl+휠은 1.1배씩 부드럽게
+    STEPS = (0.05, 0.10, 0.15, 0.25, 1 / 3, 0.50, 0.75, 1.00, 1.25, 1.50, 2.00, 3.00, 4.00, 6.00, 8.00, 12.00, 16.00)
 
     def zoom_in(self):
         self.zoom_mode = "fixed"
@@ -438,6 +725,21 @@ class PageView(QGraphicsView):
     def zoom_out(self):
         self.zoom_mode = "fixed"
         self.set_zoom(next((s for s in reversed(self.STEPS) if s < self.zoom * 0.999), self.STEPS[0]))
+
+    def zoom_to_rect(self, r: QRectF, click: bool = False, at: QPointF | None = None):
+        """영역 확대: 끈 네모가 창에 차게. 한 번 누르면 그 자리를 닻으로 한 칸 확대."""
+        self.zoom_mode = "fixed"
+        if click or r.width() < 4 or r.height() < 4:
+            nxt = next((s for s in self.STEPS if s > self.zoom * 1.001), self.STEPS[-1])
+            self.set_zoom(nxt, QPointF(self.mapFromScene(at)) if at is not None else None)
+            return
+        vw, vh = self.viewport().width() - 8, self.viewport().height() - 8
+        z = self.zoom * min(vw / r.width(), vh / r.height())
+        c = r.center()
+        old = self.zoom
+        self.set_zoom(z)
+        ratio = self.zoom / old
+        self.centerOn(QPointF(c.x() * ratio, c.y() * ratio))
 
     def set_zoom_mode(self, mode: str):
         self.zoom_mode = mode
@@ -464,6 +766,7 @@ class PageView(QGraphicsView):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        self._place_rulers()
         self._fit_timer.start(80)
 
     # ── 그리기 요청 ────────────────────────────────────────────
@@ -471,7 +774,13 @@ class PageView(QGraphicsView):
         if i in self._pending:
             return
         self._pending.add(i)
-        self.worker.request(i, self.zoom)
+        self.worker.request(i, self.render_zoom(i))
+
+    def render_zoom(self, i: int) -> float:
+        """i 쪽을 그릴 배율. 그림이 RENDER_MAX_PX 를 넘으면 줄여 그리고 화면에서 늘린다."""
+        r = self.page_rect_pt(i)
+        area = max(r.width * r.height, 1.0)
+        return min(self.zoom, math.sqrt(RENDER_MAX_PX / area))
 
     def _request_visible(self):
         if self.closed:
@@ -479,7 +788,7 @@ class PageView(QGraphicsView):
         vis = self.visible_pages()
         for i in vis:
             it = self.items[i]
-            if it.pm is None or it.pm_zoom != self.zoom:
+            if it.pm is None or abs(it.pm_zoom - self.render_zoom(i)) > 1e-6:
                 self.need_render(i)
         self._evict(vis)
 
@@ -515,7 +824,7 @@ class PageView(QGraphicsView):
         if gen != self.worker.gen or page >= len(self.items):
             return
         it = self.items[page]
-        it.pm = QPixmap.fromImage(img)
+        it.pm = QPixmap.fromImage(tint_image(img, self.bg_mode))
         it.pm_zoom = zoom
         self._held.add(page)
         it.update()
@@ -556,6 +865,7 @@ class PageView(QGraphicsView):
 
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
+        self._update_rulers()
         self._update_current()
         QTimer.singleShot(0, self._request_visible)
 
@@ -604,12 +914,18 @@ class PageView(QGraphicsView):
         QTimer.singleShot(0, self._request_visible)
 
     def next_page(self):
-        step = 2 if self.layout_mode.startswith("facing") else 1
-        self.goto(self.current + step, remember=False)
+        if self.layout_mode.startswith("facing"):
+            a = self.row_start(self.current)
+            self.goto(a + (1 if self.cover_separate and a == 0 else 2), remember=False)
+        else:
+            self.goto(self.current + 1, remember=False)
 
     def prev_page(self):
-        step = 2 if self.layout_mode.startswith("facing") else 1
-        self.goto(self.current - step, remember=False)
+        if self.layout_mode.startswith("facing"):
+            a = self.row_start(self.current)
+            self.goto(self.row_start(a - 1) if a > 0 else 0, remember=False)
+        else:
+            self.goto(self.current - 1, remember=False)
 
     def view_pos(self) -> tuple[int, float, int]:
         """지금 보는 자리: (쪽, 화면 맨 위가 그 쪽 위에서 몇 pt 아래인가, 가로 스크롤 값)."""
@@ -804,7 +1120,30 @@ class PageView(QGraphicsView):
                 self.next_page(); e.accept(); return
             if e.angleDelta().y() > 0 and at_top:
                 self.prev_page(); e.accept(); return
+        dy = e.angleDelta().y()
+        if (self.smooth_scroll and dy and e.pixelDelta().isNull() and not e.angleDelta().x()
+                and not e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            self._smooth_scroll(-dy / 120 * QApplication.wheelScrollLines() * self.verticalScrollBar().singleStep())
+            e.accept()
+            return
         super().wheelEvent(e)
+
+    def _smooth_scroll(self, dy: float):
+        """휠 한 칸을 짧은 애니메이션으로. 도는 중에 또 굴리면 남은 거리에 이어 붙인다."""
+        sb = self.verticalScrollBar()
+        a = self._scroll_anim
+        start = sb.value()
+        running = a is not None and a.state() == QPropertyAnimation.State.Running
+        target = (a.endValue() if running else start) + dy
+        target = int(max(sb.minimum(), min(sb.maximum(), target)))
+        if a is None:
+            a = self._scroll_anim = QPropertyAnimation(sb, b"value", self)
+            a.setDuration(140)
+            a.setEasingCurve(QEasingCurve.Type.OutCubic)
+        a.stop()
+        a.setStartValue(start)
+        a.setEndValue(target)
+        a.start()
 
     def mousePressEvent(self, e: QMouseEvent):
         sp = self.mapToScene(e.position().toPoint())
@@ -1032,6 +1371,8 @@ class PageView(QGraphicsView):
                         self.status.emit(str(ex))
                     else:
                         self._shape_done(i, pr, r, click=True)
+            elif t == "zoomarea":
+                self.zoom_to_rect(r, small, sp)
             elif not small:
                 self._shape_done(i, pr, r)
             self.viewport().update()
@@ -1106,11 +1447,13 @@ class PageView(QGraphicsView):
             self.goto(self.doc.page_count - 1); return
         # 다음 쪽: PageDown · Ctrl+↓ · Enter (한 쪽·두 쪽 보기는 → 도), 이전 쪽: PageUp · Ctrl+↑ · Shift+Enter (←)
         enter = k in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        # ← → 는 가로로 넘길 것이 없으면(한 쪽·두 쪽 보기, 또는 가로 막대가 없을 때) 쪽 넘기기
+        flip = self.layout_mode in ("single", "facing") or self.horizontalScrollBar().maximum() <= 0
         if (k == Qt.Key.Key_PageDown or (ctrl and k == Qt.Key.Key_Down) or (enter and not shift)
-                or (k == Qt.Key.Key_Right and self.layout_mode in ("single", "facing"))):
+                or (k == Qt.Key.Key_Right and flip)):
             self.next_page(); return
         if (k == Qt.Key.Key_PageUp or (ctrl and k == Qt.Key.Key_Up) or (enter and shift)
-                or (k == Qt.Key.Key_Left and self.layout_mode in ("single", "facing"))):
+                or (k == Qt.Key.Key_Left and flip)):
             self.prev_page(); return
         if ctrl and k == Qt.Key.Key_Plus and e.modifiers() & Qt.KeyboardModifier.KeypadModifier:
             self.zoom_in(); return   # 숫자 키판 + (큰 키판 Ctrl++ 는 Ctrl+Shift+= 오른쪽 회전이라 단축키 표에 없다)

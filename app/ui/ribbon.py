@@ -87,16 +87,21 @@ TABS: list[tuple[str, str, list]] = [
     ("view", "보기", [
         ("zoomout", "zoomout", "", "action", None), ("zoomin", "zoomin", "", "action", None), SEP,
         ("zoom_menu", "actual", "확대 방식", "menu", [("zoom_actual", "실제 페이지 크기에 맞추기"), ("zoom_width", "창 너비에 맞추기"),
-                                             ("zoom_height", "창 높이에 맞추기"), ("zoom_page", "창 크기에 맞추기")]),
+                                             ("zoom_height", "창 높이에 맞추기"), ("zoom_page", "창 크기에 맞추기"), MENU_SEP,
+                                             ("fullscreen", "전체 화면"), ("zoom_area", "영역 확대")]),
         ("layout_menu", "continuous", "보기 방식", "menu", [("layout_single", "한 페이지씩 보기"), ("layout_continuous", "스크롤 활성화 상태로 페이지 보기"),
-                                                   ("layout_facing", "양 옆으로 두페이지 보기"), ("layout_facing_continuous", "스크롤 활성화 상태로 양 옆으로 보기")]),
-        ("canvas_menu", "background", "바탕색", "menu", [("canvas_gray", "회색 바탕"), ("canvas_white", "흰 바탕"), ("canvas_dark", "어두운 바탕"), ("canvas_sepia", "세피아")]), SEP,
+                                                   ("layout_facing", "양 옆으로 두페이지 보기"), ("layout_facing_continuous", "스크롤 활성화 상태로 양 옆으로 보기"),
+                                                   MENU_SEP, ("layout_cover", "표지 따로 보기")]),
+        ("canvas_menu", "background", "배경", "menu", [("canvas_default", "기본"), ("canvas_day", "낮"), ("canvas_eye", "눈 보호"),
+                                                   ("canvas_night", "밤"), ("canvas_parchment", "양피지")]), SEP,
         ("read_mode", "read", "읽기 모드", "toggle", None),
-        ("rotate_view", "rotate", "회전시켜 보기", "menu", [("rotate_view_cw", "시계 방향"), ("rotate_view_ccw", "반시계 방향")]), SEP,
+        ("rotate_view", "rotate", "보기 회전", "menu", [("rotate_view_cw", "시계 방향 (쪽 회전으로 저장됨)"),
+                                                ("rotate_view_ccw", "반시계 방향 (쪽 회전으로 저장됨)")]), SEP,
         ("auto_bookmark", "bookmark", "자동 북마크", "action", None),
-        ("grid", "grid", "눈금자와 격자", "menu", [("toggle_grid", "격자 보이기·숨기기"), ("toggle_ruler", "눈금자 보이기·숨기기")]),
-        ("tile", "tile", "타일", "menu", [("tile_h", "가로 제목"), ("tile_v", "세로 제목")]), SEP,
-        ("fullscreen", "fullscreen", "전체 화면", "action", None), ("dark", "dark", "어두운 화면", "toggle", None),
+        ("compare", "compare", "비교", "action", None), ("snapshot_tool", "snapshot", "캡처", "action", None),
+        ("grid", "grid", "눈금자 & 격자", "menu", [("toggle_grid", "격자"), ("toggle_ruler", "눈금자")]),
+        ("tile", "tile", "타일", "menu", [("tile_h", "가로 바둑판식 배열"), ("tile_v", "세로 바둑판식 배열")]), SEP,
+        ("dark", "dark", "어두운 화면", "toggle", None),
     ]),
     ("page", "구성", [
         ("thumb_out", "zoomout", "", "action", None), ("thumb_in", "zoomin", "", "action", None), SEP,
@@ -144,7 +149,7 @@ LABELS = {k: lbl for _, _, items in TABS for it in items if it != SEP for k, lbl
 LABELS.update({"hand": "손", "select": "선택", "zoomin": "확대", "zoomout": "축소", "pencil": "연필", "eraser": "지우개",
                "highlight": "강조", "underline": "밑줄", "typewriter": "타자기", "note": "노트", "rect": "직사각형", "stamp": "스탬프",
                "signature": "서명", "attach": "첨부 파일", "measure": "측정", "show_annots": "주석 보이기", "zoom_menu": "확대 방식",
-               "layout_menu": "보기 방식", "canvas_menu": "바탕색", "thumb_out": "썸네일 축소", "thumb_in": "썸네일 확대",
+               "layout_menu": "보기 방식", "canvas_menu": "배경", "thumb_out": "썸네일 축소", "thumb_in": "썸네일 확대",
                "rotate_left": "왼쪽 회전", "rotate_right": "오른쪽 회전", "delete_pages": "페이지 삭제", "ftext": "텍스트 칸",
                "fcheck": "체크 박스", "fradio": "라디오 버튼", "fcombo": "콤보 박스", "flist": "목록 박스", "fbutton": "누름 버튼",
                "fimage": "이미지", "fsign": "디지털 서명 칸", "fdate": "날짜 칸", "areahl": "영역 강조", "strike": "취소선",
@@ -174,6 +179,9 @@ def keep_tool(settings: dict, key: str) -> bool:
     if key == "eraser":
         return True
     return bool((settings.get("keep_tool") or {}).get(key, key not in KEEP_OFF))
+
+# 열 때 지금 상태에 체크를 다는 메뉴(창의 view_checked(항목)이 켜짐을 알려 준다)
+CHECK_MENUS = {"zoom_menu", "layout_menu", "canvas_menu", "grid"}
 
 COMMENT_ANNOT_KEYS = [it[0] for t, _, items in TABS if t == "comment" for it in items
                       if it != SEP and it[0] not in ("show_annots", "snapshot")]
@@ -306,7 +314,9 @@ class Ribbon(QWidget):
                 b.setCheckable(True)
             if menu_items:
                 m = QMenu(b)
-                self._fill_menu(m, menu_items, b)
+                self._fill_menu(m, menu_items, b, check=key in CHECK_MENUS)
+                if key in CHECK_MENUS:
+                    m.aboutToShow.connect(lambda m=m: self._sync_checks(m))
                 b.setMenu(m)
                 split = kind == "tool" or key == "edit_all"
                 b.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup if split else QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -352,7 +362,7 @@ class Ribbon(QWidget):
             c.setEditText(P.format_range(pages, labels))
         c.blockSignals(False)
 
-    def _fill_menu(self, m: QMenu, items: list, btn: QToolButton):
+    def _fill_menu(self, m: QMenu, items: list, btn: QToolButton, check: bool = False):
         for it in items:
             if it == MENU_SEP:
                 m.addSeparator()
@@ -363,7 +373,20 @@ class Ribbon(QWidget):
                     a = m.addAction(it[1], lambda k=it[0]: self._menu_pick(k, btn))
                     a.setCheckable(True); a.setData(it[0][len("edit_target_"):])
                 else:
-                    m.addAction(it[1], lambda k=it[0]: self._menu_pick(k, btn))
+                    a = m.addAction(it[1], lambda k=it[0]: self._menu_pick(k, btn))
+                    if check:
+                        a.setData("check:" + it[0])
+
+    def _sync_checks(self, m: QMenu):
+        """메뉴를 열 때 지금 켜진 항목에 체크(맞춤 방식·보기 방식·표지 따로·배경·격자·눈금자)."""
+        ask = getattr(self.window(), "view_checked", None)
+        for a in m.actions():
+            d = a.data()
+            if isinstance(d, str) and d.startswith("check:"):
+                on = ask(d[6:]) if ask else None
+                a.setCheckable(on is not None)
+                if on is not None:
+                    a.setChecked(bool(on))
 
     def _menu_pick(self, key: str, btn: QToolButton):
         if key in TOOL_KEYS and btn.property("kind") == "tool":
