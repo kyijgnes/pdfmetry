@@ -1,6 +1,7 @@
 """가운데 문서 보기: 쪽 그림(따로 도는 일꾼이 그림)·확대·보기 방식·도구(손·선택·주석·편집·양식).
 
-좌표: 화면 → 쪽(회전 반영된 fitz page.rect 좌표) → 회전 전 좌표(주석·글자가 쓰는 좌표).
+좌표: 화면 → 보기 회전 뒤 쪽 → 쪽(회전 반영된 fitz page.rect 좌표) → 회전 전 좌표(주석·글자가 쓰는 좌표).
+보기 회전(view_rot)은 화면에서만 돈다. 파일의 /Rotate 는 그대로이고 저장·다시 열기에 안 남는다.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from dataclasses import dataclass, field
 import fitz
 from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter,
-                           QPainterPath, QPen, QPixmap, QPolygonF, QWheelEvent)
+                           QPainterPath, QPen, QPixmap, QPolygonF, QTransform, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsScene, QGraphicsView, QInputDialog, QMenu,
                                QStyleOptionGraphicsItem, QWidget)
 
@@ -191,6 +192,7 @@ class RenderWorker(QThread):
         self._stop = False
         self.gen = 0
         self.annots = True  # 주석 보이기(보기 설정)
+        self.rot = 0   # 보기 회전(바꿀 때 invalidate 로 gen 을 올려 옛 각으로 그린 것은 버려진다)
         self.big_image: dict[int, bool] = {}   # 쪽마다: 100만 화소 넘는 그림이 있나(띠로 나누면 덜 멈추는 쪽). 문서가 바뀌면 비움
 
     def request(self, page: int, zoom: float):
@@ -223,6 +225,7 @@ class RenderWorker(QThread):
                 break
             if gen != self.gen:
                 continue
+            rot = self.rot
             try:
                 big_image = self.big_image
                 with self.doc.lock:
@@ -245,6 +248,8 @@ class RenderWorker(QThread):
                 ms = (time.perf_counter() - t0) * 1000 / max(mp, 0.05)
                 ms_per_mp = ms if ms_per_mp is None else ms_per_mp * 0.6 + ms * 0.4
                 img = _qimage(pix)
+                if rot:
+                    img = img.transformed(QTransform().rotate(rot))
             except Exception:  # noqa: BLE001
                 continue
             if gen == self.gen:
@@ -368,7 +373,7 @@ class PageView(QGraphicsView):
         self._rulers: tuple = ()
         if PageView.shared_prefs is not None:   # 앞서 연 문서가 받은 환경 설정(새 탭이 처음부터 같은 배경으로 그리게)
             self._read_prefs(PageView.shared_prefs)
-        self.rotation_cache: dict[int, int] = {}
+        self.view_rot = 0   # 보기 회전 0·90·180·270(시계 방향, 화면에서만. 탭마다 따로)
         self.words_cache: dict[int, list[tuple]] = {}
         self.blocks_cache: dict[int, list[dict]] = {}  # 편집 모드 글자 덩어리(문서가 바뀌면 비움)
 
@@ -594,11 +599,49 @@ class PageView(QGraphicsView):
         self._fit_timer.stop()
         self.worker.stop()
 
-    def page_rect_pt(self, i: int) -> fitz.Rect:
-        """쪽 크기(회전 반영). 확대할 때마다 쪽마다 fitz 에 물으면 959쪽 문서에서 한 번에 15ms 가 들어 rebuild 때 읽어 둔다."""
+    def _disp_rect(self, i: int) -> fitz.Rect:
+        """쪽 크기(파일 회전 반영, 보기 회전 전). 확대할 때마다 쪽마다 fitz 에 물으면 959쪽 문서에서 한 번에 15ms 가 들어 rebuild 때 읽어 둔다."""
         if i < len(self._rects):
             return self._rects[i]
         return self.doc.fitz[i].rect
+
+    def page_rect_pt(self, i: int) -> fitz.Rect:
+        """화면에 보이는 쪽 크기(파일 회전·보기 회전 반영)."""
+        r = self._disp_rect(i)
+        return fitz.Rect(0, 0, r.height, r.width) if self.view_rot in (90, 270) else r
+
+    def view_matrix(self, i: int) -> fitz.Matrix:
+        """쪽(파일 회전 반영) 좌표 → 보기 회전 뒤 좌표. 시계 방향, 돌린 쪽의 왼쪽 위가 원점."""
+        r = self._disp_rect(i)
+        w, h = r.width, r.height
+        return {90: fitz.Matrix(0, 1, -1, 0, h, 0), 180: fitz.Matrix(-1, 0, 0, -1, w, h),
+                270: fitz.Matrix(0, -1, 1, 0, 0, w)}.get(self.view_rot, fitz.Matrix(1, 0, 0, 1, 0, 0))
+
+    def set_view_rotation(self, deg: int):
+        """보기 회전을 deg(90 의 배수)로. 보던 쪽을 그대로 보여 준다. 파일은 안 바뀐다."""
+        deg = int(deg) % 360 // 90 * 90
+        if deg == self.view_rot or self.closed:
+            return
+        i = self.current
+        self.view_rot = deg
+        self.worker.rot = deg
+        self.worker.invalidate()
+        self._pending.clear()
+        for it in self.items:
+            it.pm = None
+        self._held = set()
+        self.relayout()
+        self._apply_fit()
+        if self.items:
+            self.goto(i, remember=False)
+        self.viewport().update()
+
+    def rotate_view(self, delta: int):
+        self.set_view_rotation(self.view_rot + delta)
+
+    def text_rotation(self, i: int) -> int:
+        """새 글이 지금 화면에 바로 서는 방향(쪽 회전 + 보기 회전)."""
+        return (self.doc.fitz[i].rotation + self.view_rot) % 360
 
     def rebuild(self, mapping: list[int | None] | None = None, dirty=()):
         """쪽 수·크기가 바뀌었을 때 전부 다시 놓는다. mapping[새 쪽] = 옛 쪽 이면 그 그림을 옮겨 쓴다
@@ -607,7 +650,6 @@ class PageView(QGraphicsView):
         self.scene_.clear()
         self.items = []
         self.words_cache.clear(); self.blocks_cache.clear()
-        self.rotation_cache.clear()
         n = self.doc.page_count
         with self.doc.lock:
             self._rects = [fitz.Rect(self.doc.fitz[i].rect) for i in range(n)]
@@ -979,12 +1021,16 @@ class PageView(QGraphicsView):
         it = self.items[i]
         lp = scene_pt - it.pos()
         p = fitz.Point(lp.x() / self.zoom, lp.y() / self.zoom)
+        if self.view_rot:
+            p = p * ~self.view_matrix(i)
         return p * self.doc.fitz[i].derotation_matrix
 
     def from_page_rect(self, i: int, r: fitz.Rect) -> QRectF:
         """회전 전 쪽 좌표 → 장면 좌표 QRectF."""
         it = self.items[i]
         rr = fitz.Rect(r) * self.doc.fitz[i].rotation_matrix
+        if self.view_rot:
+            rr = rr * self.view_matrix(i)
         rr.normalize()
         return QRectF(it.pos().x() + rr.x0 * self.zoom, it.pos().y() + rr.y0 * self.zoom,
                       rr.width * self.zoom, rr.height * self.zoom)
@@ -992,6 +1038,8 @@ class PageView(QGraphicsView):
     def from_page_point(self, i: int, p: fitz.Point) -> QPointF:
         it = self.items[i]
         q = fitz.Point(p) * self.doc.fitz[i].rotation_matrix
+        if self.view_rot:
+            q = q * self.view_matrix(i)
         return QPointF(it.pos().x() + q.x * self.zoom, it.pos().y() + q.y * self.zoom)
 
     def _scene_rect_to_page(self, i: int, r: QRectF) -> fitz.Rect:
@@ -1702,8 +1750,9 @@ class PageView(QGraphicsView):
             self.set_zoom(info["zoom"])
         i = max(0, min(info["to_page"], len(self.items) - 1))
         p = info["to_point"] or fitz.Point(0, 0)
-        x = int(self.items[i].pos().x() + p.x * self.zoom) if p.x > 0 else 0
-        self.set_view_pos(i, max(0.0, p.y), x)
+        q = p * self.view_matrix(i) if self.view_rot else p
+        x = int(self.items[i].pos().x() + q.x * self.zoom) if q.x > 0 else 0
+        self.set_view_pos(i, max(0.0, q.y), x)
 
     # ── 링크 고르기·옮기기 ─────────────────────────────────────
     def _links_editable(self) -> bool:
@@ -1752,7 +1801,12 @@ class PageView(QGraphicsView):
         i, y, x = self.view_pos()
         left = max(0.0, (x - self.items[i].pos().x()) / (self.zoom or 1)) if self.items else 0.0
         zoom = round(self.zoom, 4) if self.zoom_mode == "fixed" else 0.0
-        return fitz.Point(round(left, 1), max(0.0, y)), zoom
+        p = fitz.Point(left, y)
+        if self.view_rot and self.items:   # 돌린 화면의 왼쪽 위 → 쪽(파일 회전 반영) 좌표
+            r = self._disp_rect(i)
+            p = p * ~self.view_matrix(i)
+            p = fitz.Point(min(max(p.x, 0.0), r.width), min(max(p.y, 0.0), r.height))
+        return fitz.Point(round(max(0.0, p.x), 1), max(0.0, p.y)), zoom
 
     @staticmethod
     def link_hover_text(info: dict | None) -> str:
@@ -1894,7 +1948,10 @@ class PageView(QGraphicsView):
 
     def snapshot_to_clipboard(self, i: int, pr: fitz.Rect):
         pix = self.doc.render(i, max(2.0, self.zoom), clip=pr)
-        QApplication.clipboard().setImage(_qimage(pix))
+        img = _qimage(pix)
+        if self.view_rot:
+            img = img.transformed(QTransform().rotate(self.view_rot))
+        QApplication.clipboard().setImage(img)
         self.status.emit("화면을 클립보드에 복사했습니다")
         self.toolDone.emit("snapshot")
 

@@ -1151,8 +1151,8 @@ class MainWindow(QMainWindow):
                     self.prefs["view_bg"] = mode; save_settings(self.settings)
                     for x in self.tabs: x.viewer.sync_prefs(self.prefs)
             elif key.startswith("rotate_view_"):
-                # 보기 회전 = 모든 쪽 회전(저장되는 회전). 화면에서만 돌리는 것은 다음에 따로
-                P.rotate(d, range(d.page_count), 90 if key.endswith("cw") else -90); t.changed(None, structural=True)
+                # 보기 회전: 화면에서만 돈다(파일 /Rotate 는 그대로, 탭마다 따로, 저장·닫기에 안 남음)
+                v.rotate_view(90 if key == "rotate_view_cw" else -90)   # "ccw" 도 "cw" 로 끝난다
             elif key == "fullscreen": fullscreen.get(self).toggle()
             elif key == "auto_bookmark": self.auto_bookmark(t)
             elif key in ("toggle_grid", "toggle_ruler"):
@@ -1373,7 +1373,8 @@ class MainWindow(QMainWindow):
                 if text.strip():
                     A.free_text(t.doc, i, rect, text, st["fontsize"], st["text_color"], st.get("fill"), st.get("border"),
                                 st.get("width", 0), st.get("opacity", 1.0), callout=callout,
-                                author=A.user_author(t.viewer.props["author"]), typewriter=(k == "typewriter"))
+                                author=A.user_author(t.viewer.props["author"]), typewriter=(k == "typewriter"),
+                                rotate=t.viewer.text_rotation(i))
                     t.changed([i])
                 t.viewer.toolDone.emit(k)
             sp = data.get("scene_pt") or v.from_page_rect(data["page"], data["rect"]).topLeft()   # 끌어 그린 네모면 왼쪽 위
@@ -1407,7 +1408,7 @@ class MainWindow(QMainWindow):
                 if t.viewer.closed:
                     return
                 if A.add_text(t.doc, i, rect, text, style["fontsize"], style["color"], style["bold"], style["align"],
-                              italic=style["italic"]):
+                              italic=style["italic"], rotate=t.viewer.text_rotation(i)):
                     t.changed([i])
                 self.on_tool("select" if not t.viewer.edit_mode else "edit")
             InlineText(v, data["page"], data["scene_pt"], self.prefs.get("addtext_style"), done, data.get("width"))
@@ -2120,9 +2121,8 @@ class MainWindow(QMainWindow):
         if len(hit) != 1:
             return None
         i, pr, inter = hit[0]
-        z = v.zoom
-        r = fitz.Rect((inter.left() - pr.left()) / z, (inter.top() - pr.top()) / z,
-                      (inter.right() - pr.left()) / z, (inter.bottom() - pr.top()) / z) & t.doc.fitz[i].rect
+        page = t.doc.fitz[i]
+        r = (v._scene_rect_to_page(i, inter) * page.rotation_matrix) & page.rect   # 보기 회전을 풀어 쪽 좌표로
         return None if r.is_empty else (i, r)
 
     def _batch_print(self, inputs: list[str], printer: str):
