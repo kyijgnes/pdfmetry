@@ -34,6 +34,8 @@ def to_rgb01(c: QColor) -> tuple[float, float, float]:
 def from_rgb01(c) -> QColor:
     if c is None:
         return QColor(0, 0, 0, 0)
+    if isinstance(c, str):   # 격자 색처럼 "#ff0000" 으로 적힌 값
+        return QColor(c)
     return QColor(int(c[0] * 255), int(c[1] * 255), int(c[2] * 255))
 
 

@@ -191,7 +191,10 @@ def test_background_modes_remembered(win, pdf):
     assert v.bg_mode == "day"
     win.on_action("canvas_parchment")
     # 다시 켠 창도 같은 배경
-    w2 = MainWindow(); w2.show(); w2.open_path(pdf); pump(0.3)
+    # 같은 파일은 이미 연 창으로 가므로 사본을 연다
+    import shutil
+    pdf2 = str(pdf).replace(".pdf", "_2.pdf"); shutil.copy(pdf, pdf2)
+    w2 = MainWindow(); w2.show(); w2.open_path(pdf2); pump(0.3)
     try:
         assert w2.prefs.get("view_bg") == "parchment" and w2.cur().viewer.bg_mode == "parchment"
     finally:
@@ -202,14 +205,14 @@ def test_background_modes_remembered(win, pdf):
 def test_grid_spec_from_prefs():
     g = V.grid_spec(None)
     assert abs(g["w"] - 72 / 2.54) < 1e-6 and g["sub"] == 3 and g["color"] == QColor("#FF0000")
-    g = V.grid_spec({"unit": "mm", "grid": {"w": 5, "h": "1in", "left": 2, "top": 0, "sub": 2, "color": "#00FF00"}})
-    assert abs(g["w"] - 5 * 72 / 25.4) < 1e-6 and abs(g["h"] - 72) < 1e-6 and abs(g["left"] - 2 * 72 / 25.4) < 1e-6
+    g = V.grid_spec({"unit": "mm", "grid": {"w": 14.0, "h": "1in", "left": "2", "top": 0, "sub": 2, "color": "#00FF00"}})
+    assert abs(g["w"] - 14.0) < 1e-6 and abs(g["h"] - 72) < 1e-6 and abs(g["left"] - 2 * 72 / 25.4) < 1e-6   # 숫자는 pt, 글자는 unit
     assert g["sub"] == 2 and g["color"] == QColor("#00FF00")
     assert V.grid_spec({"grid": {"color": [0, 0, 255]}})["color"] == QColor(0, 0, 255)
 
 
 def test_grid_and_ruler_draw(win, pdf):
-    win.prefs["grid"] = {"w": 1, "h": 1, "left": 0, "top": 0, "sub": 1, "color": "#0000FF"}
+    win.prefs["grid"] = {"w": 72 / 2.54, "h": 72 / 2.54, "left": 0, "top": 0, "sub": 1, "color": "#0000FF"}
     win.open_path(pdf); pump(0.3)
     v = win.cur().viewer
     v.zoom_mode = "fixed"; v.set_zoom(1.0); v.goto(0); pump(0.3)

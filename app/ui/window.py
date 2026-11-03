@@ -608,6 +608,7 @@ class MainWindow(QMainWindow):
             view = {"page": iv["page"], "y": 0, "x": 0}
         t.viewer.layout_mode = pl
         t.viewer.zoom_mode = zm
+        t.viewer.cover_separate = bool(view and view.get("cover"))   # 지난번 표지 따로 보기
         t.viewer.set_layout_mode(pl)
         t.viewer.props["author"] = self.prefs.get("author", "")
         t.viewer.props["measure_unit"] = self.prefs.get("unit", "cm")
@@ -676,7 +677,7 @@ class MainWindow(QMainWindow):
         view = next((r["view"] for r in rec if r["path"] == path and r.get("view")), None)
         rec[:] = [r for r in rec if r["path"] != path]
         rec.insert(0, {"path": path, "time": time.time(), **({"view": view} if view else {})})
-        del rec[self.prefs.get("recent_n", 30):]
+        del rec[self.prefs.get("recent_n", 20):]
         save_settings(self.settings)
 
     def open_dialog(self):

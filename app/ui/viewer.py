@@ -49,11 +49,11 @@ BG_MODES = {
 UNIT_PT = {"cm": 72 / 2.54, "mm": 72 / 25.4, "in": 72.0, "pt": 1.0, "pc": 12.0}
 # 눈금자: 단위마다 (큰 눈금 간격(단위), 작은 눈금 수)
 RULER_TICKS = {"cm": (1, 10), "mm": (10, 10), "in": (1, 8), "pt": (72, 6), "pc": (6, 6)}
-GRID_DEFAULT = {"w": 1.0, "h": 1.0, "left": 0.0, "top": 0.0, "sub": 3, "color": "#FF0000"}
+GRID_DEFAULT = {"w": 72 / 2.54, "h": 72 / 2.54, "left": 0.0, "top": 0.0, "sub": 3, "color": "#FF0000"}   # 간격·오프셋은 pt
 
 
 def _num_pt(v, unit: str, default: float) -> float:
-    """격자 값 하나를 pt 로. 숫자면 unit 단위, 「1cm」 처럼 단위를 붙인 글자도 받는다."""
+    """격자 값 하나를 pt 로. 숫자는 pt(환경 설정이 pt 로 저장), 「1cm」 처럼 단위를 붙인 글자도 받는다."""
     if isinstance(v, str):
         t = v.strip().lower()
         u = next((k for k in sorted(UNIT_PT, key=len, reverse=True) if t.endswith(k)), None)
@@ -63,9 +63,10 @@ def _num_pt(v, unit: str, default: float) -> float:
             v = float(t)
         except ValueError:
             v = default
-    elif not isinstance(v, (int, float)):
+        return float(v) * UNIT_PT.get(unit, UNIT_PT["cm"])
+    if not isinstance(v, (int, float)):
         v = default
-    return float(v) * UNIT_PT.get(unit, UNIT_PT["cm"])
+    return float(v)
 
 
 def _color(c, default: str = "#FF0000") -> QColor:
@@ -82,8 +83,8 @@ def grid_spec(prefs: dict | None) -> dict:
     prefs = prefs or {}
     unit = prefs.get("unit") if prefs.get("unit") in UNIT_PT else "cm"
     g = {**GRID_DEFAULT, **(prefs.get("grid") or {})}
-    w = _num_pt(g.get("w"), unit, 1.0)
-    h = _num_pt(g.get("h"), unit, 1.0)
+    w = _num_pt(g.get("w"), unit, UNIT_PT["cm"])
+    h = _num_pt(g.get("h"), unit, UNIT_PT["cm"])
     try:
         sub = max(1, min(20, int(g.get("sub") or 1)))
     except (TypeError, ValueError):

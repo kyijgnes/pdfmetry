@@ -5,14 +5,11 @@
 """
 from __future__ import annotations
 
-import base64
-import ctypes
 import os
 import re
-from ctypes import wintypes
 
 from PySide6.QtCore import QLocale, QRegularExpression, Qt
-from PySide6.QtGui import QFont, QRegularExpressionValidator
+from PySide6.QtGui import QColor, QFont, QRegularExpressionValidator
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox,
@@ -43,33 +40,14 @@ GRID = {"w": 72 / 2.54, "h": 72 / 2.54, "left": 0.0, "top": 0.0, "sub": 3, "colo
 BLANK = {"name": BLANK_NAME, "count": 1, "size": "A4", "w": 210 * MM, "h": 297 * MM, "landscape": False}
 
 
-# ── 사전 설정 비밀번호: 윈도우 DPAPI(이 사용자 계정으로만 풀림)로 덮어 base64 로 둔다 ──
-class _Blob(ctypes.Structure):
-    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+# 사전 설정 비밀번호는 열기 쪽(dlg_password)과 같은 형식으로 덮는다
+from .dlg_password import protect, unprotect  # noqa: E402,F401
 
 
-def protect(text: str) -> str:
-    raw = text.encode("utf-8")
-    src = _Blob(len(raw), ctypes.cast(ctypes.create_string_buffer(raw, len(raw)), ctypes.POINTER(ctypes.c_char)))
-    out = _Blob()
-    if not ctypes.windll.crypt32.CryptProtectData(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(out)):
-        raise OSError("비밀번호를 덮지 못했습니다")
-    try:
-        return base64.b64encode(ctypes.string_at(out.pbData, out.cbData)).decode("ascii")
-    finally:
-        ctypes.windll.kernel32.LocalFree(out.pbData)
-
-
-def unprotect(token: str) -> str:
-    raw = base64.b64decode(token)
-    src = _Blob(len(raw), ctypes.cast(ctypes.create_string_buffer(raw, len(raw)), ctypes.POINTER(ctypes.c_char)))
-    out = _Blob()
-    if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(out)):
-        raise OSError("비밀번호를 풀지 못했습니다")
-    try:
-        return ctypes.string_at(out.pbData, out.cbData).decode("utf-8")
-    finally:
-        ctypes.windll.kernel32.LocalFree(out.pbData)
+def _grid_color(c) -> QColor:
+    """격자 색은 [r,g,b](0~1)·[r,g,b](0~255)·"#rrggbb" 어느 것으로 적혀 있어도 받는다(뷰어 grid_spec 과 같게)."""
+    from .viewer import grid_spec
+    return grid_spec({"grid": {"color": c}})["color"]
 
 
 def blank_name(text: str) -> str:
@@ -335,7 +313,7 @@ class PreferencesDialog(QDialog):
         self.grid_left = UnitSpin(grid["left"], unit); f.addRow("왼쪽 끝으로 그리드 오프셋", self.grid_left)
         self.grid_top = UnitSpin(grid["top"], unit); f.addRow("위쪽 끝으로 그리드 오프셋", self.grid_top)
         self.grid_sub = QSpinBox(); self.grid_sub.setRange(0, 100); self.grid_sub.setValue(int(grid["sub"])); f.addRow("세분", self.grid_sub)
-        self.grid_color = D.ColorButton(tuple(grid["color"])); f.addRow("눈금선 색", self.grid_color)
+        self.grid_color = D.ColorButton(D.to_rgb01(_grid_color(grid["color"]))); f.addRow("눈금선 색", self.grid_color)
         v.addWidget(g2); v.addStretch(1)
         self.unit_group.idClicked.connect(self._unit_changed)
         return w
