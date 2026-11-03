@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     if first and not alone:
         w._receiver = single.Receiver(w.open_forwarded)
     w.show_initial()
+    if not alone:
+        w.autosave.offer_restore()   # 튕긴 뒤 다시 켰으면 자동 저장해 둔 사본을 열지 묻는다
     files = [p for p in argv if os.path.exists(p)]
     if not files and not after_update:
         w.reopen_last()

@@ -32,6 +32,7 @@ EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".csv", ".ods"}
 PPT_EXTS = {".pptx", ".ppt", ".pptm", ".odp"}
 HWP_EXTS = {".hwp", ".hwpx"}
 HTML_EXTS = {".html", ".htm", ".mht", ".mhtml"}
+TEXT_EXTS = {".txt", ".log", ".ini", ".xml"}   # 「파일에서 생성」 이 글자 그대로 쪽에 흘리는 것
 COM_TIMEOUT = 120
 
 
@@ -952,8 +953,13 @@ def from_files(paths: Sequence[str], out_path: str, progress: Progress = None) -
                     src.close()
             elif ext in IMAGE_EXTS:
                 _insert_bytes(out, _image_to_pdf_bytes(p))
-            elif ext == ".txt":  # MuPDF 는 txt 를 UTF-8 로만 읽고 한글 글꼴도 없다
+            elif ext in TEXT_EXTS:  # MuPDF 는 txt 를 UTF-8 로만 읽고 한글 글꼴도 없다
                 _insert_bytes(out, text_to_pdf_bytes(decode_text(_read(p))))
+            elif ext == ".csv":  # 엑셀이 있으면 표로, 없으면 글자 그대로
+                try:
+                    _insert_bytes(out, _read(_office_to_pdf(p, os.path.join(tmp, f"{i:03d}.pdf"))))
+                except Exception:  # noqa: BLE001
+                    _insert_bytes(out, text_to_pdf_bytes(decode_text(_read(p))))
             elif ext in FITZ_DOC_EXTS:
                 src = fitz.open(p)
                 try:
