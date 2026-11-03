@@ -636,6 +636,10 @@ class Worker(QThread):
         self.progress.emit(done, total, msg)
 
 
+FAIL_TEXT = {"OCR": ("OCR 실패", "오류! OCR을 완료하지 못했습니다."),
+             "평면화": ("PDF를 평면화하지 못했습니다", "오류! PDF를 평면화하지 못했습니다.")}
+
+
 class ProgressDialog(QDialog):
     """fn 을 따로 돌리며 진행을 보여 준다. run() 이 결과를 돌려주고, 실패하면 None + 메시지."""
     def __init__(self, parent, title: str, fn: Callable, *args, **kwargs):
@@ -663,13 +667,24 @@ class ProgressDialog(QDialog):
     def _fail(self, msg):
         self.error = msg; self.reject()
 
+    def fail_text(self) -> tuple[str, str] | None:
+        """실패 창 제목·첫 줄. 변환·OCR·평면화는 정해 둔 문구, 그 밖은 None(창 제목에 까닭만)."""
+        t = self.windowTitle()
+        if t.endswith("로 변환"):
+            return "변환 실패", f"오류! {t[:-4]}(으)로 변환하지 못했습니다."
+        return FAIL_TEXT.get(t)
+
     def run(self):
         self.worker.start()
         self.exec()
         self.worker.wait(3000)
-        if self.error and self.error.startswith("!"):
-            self.error = self.error[1:]
-            QMessageBox.warning(self.parent(), self.windowTitle(), self.error)
-        elif self.error:
-            QMessageBox.critical(self.parent(), self.windowTitle(), self.error.split("\n\n")[0])
+        if self.error:
+            guided = self.error.startswith("!")
+            if guided:
+                self.error = self.error[1:]
+            why = self.error if guided else self.error.split("\n\n")[0]
+            title, msg = self.windowTitle(), why
+            if fixed := self.fail_text():
+                title, msg = fixed[0], fixed[1] + (f"\n{why}" if why else "")
+            (QMessageBox.warning if guided else QMessageBox.critical)(self.parent(), title, msg)
         return self.result

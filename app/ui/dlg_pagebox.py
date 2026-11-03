@@ -16,7 +16,8 @@ from ..engine.document import Document, del_keys
 from .dialogs import PageRangeEdit, _buttons
 
 BAD_RANGE = "유효한 페이지 범위를 입력하십시오."
-UNITS = {"cm": 72 / 2.54, "mm": 72 / 25.4, "in": 72.0, "pt": 1.0}   # 단위 하나가 몇 pt
+UNITS = {"cm": 72 / 2.54, "mm": 72 / 25.4, "in": 72.0, "pt": 1.0, "pc": 12.0}   # 단위 하나가 몇 pt
+FINE = ("cm", "in", "pc")   # 소수 둘째 자리·0.1 걸음으로 보는 단위
 MIN_PX = 18           # 화면에서 상자 최소 한 변
 HANDLE = 8            # 모서리 손잡이 한 변(px)
 RENDER_PX = 900       # 미리보기 그림의 긴 변(px)
@@ -71,9 +72,10 @@ class UnitBox(QDoubleSpinBox):
     """pt 값을 들고 단위로 보여 주는 숫자 칸."""
     def __init__(self, unit: str, max_units: float, parent=None):
         super().__init__(parent)
-        self.k = UNITS.get(unit, UNITS["cm"])
-        self.setDecimals(2 if unit in ("cm", "in") else 1)
-        self.setSingleStep(0.1 if unit in ("cm", "in") else 1)
+        unit = unit if unit in UNITS else "cm"
+        self.k = UNITS[unit]
+        self.setDecimals(2 if unit in FINE else 1)
+        self.setSingleStep(0.1 if unit in FINE else 1)
         self.setRange(0, max_units); self.setSuffix(f" {unit}")
         self.setMinimumWidth(96)
 
@@ -85,8 +87,9 @@ class UnitBox(QDoubleSpinBox):
 
 
 def fmt_size(w: float, h: float, unit: str) -> str:
-    k = UNITS.get(unit, UNITS["cm"])
-    d = 2 if unit in ("cm", "in") else 1
+    unit = unit if unit in UNITS else "cm"
+    k = UNITS[unit]
+    d = 2 if unit in FINE else 1
     return f"{w / k:.{d}f} x {h / k:.{d}f} {unit}"
 
 

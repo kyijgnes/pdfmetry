@@ -143,7 +143,7 @@ def test_click_type_and_bake(win, pdf):
     ed = editor(v)
     assert ed is not None and ed.bar.isVisible()
     assert abs(ed.box.textWidth() * ed._unit() - 100) < 0.5        # 처음 너비 100pt
-    assert abs(ed.pos_pt.y() - (120 - 10 * 1.33 / 2)) < 0.2          # 줄 높이 절반 올림
+    assert abs(ed.pos_pt.y() - (120 - 14 * 1.33 / 2)) < 0.2          # 줄 높이 절반 올림
     type_text(v, "Hello 한글 입력")
     assert ed.text() == "Hello 한글 입력"
     click_away(v)
@@ -164,17 +164,17 @@ def test_rotated_page_and_style_remembered(win, pdf):
     click_page(win, v, 1, 80, 200)
     ed = editor(v)
     ed.bar.bold.click(); ed.bar.bigger.click(); ed.bar.aligns[1].click(); pump(0.02)
-    assert ed.style["bold"] and ed.style["fontsize"] == 11 and ed.style["align"] == 1
+    assert ed.style["bold"] and ed.style["fontsize"] == 16 and ed.style["align"] == 1
     type_text(v, "회전 쪽")
     QTest.keyClick(v, Qt.Key.Key_Escape); pump(0.05)
     assert editor(v) is None
     p = t.doc.fitz[1]
     assert p.get_text().strip() == "회전 쪽" and screen_dir(p) == (1, 0)
-    assert win.prefs["addtext_style"]["bold"] and win.prefs["addtext_style"]["fontsize"] == 11
+    assert win.prefs["addtext_style"]["bold"] and win.prefs["addtext_style"]["fontsize"] == 16
     win.on_tool("addtext")
     click_page(win, v, 0, 100, 300)
     ed = editor(v)
-    assert ed.style["bold"] and ed.style["fontsize"] == 11 and ed.bar.bold.isChecked()   # 지난 서식으로 시작
+    assert ed.style["bold"] and ed.style["fontsize"] == 16 and ed.bar.bold.isChecked()   # 지난 서식으로 시작
     click_away(v)
 
 

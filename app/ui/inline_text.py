@@ -39,6 +39,19 @@ def clean_style(s: dict | None) -> dict:
     return out
 
 
+def start_style(last: dict | None, edit_font: dict | None) -> dict:
+    """새 글 상자의 처음 서식. 바탕은 환경 설정 「텍스트 글꼴 편집」(prefs["edit_font"], 크기 pt·색 0~1 셋),
+    지난번에 고친 서식(last)은 그 바탕이 그대로일 때만 이어 쓴다. 돌려준 dict 의 "base" 가 그 표시다."""
+    from .dlg_prefs import EDIT_FONT
+    ef = {**EDIT_FONT, **(edit_font or {})}
+    base = clean_style({"fontsize": ef["size"], "color": ef["color"],
+                        "bold": ef["style"] == "bold", "italic": ef["style"] == "italic"})
+    key = f"{base['fontsize']:g}|{','.join(f'{c:g}' for c in base['color'])}|{ef['style']}"
+    if isinstance(last, dict) and last.get("base") == key:
+        base = clean_style(last)
+    return {**base, "base": key}
+
+
 class _Box(QGraphicsTextItem):
     """점선 테두리를 두른 입력 항목."""
 
@@ -109,7 +122,7 @@ class InlineText(QObject):
         super().__init__(viewer)
         self.v = viewer
         self.page = page
-        self.style = clean_style(style)
+        self.style = start_style(style, getattr(viewer.window(), "prefs", {}).get("edit_font"))
         self.on_done = on_done
         self.done = False
         self._busy = False   # 색 고르기 창이 떠 있는 동안은 포커스가 나가도 끝내지 않는다

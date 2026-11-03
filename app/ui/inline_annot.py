@@ -33,6 +33,21 @@ def _pad(width: float) -> float:
     return (width or 0) + 2
 
 
+def comment_style(kind: str, style: dict, comment_font: dict | None) -> dict:
+    """새 글 주석의 글자 크기·색. 환경 설정 「주석 텍스트 박스 글꼴」(prefs["comment_font"], 크기 pt·색 0~1 셋)이
+    바탕이고, 그 도구에 따로 기억해 둔 값(기본값과 다른 것)이 있으면 그것을 쓴다. 크기는 5 아래면 5."""
+    from ..engine import annot_style as S
+    out = dict(style)
+    if comment_font:
+        dflt = S.DEFAULTS.get(kind, {})
+        if "size" in comment_font and out.get("fontsize") == dflt.get("fontsize"):
+            out["fontsize"] = float(comment_font["size"])
+        if "color" in comment_font and tuple(out.get("text_color") or ()) == tuple(dflt.get("text_color") or ()):
+            out["text_color"] = tuple(float(c) for c in comment_font["color"])
+    out["fontsize"] = max(5.0, float(out["fontsize"]))
+    return out
+
+
 class _Box(QGraphicsTextItem):
     """바탕·테두리를 그 주석 모양대로 두른 입력 항목. 테두리가 없으면(타자기) 점선 안내 테두리."""
 

@@ -42,7 +42,7 @@ from . import fileops as F
 from . import icons, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
-from .inline_annot import InlineAnnot, NotePopup
+from .inline_annot import InlineAnnot, NotePopup, comment_style
 from .organize import OrganizeView
 from .props import PropsPanel
 from .quick_style import QuickStyle, eraser_radius, has_quick_style, style_key
@@ -1366,7 +1366,7 @@ class MainWindow(QMainWindow):
         d, v = t.doc, t.viewer
         if kind == "textbox":
             # 누른 자리에서 바로 쓰고, 다 쓰면 그 종류의 기본 모양으로 굽는다(빈 글이면 안 남김)
-            st = t.props.store.get(data["kind"])
+            st = comment_style(data["kind"], t.props.store.get(data["kind"]), self.prefs.get("comment_font"))
             def done(text: str, rect, callout, t=t, i=data["page"], k=data["kind"], st=st):
                 if t.viewer.closed:
                     return
