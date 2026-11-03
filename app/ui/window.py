@@ -1351,6 +1351,7 @@ class MainWindow(QMainWindow):
             elif key.startswith("rotate_view_"):
                 # 보기 회전: 화면에서만 돈다(파일 /Rotate 는 그대로, 탭마다 따로, 저장·닫기에 안 남음)
                 v.rotate_view(90 if key == "rotate_view_cw" else -90)   # "ccw" 도 "cw" 로 끝난다
+                t.thumbs.set_view_rotation(v.view_rot)
             elif key == "fullscreen": fullscreen.get(self).toggle()
             elif key == "auto_bookmark": self.auto_bookmark(t)
             elif key in ("toggle_grid", "toggle_ruler"):

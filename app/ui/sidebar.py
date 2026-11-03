@@ -7,8 +7,8 @@ import time
 
 import fitz
 from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QRectF, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QAbstractItemDelegate, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog,
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QTransform
+from PySide6.QtWidgets import (QAbstractItemDelegate, QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
                                QStyle, QStyledItemDelegate, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -79,9 +79,10 @@ class ThumbWorker(QThread):
     전 쪽을 한꺼번에 그리면 화면이 그만큼 멈춘다(959쪽 열기 3.6초, 10-20 측정). 그래서 보이는 칸만 부탁받는다."""
     done = Signal(int, QImage, int)  # 쪽, 그림, 세대
 
-    def __init__(self, doc: Document, width: int, dpr: float = 1.0):
+    def __init__(self, doc: Document, width: int, dpr: float = 1.0, rot: int = 0):
         super().__init__()
         self.doc = doc
+        self.rot = rot   # 보기 회전(화면에서만, 파일 /Rotate 는 그대로)
         self.width = int(width * dpr)
         self.dpr = dpr
         self.q: "queue.LifoQueue[tuple[int, int]]" = queue.LifoQueue()
@@ -113,9 +114,11 @@ class ThumbWorker(QThread):
             if gen != self.gen:
                 continue
             try:
-                w, _ = self.doc.page_size(i)
-                pix = self.doc.render(i, self.width / max(1, w))
+                w, h = self.doc.page_size(i)
+                pix = self.doc.render(i, self.width / max(1, h if self.rot in (90, 270) else w))
                 img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+                if self.rot:
+                    img = img.transformed(QTransform().rotate(self.rot))
                 img.setDevicePixelRatio(self.dpr)
                 self.done.emit(i, img, gen)
             except Exception:  # noqa: BLE001
@@ -129,6 +132,7 @@ class LazyThumbs:
 
     def __init__(self, grid: "PageGrid", doc: Document):
         self.grid, self.doc = grid, doc
+        self.rot = 0   # 보기 회전 0·90·180·270
         self.worker: ThumbWorker | None = None
         self.have: set[int] = set()      # 다 그린 쪽
         self.asked: set[int] = set()     # 부탁해 둔 쪽
@@ -154,7 +158,7 @@ class LazyThumbs:
             if p < self.grid.count():
                 self.grid.item(p).setData(ThumbDelegate.PIX, pm)
                 self.have.add(p)
-        self.worker = ThumbWorker(self.doc, width, dpr)
+        self.worker = ThumbWorker(self.doc, width, dpr, self.rot)
         self.worker.done.connect(self._done)
         self.worker.start()
         self.kick()
@@ -348,7 +352,7 @@ def kept_thumbs(lazy: "LazyThumbs", mapping: list[int | None] | None, dirty=()) 
     return {k: old[o] for k, o in enumerate(mapping) if o in old and k not in dirty}
 
 
-def fill_grid(grid: PageGrid, doc: Document, thumb_w: int, pad_w: int, pad_h: int):
+def fill_grid(grid: PageGrid, doc: Document, thumb_w: int, pad_w: int, pad_h: int, rot: int = 0):
     """쪽마다 빈 흰 칸을 놓는다(그림은 LazyThumbs 가 보이는 칸부터 채움)."""
     grid.setUpdatesEnabled(False)
     grid.clear()
@@ -356,6 +360,8 @@ def fill_grid(grid: PageGrid, doc: Document, thumb_w: int, pad_w: int, pad_h: in
     blank: dict[int, QPixmap] = {}   # 쪽 크기가 같으면 빈 그림 하나를 같이 쓴다
     for i in range(doc.page_count):
         w, hh = doc.page_size(i)
+        if rot in (90, 270):
+            w, hh = hh, w
         h = int(thumb_w * hh / max(1, w))
         if h not in blank:
             pm = QPixmap(thumb_w, h); pm.fill(Qt.GlobalColor.white); blank[h] = pm
@@ -472,9 +478,16 @@ class ThumbnailPanel(_Prefs, QWidget):
     def reload(self, mapping: list[int | None] | None = None, dirty=()):
         keep = kept_thumbs(self.thumbs, mapping, dirty)
         self.zoom_out.setEnabled(self.thumb_w > self.STEPS[0]); self.zoom_in.setEnabled(self.thumb_w < self.STEPS[-1])
-        fill_grid(self.list, self.doc, self.thumb_w, 12, 27)
+        fill_grid(self.list, self.doc, self.thumb_w, 12, 27, self.thumbs.rot)
         self._fit_items()
         self.thumbs.start(self.thumb_w, self.devicePixelRatioF(), keep)
+
+    def set_view_rotation(self, deg: int):
+        """탭의 보기 회전 각을 따라 썸네일을 돌려 다시 그린다. 파일은 안 바뀐다."""
+        deg = int(deg) % 360 // 90 * 90
+        if deg != self.thumbs.rot:
+            self.thumbs.rot = deg
+            self.reload()
 
     def _fit_items(self):
         """한 줄에 한 장만 들어가면 칸을 패널 폭만큼 넓혀 썸네일이 가운데 오게(왼쪽에 붙고 오른쪽이 비던 것)."""
