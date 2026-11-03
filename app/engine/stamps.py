@@ -444,36 +444,51 @@ def face_preview_png(fc: dict, height_px: int = 96) -> bytes:
 
 
 # ── 찍기 ─────────────────────────────────────────────────────────
-def _display_size(p: fitz.Page, r: fitz.Rect) -> tuple[float, float]:
-    dr = fitz.Rect(r) * p.rotation_matrix
-    return abs(dr.width), abs(dr.height)
+def _view_matrix(p: fitz.Page, rot: int) -> fitz.Matrix:
+    """회전 전 쪽 좌표 → rot 만큼(시계 방향) 돌려 보이는 좌표. 돌린 쪽의 왼쪽 위가 원점."""
+    m = fitz.Matrix(rot % 360)
+    b = fitz.Rect(0, 0, p.cropbox.width, p.cropbox.height) * m
+    return m * fitz.Matrix(1, 0, 0, 1, -b.x0, -b.y0)
+
+
+def _rot(p: fitz.Page, view_rot: int) -> int:
+    """찍은 것이 화면에 바로 서는 방향(쪽 회전 + 보기 회전)."""
+    return (p.rotation + view_rot) % 360
+
+
+def _display_size(p: fitz.Page, r: fitz.Rect, view_rot: int = 0) -> tuple[float, float]:
+    r = fitz.Rect(r)
+    w, h = abs(r.width), abs(r.height)
+    return (h, w) if _rot(p, view_rot) in (90, 270) else (w, h)
 
 
 def default_rect(doc: Document, page: int, point: fitz.Point, spec: dict, *, author: str = "",
-                 st: StampStore | None = None) -> fitz.Rect:
-    """한 번 눌러 찍을 자리: 누른 자리를 가운데로 기억한 크기만큼(쪽 밖으로 나가지 않게)."""
+                 st: StampStore | None = None, view_rot: int = 0) -> fitz.Rect:
+    """한 번 눌러 찍을 자리: 누른 자리를 가운데로 기억한 크기만큼(쪽 밖으로 나가지 않게).
+    view_rot 은 화면에서만 돌린 각, 크기는 그 화면에서 보이는 방향으로 잰다."""
     st = st or store()
     p = doc.fitz[page]
     w, h = natural_size(face(spec, author=author, st=st))
     k = st.scale
     w, h = w * k, h * k
-    dp = fitz.Point(point) * p.rotation_matrix
-    pr = p.rect * p.rotation_matrix              # 보이는 쪽
+    m = _view_matrix(p, _rot(p, view_rot))
+    dp = fitz.Point(point) * m
+    pr = fitz.Rect(0, 0, p.cropbox.width, p.cropbox.height) * m   # 보이는 쪽
     pw, ph = abs(pr.width), abs(pr.height)
     if w > pw or h > ph:
         f = min(pw / w, ph / h)
         w, h = w * f, h * f
     x0 = min(max(0.0, dp.x - w / 2), pw - w)
     y0 = min(max(0.0, dp.y - h / 2), ph - h)
-    r = fitz.Rect(x0, y0, x0 + w, y0 + h) * p.derotation_matrix
+    r = fitz.Rect(x0, y0, x0 + w, y0 + h) * ~m
     return r.normalize()
 
 
 def remember_drag(doc: Document, page: int, rect: fitz.Rect, spec: dict, *, author: str = "",
-                  st: StampStore | None = None) -> None:
+                  st: StampStore | None = None, view_rot: int = 0) -> None:
     """끌어서 찍은 크기를 다음에 한 번 눌러 찍을 크기로(처음 크기의 배율로) 기억한다."""
     st = st or store()
-    w, h = _display_size(doc.fitz[page], rect)
+    w, h = _display_size(doc.fitz[page], rect, view_rot)
     try:
         nw, nh = natural_size(face(spec, author=author, st=st))
     except ValueError:
@@ -482,14 +497,15 @@ def remember_drag(doc: Document, page: int, rect: fitz.Rect, spec: dict, *, auth
 
 
 def add(doc: Document, page: int, rect: fitz.Rect, spec: dict, *, author: str = "", now: _dt.datetime | None = None,
-        st: StampStore | None = None) -> int:
-    """Stamp 주석 하나를 찍고 xref 를 돌려준다. 동적 스탬프의 이름·날짜는 찍는 때의 값으로 굽는다."""
+        st: StampStore | None = None, view_rot: int = 0) -> int:
+    """Stamp 주석 하나를 찍고 xref 를 돌려준다. 동적 스탬프의 이름·날짜는 찍는 때의 값으로 굽는다.
+    view_rot(화면에서만 돌린 각)을 주면 그 화면에서 바로 서 보이게 돌려 굽는다."""
     fc = face(spec, author=author, now=now, st=st)
     p = doc.fitz[page]
-    w, h = _display_size(p, rect)
+    w, h = _display_size(p, rect, view_rot)
     if w < 2 or h < 2:
         raise ValueError("스탬프 자리가 너무 작습니다")
-    png = render_png(fc, w, h, p.rotation)
+    png = render_png(fc, w, h, _rot(p, view_rot))
     doc.snapshot()
     with doc.lock:
         a = p.add_stamp_annot(fitz.Rect(rect).normalize(), stamp=png)

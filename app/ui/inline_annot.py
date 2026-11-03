@@ -11,7 +11,7 @@ from typing import Callable
 
 import fitz
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QTextOption
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QTextOption, QTransform
 from PySide6.QtWidgets import (QFrame, QGraphicsItem, QGraphicsPathItem, QGraphicsTextItem, QGraphicsView,
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
                                QStyleOptionGraphicsItem, QToolButton, QVBoxLayout, QWidget)
@@ -106,10 +106,14 @@ class InlineAnnot(QObject):
         it = viewer.items[page]
         z = viewer.zoom
         page_w, page_h = it.w / z, it.h / z
+        # 고치는 글이 화면에서 돌아 보이는 각(시계 방향): 글 방향과 지금 화면 방향(쪽 회전 + 보기 회전)의 차이
+        self.turn = (viewer.text_rotation(page) - int(self.style.get("rotate") or 0)) % 360 if box is not None else 0
         if box is not None:
             r = viewer.from_page_rect(page, box)
-            self.pos_pt = QPointF((r.left() - it.pos().x()) / z, (r.top() - it.pos().y()) / z)
-            self.min_width = max(10.0, r.width() / z)
+            r = QRectF((r.left() - it.pos().x()) / z, (r.top() - it.pos().y()) / z, r.width() / z, r.height() / z)
+            # 글이 시작하는 모서리(돌린 상자의 왼쪽 위)를 붙박고, 글이 늘면 그쪽에서 자란다
+            self.pos_pt = {90: r.topRight(), 180: r.bottomRight(), 270: r.bottomLeft()}.get(self.turn, r.topLeft())
+            self.min_width = max(10.0, r.height() if self.turn in (90, 270) else r.width())
             # 고칠 때 지시선은 그대로(장면 좌표로 바꿔 둔다)
             self.tip_pt = None
             self._fixed_leader = [self._disp(viewer.from_page_point(page, fitz.Point(q))) for q in callout or []]
@@ -139,9 +143,11 @@ class InlineAnnot(QObject):
                 pad = _pad(self.style.get("width"))
                 self.pos_pt = QPointF(max(0.0, click.x() - pad),
                                       max(0.0, click.y() - self.style["fontsize"] * LINE / 2 - pad))
-        self.max_width = max(10.0, page_w - self.pos_pt.x())
+        x, y = self.pos_pt.x(), self.pos_pt.y()
+        # 줄 방향으로 쪽 끝까지 남은 길이, 줄이 쌓이는 방향으로 남은 길이
+        self.max_width = max(10.0, {90: page_h - y, 180: x, 270: y}.get(self.turn, page_w - x))
         self.min_width = min(self.min_width, self.max_width)
-        self.page_h = page_h
+        self.room_h = {90: x, 180: y, 270: page_w - x}.get(self.turn, page_h - y)
 
         self.box = _Box(it, self)
         self.box.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -197,14 +203,19 @@ class InlineAnnot(QObject):
     def _place(self, *_):
         z = self.v.zoom
         self.box.setScale(z * self._unit())
+        self.box.setRotation(self.turn)
         self.box.setPos(self.pos_pt.x() * z, self.pos_pt.y() * z)
         self._fit()
+
+    def _turned(self, w: float, h: float) -> QRectF:
+        """글 방향 w×h(pt) 상자를 화면에 돌려 놓은 네모(화면에 보이는 쪽 기준 pt)."""
+        return QTransform().rotate(self.turn).mapRect(QRectF(0, 0, w, h)).translated(self.pos_pt)
 
     def _box_pt(self) -> QRectF:
         """상자(화면에 보이는 쪽 기준 pt)."""
         u = self._unit()
         r = self.box.boundingRect()
-        return QRectF(self.pos_pt.x(), self.pos_pt.y(), r.width() * u, r.height() * u)
+        return self._turned(r.width() * u, r.height() * u)
 
     def leader_points(self) -> list[QPointF]:
         """말풍선 지시선 꼭짓점(화면 쪽 pt): 끝(누른 자리) → 꺾임 → 상자 옆 가운데."""
@@ -290,14 +301,16 @@ class InlineAnnot(QObject):
 
     def page_rect(self) -> fitz.Rect:
         """쪽에 넣을 상자(회전 전 쪽 좌표). 글이 쪽 글상자에서 잘리지 않게 줄 높이에 조금 여유를 둔다."""
-        b = self._box_pt()
+        u = self._unit()
+        br = self.box.boundingRect()
         fs = self.style["fontsize"]
-        h = min(max(b.height(), (self.text().count("\n") + 1) * fs * LINE + 2 * _pad(self.style.get("width"))) + fs * 0.2,
-                self.page_h - b.top())
+        h = min(max(br.height() * u, (self.text().count("\n") + 1) * fs * LINE + 2 * _pad(self.style.get("width"))) + fs * 0.2,
+                self.room_h)
+        b = self._turned(br.width() * u, h)
         z = self.v.zoom
         it = self.v.items[self.page]
         tl = it.pos() + QPointF(b.left() * z, b.top() * z)
-        return self.v._scene_rect_to_page(self.page, QRectF(tl.x(), tl.y(), b.width() * z, h * z))
+        return self.v._scene_rect_to_page(self.page, QRectF(tl.x(), tl.y(), b.width() * z, b.height() * z))
 
     def page_callout(self) -> list[fitz.Point] | None:
         if self.tip_pt is None or self._fixed_leader:

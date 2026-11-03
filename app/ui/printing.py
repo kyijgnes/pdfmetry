@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QSpinBox, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from . import icons, print_vector as PV, theme
+from .dlg_pagebox import FINE, UNITS
 
 FITS = [("fit", "맞춤"), ("actual", "실제 크기"), ("custom", "사용자 지정 배율")]
 SUBSETS = [("all", "모든 페이지"), ("odd", "홀수 페이지"), ("even", "짝수 페이지")]
@@ -40,7 +41,7 @@ ORDERS = [("h", "가로"), ("hr", "가로 역순"), ("v", "세로"), ("vr", "세
 BOOKLET_SUBSETS = [("both", "양면"), ("front", "앞면"), ("back", "뒷면")]
 MANUAL_TIP = "앞면 인쇄가 끝났습니다. 나온 종이를 뒤집어 용지함에 다시 넣고 [확인] 을 누르면 뒷면을 인쇄합니다."
 CM = 72 / 2.54
-_UNITS = {"cm": CM, "mm": 72 / 25.4, "in": 72.0, "pt": 1.0}  # 단위 하나가 몇 pt
+_UNITS = UNITS  # 단위 하나가 몇 pt, 쪽 상자와 같은 표(피카스 포함)
 MAX_DPI = 600  # 그 이상은 글자가 더 좋아지지 않고 그림만 커진다
 
 
@@ -804,7 +805,7 @@ class PrintDialog(QDialog):
         v.addWidget(QLabel("겹침"))
         k = _UNITS[self.unit]
         self.overlap = QDoubleSpinBox(); self.overlap.setRange(0, round(self.MAX_OVERLAP_IN * 72 / k, 2))
-        self.overlap.setDecimals(2 if self.unit in ("cm", "in") else 1); self.overlap.setSingleStep(0.1 if self.unit in ("cm", "in") else 1)
+        self.overlap.setDecimals(2 if self.unit in FINE else 1); self.overlap.setSingleStep(0.1 if self.unit in FINE else 1)
         self.overlap.setSuffix(f" ({self.unit})"); self.overlap.setValue(round(float(r.get("overlap_mm", 0)) / 25.4 * 72 / k, 2))
         v.addWidget(self.overlap)
         self.cut_marks = QCheckBox("컷 마크"); self.labels = QCheckBox("레이블")

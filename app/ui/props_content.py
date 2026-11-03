@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QHBoxLay
 from ..engine import annots as A
 from ..engine import fonts as F
 from .dialogs import ColorButton
-from .dlg_pagebox import UNITS, UnitBox
+from .dlg_pagebox import FINE, UNITS, UnitBox
 from .sidebar import group_card
 
 ALIGNS = ("왼쪽", "가운데", "오른쪽", "양쪽")   # insert_textbox 의 align 0~3
@@ -136,8 +136,8 @@ class ContentProps(QWidget):
                 self.opacity.setValue(int(round(op * 100))); self.op_label.setText(f"{self.opacity.value()}%")
                 unit = self._unit()
                 for box in (self.w, self.h):
-                    box.k = UNITS[unit]; box.setSuffix(f" {unit}"); box.setDecimals(2 if unit in ("cm", "in") else 1)
-                    box.setSingleStep(0.1 if unit in ("cm", "in") else 1)
+                    box.k = UNITS[unit]; box.setSuffix(f" {unit}"); box.setDecimals(2 if unit in FINE else 1)
+                    box.setSingleStep(0.1 if unit in FINE else 1)
                 vis = self._visible(sel.rect)
                 self.w.set_pt(vis.width); self.h.set_pt(vis.height)
                 self._wh = (self.w.value(), self.h.value())   # 단위로 반올림해 보인 값(안 고친 칸은 원래 pt 그대로)
