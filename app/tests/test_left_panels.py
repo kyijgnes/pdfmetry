@@ -362,3 +362,22 @@ def test_dialogs_values(win, two):
     assert v["title"] == "목차" and v["size"] == 12.0 and v["name"]
     p = {"name": "층", "intent": "design", "on": False, "locked": True, "view": "never", "print": "always", "export": "when_on"}
     assert LayerPropsDialog(win, p).values() == p
+
+
+def test_thumbs_follow_view_rotation(win, two):
+    """보기 회전을 바꾸면 썸네일도 돌아 다시 그려진다(파일 /Rotate 는 그대로)."""
+    a, _ = two
+    win.open_path(a); pump(0.2)
+    t = _tab_of(win, a)
+    t.show_side("thumbs"); pump(0.3)
+    g = t.thumbs.list
+    h0 = g.item(0).sizeHint().height()
+    win.on_action("rotate_view_cw"); pump(0.5)
+    assert t.thumbs.thumbs.rot == 90
+    it = g.item(0)
+    pm = it.data(SB.ThumbDelegate.PIX)
+    assert pm.width() > pm.height()                 # 세로 쪽이 가로로 누웠다
+    assert it.sizeHint().height() < h0
+    assert t.doc.fitz[0].rotation == 0
+    win.on_action("rotate_view_ccw"); pump(0.5)
+    assert t.thumbs.thumbs.rot == 0 and g.item(0).data(SB.ThumbDelegate.PIX).height() > g.item(0).data(SB.ThumbDelegate.PIX).width()
