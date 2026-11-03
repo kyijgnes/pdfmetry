@@ -642,6 +642,92 @@ class Document:
             cur.update(md)
             self.fitz.set_metadata(cur)
 
+    # 초기 보기: 카탈로그 /PageMode · /PageLayout · /OpenAction. 값은 뷰어 이름으로 주고받는다.
+    # mode: none·outlines·thumbs · layout: default·single·continuous·facing·facing_continuous
+    # zoom: default·actual·fit_page·fit_width·fit_height 또는 배율(1.0 = 100%) · page: 0부터
+    _PAGE_MODES = {"/UseNone": "none", "/UseOutlines": "outlines", "/UseThumbs": "thumbs"}
+    _PAGE_LAYOUTS = {"/SinglePage": "single", "/OneColumn": "continuous", "/TwoPageLeft": "facing",
+                     "/TwoPageRight": "facing", "/TwoColumnLeft": "facing_continuous", "/TwoColumnRight": "facing_continuous"}
+    _FITS = {"/Fit": "fit_page", "/FitB": "fit_page", "/FitH": "fit_width", "/FitBH": "fit_width",
+             "/FitV": "fit_height", "/FitBV": "fit_height"}
+
+    def initial_view(self) -> dict:
+        """문서에 적힌 초기 보기. 적힌 것이 없으면 default·0쪽."""
+        f = self.fitz
+        out = {"mode": "none", "layout": "default", "zoom": "default", "page": 0}
+        if not f.is_pdf:
+            return out
+        with self.lock:
+            cat = f.pdf_catalog()
+            kind, val = f.xref_get_key(cat, "PageMode")
+            if kind == "name":
+                out["mode"] = self._PAGE_MODES.get(val, "none")
+            kind, val = f.xref_get_key(cat, "PageLayout")
+            if kind == "name":
+                out["layout"] = self._PAGE_LAYOUTS.get(val, "default")
+            kind, val = f.xref_get_key(cat, "OpenAction")
+            if kind == "xref":   # 따로 둔 동작 사전이나 배열
+                xr = int(val.split()[0])
+                val = f.xref_object(xr, compressed=True)
+                kind = "array" if val.startswith("[") else "dict"
+            if kind == "dict":   # << /S /GoTo /D [...] >>
+                m = re.search(r"/D\s*(\[[^\]]*\])", val)
+                val, kind = (m.group(1), "array") if m and "/GoTo" in val else (val, "")
+            if kind == "array":
+                out.update(self._read_dest(val))
+        return out
+
+    def _read_dest(self, arr: str) -> dict:
+        parts = re.findall(r"/[^\s/\[\]]+|[^\s/\[\]]+", arr)   # 「8 0 R/FitH null」 처럼 붙어 나온다
+        res: dict = {}
+        if len(parts) >= 3 and parts[2] == "R":
+            xref = int(parts[0])
+            res["page"] = next((i for i in range(self.fitz.page_count) if self.fitz[i].xref == xref), 0)
+            rest = parts[3:]
+        elif parts and parts[0].isdigit():   # 쪽 번호를 숫자로 적은 원격식 목적지
+            res["page"] = min(int(parts[0]), self.fitz.page_count - 1)
+            rest = parts[1:]
+        else:
+            return res
+        if rest and rest[0] == "/XYZ":
+            try:
+                z = float(rest[3]) if len(rest) > 3 and rest[3] != "null" else 0.0
+            except ValueError:
+                z = 0.0
+            if z > 0:
+                res["zoom"] = z
+        elif rest and rest[0] in self._FITS:
+            res["zoom"] = self._FITS[rest[0]]
+        return res
+
+    def set_initial_view(self, view: dict) -> bool:
+        """바뀐 칸만 카탈로그에 쓴다. 하나라도 썼으면 True(되돌리기 한 칸)."""
+        old = self.initial_view()
+        new = {**old, **view}
+        if new == old:
+            return False
+        self.snapshot()
+        f = self.fitz
+        with self.lock:
+            cat = f.pdf_catalog()
+            if new["mode"] != old["mode"]:
+                name = {v: k for k, v in self._PAGE_MODES.items()}.get(new["mode"], "/UseNone")
+                f.xref_set_key(cat, "PageMode", name)
+            if new["layout"] != old["layout"]:
+                name = {"single": "/SinglePage", "continuous": "/OneColumn", "facing": "/TwoPageLeft",
+                        "facing_continuous": "/TwoColumnLeft"}.get(new["layout"])
+                f.xref_set_key(cat, "PageLayout", name or "null")
+            if (new["zoom"], new["page"]) != (old["zoom"], old["page"]):
+                p = max(0, min(int(new["page"]), f.page_count - 1))
+                z = new["zoom"]
+                if isinstance(z, (int, float)):
+                    tail = f"/XYZ null null {float(z):g}"
+                else:
+                    tail = {"actual": "/XYZ null null 1", "fit_page": "/Fit", "fit_width": "/FitH null",
+                            "fit_height": "/FitV null"}.get(z, "/XYZ null null 0")
+                f.xref_set_key(cat, "OpenAction", f"[{f[p].xref} 0 R {tail}]")
+        return True
+
     def is_scanned(self, i: int) -> bool:
         """글자 없고 그림 하나로 된 쪽."""
         page = self.fitz[i]
