@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialo
 from ..engine import annot_shapes as SH
 from ..engine import annot_style as S
 from ..engine import annots as A
+from ..engine import outline as OL
 from ..engine import pages as P
 from ..engine import stamps as ST
 from ..engine.document import Document, DocumentError, FileLocked, NeedsPassword
@@ -179,6 +180,19 @@ class DocTab(QWidget):
         self.search.hitsChanged.connect(self.show_hits)
         self.search.replaced.connect(lambda pages: self.changed(pages))
         self.layers.changed.connect(self.view_changed)
+        self.layers.edited.connect(lambda: self.changed(None))
+        self.layers.get_current_page = lambda: self.viewer.current
+        for p in (self.thumbs, self.bookmarks, self.attachments):   # 창 설정(탭이 다른 창으로 옮겨 가면 그 창 것)
+            p.get_prefs = lambda: self.win.prefs
+            p.save_prefs = lambda: save_settings(self.win.settings)
+        self.bookmarks.apply_prefs()
+        self.thumbs.pagesDropped.connect(lambda src, pages, at: self.win.drop_pages(self, src, pages, at))
+        self.thumbs.filesDropped.connect(lambda paths, at: self.win.drop_files(self, paths, at))
+        self.bookmarks.autoRequested.connect(lambda: self.win.auto_bookmark(self))
+        self.bookmarks.printRequested.connect(lambda pg: (self.viewer.goto(pg), self.win.print_doc(self)))
+        self.bookmarks.tocMade.connect(lambda n: self.changed(None, structural=True,
+                                                              mapping=[None] * n + list(range(self.doc.page_count - n))))
+        self.attachments.openPdf.connect(lambda path: self.win.open_path(path))
         self.fieldlist.gotoField.connect(lambda pg, r: self.viewer.goto(pg, r.y0))
         self.viewer.pageChanged.connect(self.thumbs.set_current)
         self.viewer.selectionChanged.connect(self.props.show_selection)
@@ -1188,7 +1202,9 @@ class MainWindow(QMainWindow):
                 keys = list(self.ribbon.pages); i = keys.index(self.ribbon.current_tab) if self.ribbon.current_tab in keys else 0
                 self.ribbon.set_tab(keys[(i + (1 if key == "ribbon_next" else -1)) % len(keys)])
             elif key == "ribbon_fold": self.ribbon.stack.setVisible(not self.ribbon.stack.isVisible())
-            elif key == "bookmark_add": t.show_side("bookmark") if not t.side.isVisible() else None; t.bookmarks.add()
+            elif key == "bookmark_add":
+                if not (t.side.isVisible() and t.side_key == "bookmark"): t.show_side("bookmark")
+                t.bookmarks.add()
             elif key == "bookmark_rename":
                 if not t.bookmarks.tree.currentItem(): self.say("이름을 바꿀 북마크를 먼저 고르세요"); return
                 if not (t.side.isVisible() and t.side_key == "bookmark"): t.show_side("bookmark")
@@ -1356,10 +1372,54 @@ class MainWindow(QMainWindow):
                 from .dlg_splitpage import run_split_page
                 run_split_page(self, t, pages)
             elif key == "split": DS.run_split(self, t)
+            elif key == "copy":
+                from .sidebar import page_clip
+                page_clip.update(data=OL.pages_bytes(d, pages), n=len(pages)); self.say(f"{len(pages)}쪽을 복사했습니다")
+            elif key == "paste":
+                from .sidebar import page_clip
+                if not page_clip["data"]: self.say("복사한 페이지가 없습니다"); return
+                at = (max(pages) + 1) if pages else d.page_count
+                self._insert_pages(t, at, page_clip["data"])
+            elif key == "ocr": self.ocr(t)
+            elif key == "print": self.print_doc(t)
+            elif key == "export_images": self.convert(t, "png")
         except ValueError as e:
             QMessageBox.warning(self, "페이지", str(e))
         except RuntimeError as e:
             QMessageBox.warning(self, "아직 못 씀", str(e))
+
+    def _insert_pages(self, t: DocTab, at: int, data: bytes) -> int:
+        """PDF 바이트의 쪽을 t 문서의 at 자리에 끼우고 화면을 맞춘다(되돌리기 한 걸음)."""
+        old = t.doc.page_count
+        n = OL.insert_pages(t.doc, at, data)
+        if n:
+            at = max(0, min(at, old))
+            t.changed(None, structural=True, mapping=list(range(at)) + [None] * n + list(range(at, old)))
+            self.say(f"{n}쪽을 끼웠습니다")
+        return n
+
+    def drop_pages(self, t: DocTab, src, pages: list[int], at: int):
+        """다른 문서 썸네일에서 끌어 놓은 쪽: 그 자리에 복사(원본 문서는 그대로)."""
+        if src is None or src is t.doc or not pages:
+            return
+        try:
+            self._insert_pages(t, at, OL.pages_bytes(src, pages))
+        except (ValueError, RuntimeError) as e:
+            QMessageBox.warning(self, "페이지", str(e))
+
+    def drop_files(self, t: DocTab, paths: list[str], at: int):
+        """탐색기에서 썸네일 칸에 놓은 PDF: 그 자리에 쪽을 끼운다."""
+        srcs = O.open_sources(self, paths, t.doc.path) if paths else None
+        if not srcs:
+            return
+        old = t.doc.page_count
+        try:
+            n = P.insert_pdfs(t.doc, at, [(p, pw, None) for p, pw, _ in srcs])
+        except (ValueError, RuntimeError) as e:
+            QMessageBox.warning(self, "페이지", str(e)); return
+        at = max(0, min(at, old))
+        t.changed(None, structural=True, mapping=list(range(at)) + [None] * n + list(range(at, old)))
+        self.say(f"{len(srcs)}개 문서에서 {n}쪽을 끼웠습니다")
 
     # ── 뷰어가 부탁한 대화상자 ─────────────────────────────────
     def on_request(self, t: DocTab, kind: str, data):  # noqa: C901
