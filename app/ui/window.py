@@ -1502,8 +1502,8 @@ class MainWindow(QMainWindow):
             m.addAction(icons.icon("share"), "공유폴더에 저장", lambda: self.save_to_dir(self.prefs["share_dir"])).setEnabled(bool(t))
         m.addSeparator()
         em = m.addMenu(icons.icon("export"), "내보내기"); em.setEnabled(bool(t))
-        for label, key in (("Word", "to_docx"), ("Excel", "to_xlsx"), ("PowerPoint", "to_pptx"), ("한글(HWPX)", "to_hwpx"), ("이미지", "to_png"),
-                           ("텍스트", "to_txt"), ("HTML", "to_html"), ("RTF", "to_rtf"), ("EPUB", "to_epub"), ("PDF/A", "to_pdfa")):
+        for label, key in (("Word", "to_docx"), ("Excel", "to_xlsx"), ("PowerPoint", "to_pptx"), ("이미지", "to_png"), ("HTML", "to_html"),
+                           ("RTF", "to_rtf"), ("텍스트", "to_txt"), ("Epub", "to_epub"), ("PDF/A", "to_pdfa"), ("한글(HWPX)", "to_hwpx")):
             em.addAction(label, lambda k=key: self.on_action(k))
         a = m.addAction(icons.icon("print"), "인쇄하기" + self.key_text("print"), lambda: self.on_action("print")); a.setEnabled(bool(t))
         a = m.addAction(icons.icon("mail"), "메일로 보내기", lambda: self.on_action("mail")); a.setEnabled(bool(t))
@@ -1574,13 +1574,10 @@ class MainWindow(QMainWindow):
         base = os.path.splitext(t.doc.path)[0] if t.doc.path else os.path.join(self.prefs.get("default_dir") or os.path.expanduser("~"), "문서")
         return base + suffix
 
-    def _offer_open(self, path: str):
-        if QMessageBox.question(self, "완료", f"저장했습니다.\n{path}\n\n폴더를 열까요?") == QMessageBox.StandardButton.Yes:
-            folder = path if os.path.isdir(path) else os.path.dirname(path)
-            if os.path.isfile(path):
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-            else:
-                os.startfile(folder)
+    def _offer_open(self, path: str, title: str = "완료"):
+        """끝났다는 알림: [확인] · [폴더 열기]."""
+        from .dlg_convert import success_box
+        success_box(self, path, title)
 
     # ── 생성 ──────────────────────────────────────────────────
     def create_blank(self):
@@ -1625,30 +1622,38 @@ class MainWindow(QMainWindow):
 
     # ── 변환·도구 ─────────────────────────────────────────────
     def convert(self, t: DocTab, fmt: str):
+        from .dlg_convert import ConvertDialog, FORMATS
         d, v = t.doc, t.viewer
-        default = self._suggest(t, {"pdfa": "_PDFA.pdf", "png": "", "jpg": ""}.get(fmt, "." + fmt))
-        if fmt in ("png", "jpg"):
-            default = os.path.dirname(self._suggest(t, ".x")) or os.path.expanduser("~")
-        dlg = D.ConvertDialog(self, d.page_count, v.current, fmt, default)
+        store = self.settings.setdefault("convert", {})
+        dlg = ConvertDialog(self, d.page_count, v.current, fmt if fmt in {k for _, k, _ in FORMATS} else "docx", d.name, d.path, store)
         if not dlg.exec():
             return
+        save_settings(self.settings)
         vals = dlg.values(); fmt = vals["fmt"]; out = vals["out"]; pages = vals["pages"]
-        if pages == list(range(d.page_count)):
-            pages = None
+        folder, stem = vals["folder"], vals["stem"]
         C = _engine("convert")
         src = d.copy()  # 지금 상태 그대로 변환(열린 문서를 그냥 save 하면 암호 문서가 망가진다)
+        dpi = vals["dpi"] or None
+        label = dlg.fmt.currentText().split(" (")[0]
 
         def job(progress=None):
             try:
-                if pages and fmt in ("rtf", "pdfa", "hwpx"):
-                    src.select(pages)  # 이 셋은 쪽 범위를 받지 않아 고른 범위가 무시됐다
-                if fmt in ("png", "jpg"):
-                    return C.to_images(src, out, fmt=fmt, dpi=vals["dpi"], pages=pages, progress=progress, stem=os.path.splitext(d.name)[0])
-                if fmt == "docx": return C.to_word(src, out, pages=pages, progress=progress)
+                if pages and fmt in ("rtf", "pdfa", "hwpx", "xml"):
+                    src.select(pages)  # 이 넷은 쪽 범위를 받지 않아 고른 범위가 무시됐다
+                if fmt in ("jpg", "jpeg", "png", "bmp", "gif", "tiff"):
+                    if vals["mode"] == "extract":
+                        return C.extract_images(src, folder, pages=pages, progress=progress, stem=stem)
+                    return C.to_images(src, folder, fmt=fmt, dpi=dpi, pages=pages, progress=progress, stem=stem,
+                                       merge=vals["mode"] == "merge")
+                if fmt == "docx":
+                    if vals["ocr"] != "off":
+                        self._ocr_before_word(src, pages, vals["ocr"] == "all", progress)
+                    return C.to_word(src, out, pages=pages, progress=progress)
                 if fmt == "xlsx": return C.to_excel(src, out, pages=pages, progress=progress)
-                if fmt == "pptx": return C.to_pptx(src, out, pages=pages, dpi=vals["dpi"], progress=progress)
+                if fmt == "pptx": return C.to_pptx(src, out, pages=pages, dpi=vals["pptx_dpi"], progress=progress)
                 if fmt == "txt": return C.to_text(src, out, pages=pages)
                 if fmt == "html": return C.to_html(src, out, pages=pages)
+                if fmt == "xml": return C.to_xml(src, out)
                 if fmt == "rtf": return C.to_rtf(src, out)
                 if fmt == "epub": return C.to_epub(src, out, pages=pages)
                 if fmt == "pdfa": return C.to_pdfa(src, out)
@@ -1656,12 +1661,20 @@ class MainWindow(QMainWindow):
                 raise RuntimeError(f"모르는 형식: {fmt}")
             finally:
                 src.close()
-        res = D.ProgressDialog(self, "변환", job).run()
+        res = D.ProgressDialog(self, f"{label}로 변환", job).run()
         if res:
-            path = res[0] if isinstance(res, list) else res
-            self.say(f"변환했습니다: {path}")
-            if vals["open_after"]:
-                self._offer_open(path if isinstance(res, str) else out)
+            files = res if isinstance(res, list) else [res]
+            shown = files[0] if len(files) == 1 else folder
+            self.say(f"변환했습니다: {shown}")
+            self._offer_open(shown, "변환 성공")
+
+    def _ocr_before_word(self, src, pages, force: bool, progress=None):
+        """Word 로 내보내기 전에 글자층이 없는 쪽(force 면 모든 쪽)을 인식해 넣는다. 인식이 안 되는 PC 면 그냥 넘어간다."""
+        O = _engine("ocr")
+        try:
+            O.ocr_pages(src, pages=pages, lang=self.prefs.get("ocr_lang") or "ko", dpi=300, progress=progress, force=force)
+        except Exception:  # noqa: BLE001
+            pass
 
     def run_tool(self, t: DocTab, fn_name: str, dlg):
         """워터마크·배경·머리글·베이츠처럼 문서를 바로 고치는 도구."""
@@ -1960,9 +1973,9 @@ class MainWindow(QMainWindow):
         """인쇄 창(미리보기·크기·포스터·여러 페이지·소책자·양면·흑백). 고른 설정은 다음에도 그대로."""
         from .printing import PrintDialog, send
         if not QPrinterInfo.availablePrinterNames():
-            QMessageBox.warning(self, "인쇄", "이 PC 에 설치된 프린터가 없습니다"); return
+            QMessageBox.warning(self, "프린터 없음", "이 PC 에 설치된 프린터가 없습니다"); return
         dlg = PrintDialog(self, t.doc.fitz, t.viewer.current, self.prefs.get("print"), lock=t.doc.lock,
-                          view=self._print_view(t), name=t.doc.name)
+                          view=self._print_view(t), name=t.doc.name, unit=self.prefs.get("unit", "cm"))
         if not dlg.exec():
             return
         self.prefs["print"] = dlg.remember(); save_settings(self.settings)
@@ -1976,16 +1989,20 @@ class MainWindow(QMainWindow):
             self.say(f"인쇄를 보냈습니다 · {opts.printer} · {len(opts.pages) if opts.view is None else 1}쪽")
 
     def _print_view(self, t: DocTab):
-        """인쇄 창의 「최근 보기」: 뷰어 지금 쪽에서 화면에 보이는 곳(쪽 좌표). 안 보이면 None."""
+        """인쇄 창의 「최근 보기」: 화면에 보이는 곳(쪽 좌표). 보이는 쪽이 정확히 하나일 때만, 아니면 None."""
         v = t.viewer
-        if not v.items:
+        if not v.items or v.zoom <= 0:
             return None
-        i = max(0, min(v.current, len(v.items) - 1))
-        it = v.items[i]
-        pr = it.mapRectToScene(it.page_rect())
-        inter = v.mapToScene(v.viewport().rect()).boundingRect().intersected(pr)
-        if inter.isEmpty() or v.zoom <= 0:
+        vis = v.mapToScene(v.viewport().rect()).boundingRect()
+        hit = []
+        for i, it in enumerate(v.items):
+            pr = it.mapRectToScene(it.page_rect())
+            inter = vis.intersected(pr)
+            if not inter.isEmpty():
+                hit.append((i, pr, inter))
+        if len(hit) != 1:
             return None
+        i, pr, inter = hit[0]
         z = v.zoom
         r = fitz.Rect((inter.left() - pr.left()) / z, (inter.top() - pr.top()) / z,
                       (inter.right() - pr.left()) / z, (inter.bottom() - pr.top()) / z) & t.doc.fitz[i].rect

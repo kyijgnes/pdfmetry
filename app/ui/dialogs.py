@@ -454,51 +454,6 @@ class OcrDialog(FormDialog):
                 "force": self.force.isChecked(), "pages": self.pages.pages()}
 
 
-class ConvertDialog(FormDialog):
-    """변환 설정: 형식·쪽·해상도·저장 위치."""
-    FORMATS = [("Word (.docx)", "docx"), ("Excel (.xlsx)", "xlsx"), ("PowerPoint (.pptx)", "pptx"), ("이미지 (.png)", "png"),
-               ("이미지 (.jpg)", "jpg"), ("텍스트 (.txt)", "txt"), ("HTML (.html)", "html"), ("RTF (.rtf)", "rtf"),
-               ("EPUB (.epub)", "epub"), ("PDF/A (.pdf)", "pdfa"), ("한글 (.hwpx)", "hwpx")]
-
-    def __init__(self, parent, total: int, current: int, default_fmt: str, default_out: str):
-        super().__init__("변환", parent, "변환")
-        self.fmt = self.add("형식", QComboBox())
-        for label, key in self.FORMATS:
-            self.fmt.addItem(label, key)
-        idx = next((k for k, (_, key) in enumerate(self.FORMATS) if key == default_fmt), 0)
-        self.fmt.setCurrentIndex(idx)
-        self.dpi = self.add("이미지 해상도", QComboBox()); self.dpi.addItems(["100 dpi", "150 dpi", "200 dpi", "300 dpi", "600 dpi"]); self.dpi.setCurrentIndex(1)
-        self.pages = self.add("쪽", PageRangeEdit(total, current))
-        row = QWidget(); hl = QHBoxLayout(row); hl.setContentsMargins(0, 0, 0, 0)
-        self.out = QLineEdit(default_out); b = QPushButton("찾기"); b.clicked.connect(self._pick); hl.addWidget(self.out); hl.addWidget(b)
-        self.add("저장 위치", row)
-        self.fmt.currentIndexChanged.connect(self._sync)
-        self.open_after = self.add("", QCheckBox("끝나면 폴더 열기")); self.open_after.setChecked(True)
-
-    def _sync(self):
-        key = self.fmt.currentData()
-        base, _ = os.path.splitext(self.out.text())
-        if key in ("png", "jpg"):
-            self.out.setText(os.path.dirname(base) or base)
-        else:
-            ext = {"pdfa": ".pdf"}.get(key, "." + key)
-            self.out.setText((base if not os.path.isdir(base) else os.path.join(base, "변환")) + ext)
-        self.dpi.setEnabled(key in ("png", "jpg", "pptx"))
-
-    def _pick(self):
-        key = self.fmt.currentData()
-        if key in ("png", "jpg"):
-            d = QFileDialog.getExistingDirectory(self, "저장 폴더", self.out.text())
-            if d: self.out.setText(d)
-        else:
-            p, _ = QFileDialog.getSaveFileName(self, "저장", self.out.text())
-            if p: self.out.setText(p)
-
-    def values(self) -> dict:
-        return {"fmt": self.fmt.currentData(), "dpi": int(self.dpi.currentText().split()[0]), "pages": self.pages.pages(),
-                "out": self.out.text(), "open_after": self.open_after.isChecked()}
-
-
 class FileListDialog(QDialog):
     """파일 여러 개 모으기(합치기·일괄·파일에서 생성). 순서 바꾸기 됨."""
     def __init__(self, parent, title: str, ok_text: str, filters: str, extra: QWidget | None = None, paths: list[str] | None = None):
@@ -564,6 +519,11 @@ class FileListDialog(QDialog):
         return [self.list.item(k).data(Qt.ItemDataRole.UserRole) for k in range(self.list.count())]
 
 
+BATCH_FORMATS = [("Word (.docx)", "docx"), ("Excel (.xlsx)", "xlsx"), ("PowerPoint (.pptx)", "pptx"), ("이미지 (.png)", "png"),
+                 ("이미지 (.jpg)", "jpg"), ("텍스트 (.txt)", "txt"), ("HTML (.html)", "html"), ("RTF (.rtf)", "rtf"),
+                 ("EPUB (.epub)", "epub"), ("PDF/A (.pdf)", "pdfa"), ("한글 (.hwpx)", "hwpx")]
+
+
 class BatchDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -574,7 +534,7 @@ class BatchDialog(QDialog):
         self.op.addItem("암호화", "encrypt"); self.op.addItem("OCR", "ocr"); self.op.addItem("PDF 로 만들기(이미지·오피스·한글)", "create"); self.op.addItem("인쇄", "print")
         f = QFormLayout(); f.addRow("작업", self.op)
         self.fmt = QComboBox()
-        for label, key in ConvertDialog.FORMATS: self.fmt.addItem(label, key)
+        for label, key in BATCH_FORMATS: self.fmt.addItem(label, key)
         f.addRow("변환 형식", self.fmt)
         self.level = QComboBox(); self.level.addItems([label for _, label in COMPRESS_CHOICES]); f.addRow("압축 정도", self.level)
         self.wm = QLineEdit("대외비"); f.addRow("워터마크 글자", self.wm)
