@@ -26,7 +26,7 @@ from ..engine import annot_style as S
 from ..engine import annots as A
 from ..engine import pages as P
 from ..engine import stamps as ST
-from ..engine.document import Document, DocumentError, NeedsPassword
+from ..engine.document import Document, DocumentError, FileLocked, NeedsPassword
 from . import dialogs as D
 from . import dlg_organize as O
 from .dlg_deco import run_decorate
@@ -35,6 +35,8 @@ from .dlg_signature import SignatureDialog
 from . import dlg_pagebox as PB
 from . import dlg_split as DS
 from . import dlg_stamp as DST
+from . import dlg_password as PW
+from . import fileops as F
 from . import icons, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
@@ -422,6 +424,7 @@ class MainWindow(QMainWindow):
         fs = QToolButton(); fs.setObjectName("quick"); fs.setIcon(icons.icon("fullscreen", 14)); fs.setToolTip("전체 화면"); fs.clicked.connect(lambda: self.on_action("fullscreen")); sl.addWidget(fs)
         root.addWidget(self.status)
         self.setAcceptDrops(True)
+        self.autosave = F.Autosave(self)   # 고친 문서를 몇 분마다 복구 사본으로(환경 설정 「자동 저장」)
 
     def _shortcuts(self):
         """단축키를 건다(기본 키, 환경 설정 「단축키」 에서 바꾼 것은 settings 의 hotkeys). 바꾸면 다시 부른다."""
@@ -605,19 +608,37 @@ class MainWindow(QMainWindow):
 
     def open_path(self, path: str, password: str | None = None):
         path = os.path.abspath(path)
-        for k, t in enumerate(self.tabs):
-            if t.doc.path and os.path.abspath(t.doc.path) == path:
-                self.doctabs.setCurrentIndex(k); return
+        if path.lower().endswith(F.FDF_EXTS):   # 주석 파일은 지금 문서에 가져온다
+            t = self.cur()
+            if not t:
+                QMessageBox.information(self, "열기", "주석 파일(FDF·XFDF)은 PDF 문서를 먼저 연 뒤 가져올 수 있습니다."); return
+            try:
+                n, skipped = F.import_annot_file(t.doc, path)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, "열기", f"읽을 수 없는 파일입니다 ({e})"); return
+            t.changed(None); self.say(f"주석 {n}개를 가져왔습니다" + (f" · 못 가져온 것 {skipped}개" if skipped else "")); return
+        hit = F.find_open(self, path)   # 이미 열린 파일: 떼어 낸 다른 창이면 그 창을 앞으로
+        if hit:
+            F.bring(*hit); return
+        if self.tabs and not self.prefs.get("same_window", True):   # 「동일한 창에서 새 탭으로 문서 열기」 끔
+            w = MainWindow(settings=self.settings)
+            g = self.normalGeometry() if self.isMaximized() else self.geometry()
+            w.resize(g.size()); w.move(g.topLeft() + QPointF(40, 40).toPoint()); w.show()
+            w.open_path(path, password); return
         try:
             doc = Document(path, password)
         except NeedsPassword:
-            pw = D.ask_password(self, os.path.basename(path))
+            def check(pw: str) -> bool:
+                try:
+                    Document(path, pw).close(); return True
+                except DocumentError:
+                    return False
+            pw = PW.ask(self, os.path.basename(path), self.prefs, check,
+                        on_presets=lambda: PW.edit_presets(self, self.prefs) and save_settings(self.settings))
             if pw is None:
                 return
             try:
                 doc = Document(path, pw)
-            except NeedsPassword:
-                QMessageBox.warning(self, "암호", "암호가 맞지 않습니다"); return
             except DocumentError as e:
                 QMessageBox.critical(self, "열기", str(e)); return
         except DocumentError as e:
@@ -634,10 +655,10 @@ class MainWindow(QMainWindow):
         save_settings(self.settings)
 
     def open_dialog(self):
-        last = self.settings["recent"][0]["path"] if self.settings["recent"] else ""
-        # 닿지 않는 공유폴더에서 시작하면 열기 창이 한참 멈춘다: 있다고 확인된 파일의 폴더에서만 시작
-        start_dir = os.path.dirname(last) if (self.start.stats.known.get(last) or (False,))[0] else ""
-        paths, _ = QFileDialog.getOpenFileNames(self, "열기", start_dir, OPEN_FILTER)
+        # 마지막으로 연 폴더에서 시작(닿지 않는 공유폴더는 있다고 확인된 파일이 있을 때만, 없으면 내 문서)
+        paths, _ = QFileDialog.getOpenFileNames(self, "열기", F.open_start_dir(self), F.OPEN_FILTER)
+        if paths:
+            self.settings["last_open_dir"] = os.path.dirname(paths[0])
         for p in paths:
             self.open_path(p)
 
@@ -660,13 +681,17 @@ class MainWindow(QMainWindow):
         m.addAction("새 창으로 분리", lambda: tab_detach.move_tab(t)).setEnabled(n > 1)
         m.addSeparator()
         m.addAction("이 탭 닫기" + self.key_text("close"), lambda: self.close_tab(self.tabs.index(t)))
-        m.addAction("다른 탭 닫기", lambda: self.close_tabs([x for x in self.tabs if x is not t])).setEnabled(n > 1)
-        m.addAction("오른쪽 탭 닫기", lambda: self.close_tabs(self.tabs[self.tabs.index(t) + 1:])).setEnabled(i < n - 1)
-        m.addAction("모두 닫기", lambda: self.close_tabs(list(self.tabs)))
+        m.addAction("다른 탭 닫기", lambda: self.close_tabs([x for x in self.tabs if x is not t], confirm=True)).setEnabled(n > 1)
+        m.addAction("오른쪽 탭 닫기", lambda: self.close_tabs(self.tabs[self.tabs.index(t) + 1:], confirm=True)).setEnabled(i < n - 1)
+        m.addAction("모두 닫기", lambda: self.close_tabs(list(self.tabs), confirm=True))
         m.exec(self.doctabs.mapToGlobal(pos))
 
-    def close_tabs(self, tabs: list) -> bool:
-        """여러 탭을 뒤에서부터 닫는다. 저장을 묻다가 [취소] 하면 거기서 멈춘다."""
+    def close_tabs(self, tabs: list, confirm: bool = False) -> bool:
+        """여러 탭을 뒤에서부터 닫는다. 저장을 묻다가 [취소] 하면 거기서 멈춘다.
+        confirm: 탭 메뉴에서 사람이 고른 것(환경 설정 「여러 탭 닫기 전 확인」 이면 먼저 묻는다)."""
+        if confirm and len(tabs) > 1 and self.prefs.get("confirm_close_many", True) and QMessageBox.question(
+                self, "닫기", f"탭 {len(tabs)}개를 닫을까요?") != QMessageBox.StandardButton.Yes:
+            return False
         for t in reversed(tabs):
             if t in self.tabs and not self.close_tab(self.tabs.index(t)):
                 return False
@@ -1484,7 +1509,9 @@ class MainWindow(QMainWindow):
         cm = m.addMenu(icons.icon("create"), "생성")
         cm.addAction("파일에서 생성" + self.key_text("create_files"), lambda: self.on_action("create_files"))
         cm.addAction("빈 PDF" + self.key_text("create_blank"), lambda: self.on_action("create_blank"))
-        cm.addAction("클립보드에서 가져오기", lambda: self.on_action("create_clipboard")); cm.addAction("스캐너에서 생성", lambda: self.on_action("create_scan"))
+        cm.addAction("클립보드에서 가져오기", lambda: self.on_action("create_clipboard")).setEnabled(
+            F.clipboard_kind(QApplication.clipboard().mimeData()) is not None)
+        cm.addAction("스캐너에서 생성", lambda: self.on_action("create_scan"))
         m.addSeparator()
         a = m.addAction(icons.icon("save"), "저장" + self.key_text("save"), lambda: self.on_action("save")); a.setEnabled(bool(t))
         a = m.addAction(icons.icon("saveas"), "다른 이름으로 저장" + self.key_text("saveas"), lambda: self.on_action("saveas")); a.setEnabled(bool(t))
@@ -1542,17 +1569,29 @@ class MainWindow(QMainWindow):
     # ── 저장 ──────────────────────────────────────────────────
     def save(self, t: DocTab, ask: bool = False) -> bool:
         path = t.doc.path
-        if ask or not path or getattr(t.doc, "ask_save", False) or not path.lower().endswith(".pdf"):
-            start = getattr(t.doc, "save_hint", None) or path
-            path, _ = QFileDialog.getSaveFileName(self, "저장", self._suggest(t, ".pdf") if not start else start, PDF_FILTER)
-            if not path:
+        must_ask = ask or not path or getattr(t.doc, "ask_save", False) or not path.lower().endswith(".pdf")
+        if not must_ask and not t.doc.modified:   # 고친 것이 없으면 다시 쓰지 않는다(수정 시각 그대로)
+            return True
+        while True:
+            if must_ask:
+                path, _ = QFileDialog.getSaveFileName(self, "다른 이름으로 저장" if ask else "저장", F.save_suggestion(self, t.doc), PDF_FILTER)
+                if not path:
+                    return False
+                if F.bad_path(self, path):
+                    continue
+            try:
+                t.doc.save(path)
+                break
+            except FileLocked as e:   # 읽기 전용·다른 프로그램이 잡은 파일: 다른 이름으로 넘긴다
+                if not F.ask_save_as_instead(self, str(e)):
+                    return False
+                must_ask = True
+            except Exception as e:  # noqa: BLE001
+                F.save_error(self, e)
                 return False
-        try:
-            t.doc.save(path)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "저장", f"저장하지 못했습니다: {e}")
-            return False
-        t.doc.ask_save = False
+        t.doc.ask_save = False; t.doc.save_hint = None
+        self.autosave.drop(t.doc)
+        self.settings["last_open_dir"] = os.path.dirname(path)
         self.add_recent(path)
         i = self.tabs.index(t)
         self.doctabs.setTabText(i, t.doc.name); self.doctabs.setTabToolTip(i, path)
@@ -1568,10 +1607,14 @@ class MainWindow(QMainWindow):
         path = os.path.join(folder, t.doc.name if t.doc.name.lower().endswith(".pdf") else "문서.pdf")
         if os.path.exists(path) and QMessageBox.question(self, "저장", f"같은 이름이 있습니다. 덮어쓸까요?\n{path}") != QMessageBox.StandardButton.Yes:
             return
-        t.doc.save(path); self.add_recent(path); self.say(f"저장했습니다: {path}")
+        try:
+            t.doc.save(path)
+        except Exception as e:  # noqa: BLE001
+            F.save_error(self, e); return
+        self.autosave.drop(t.doc); self.add_recent(path); self.say(f"저장했습니다: {path}")
 
     def _suggest(self, t: DocTab, suffix: str) -> str:
-        base = os.path.splitext(t.doc.path)[0] if t.doc.path else os.path.join(self.prefs.get("default_dir") or os.path.expanduser("~"), "문서")
+        base = os.path.splitext(t.doc.path)[0] if t.doc.path else os.path.join(self.prefs.get("default_dir") or F.save_dir(self), os.path.splitext(t.doc.name)[0])
         return base + suffix
 
     def _offer_open(self, path: str):
@@ -1584,41 +1627,60 @@ class MainWindow(QMainWindow):
 
     # ── 생성 ──────────────────────────────────────────────────
     def create_blank(self):
-        dlg = D.InsertBlankDialog(self, 1, 0); dlg.setWindowTitle("빈 PDF"); dlg.where.hide(); dlg.form.labelForField(dlg.where).hide()
-        dlg.size.setCurrentText("A4")
-        if dlg.exec():
-            vals = dlg.values()
-            doc = Document.blank(vals["width"] or 595, vals["height"] or 842, vals["count"])
-            self.add_doc(doc)
+        """창 없이 환경 설정 「빈 PDF」 값으로(기본 A4 세로 한 쪽 「제목 없음」). 열린 문서와 이름이 겹치면 「제목 없음-2」."""
+        name, count, w, h = F.blank_spec(self.prefs)
+        doc = Document.blank(w, h, count)
+        doc.title = F.unique_title(F.open_names(self), name)
+        self.add_doc(doc)
 
     def create_from_files(self):
-        dlg = D.FileListDialog(self, "파일에서 생성", "만들기",
-                               "문서·이미지 (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif *.webp *.docx *.doc *.xlsx *.xls *.pptx *.ppt *.hwp *.hwpx *.txt *.html *.htm *.rtf *.epub *.xps);;모든 파일 (*)")
-        if not dlg.exec() or not dlg.paths():
+        """열기 창으로 고르고(둘 이상이면 순서 확인 창) 저장 안 된 새 탭으로 만든다."""
+        start = self.settings.get("last_create_dir") or ""
+        paths, _ = QFileDialog.getOpenFileNames(self, "파일에서 생성", start if F.safe_dir(self, start) else F.open_start_dir(self), F.CREATE_FILTER)
+        if not paths:
             return
-        self.create_from_paths(dlg.paths())
+        self.settings["last_create_dir"] = os.path.dirname(paths[0])
+        if len(paths) > 1:
+            dlg = D.FileListDialog(self, "파일에서 생성", "만들기", F.CREATE_FILTER, paths=paths)
+            if not dlg.exec() or not dlg.paths():
+                return
+            paths = dlg.paths()
+        self.create_from_paths(paths)
 
     def create_from_paths(self, paths: list[str]):
-        out, _ = QFileDialog.getSaveFileName(self, "만들 PDF", os.path.splitext(paths[0])[0] + ".pdf", PDF_FILTER)
-        if not out:
-            return
+        """파일들을 PDF 로 바꿔 저장 안 된 새 문서로 연다(저장할 때 원래 폴더에 그 이름으로 묻는다)."""
         C = _engine("convert")
-        res = D.ProgressDialog(self, "PDF 생성", C.from_files, paths, out).run()
-        if res:
-            self.open_path(out)
+        name = F.created_name(paths)
+        out = F.temp_out(name)
+        dlg = D.ProgressDialog(self, "PDF 생성", C.from_files, paths, out)
+        dlg.worker.start(); dlg.exec(); dlg.worker.wait(3000)
+        if dlg.error or not os.path.isfile(out):
+            why = (dlg.error or "").lstrip("!").split("\n\n")[0]
+            QMessageBox.critical(self, "PDF 생성 실패", "오류! PDF를 작성하지 못했습니다." + (f"\n{why}" if why else ""))
+            return
+        try:
+            doc = Document(out)
+        except DocumentError as e:
+            QMessageBox.critical(self, "PDF 생성 실패", f"오류! PDF를 작성하지 못했습니다.\n{e}"); return
+        doc.ask_save = True
+        doc.save_hint = os.path.join(os.path.dirname(paths[0]), name)
+        doc.modified = True
+        self.add_doc(doc)
 
     def create_from_clipboard(self):
         cb = QApplication.clipboard()
         md = cb.mimeData()
-        if md is not None and md.hasImage():
+        kind = F.clipboard_kind(md)
+        if kind == "files":   # 파일 목록: 「파일에서 생성」 과 같은 길
+            self.create_from_paths([u.toLocalFile() for u in md.urls() if u.isLocalFile() and os.path.isfile(u.toLocalFile())]); return
+        if kind == "image":
             img = cb.image()
             pfd, png = tempfile.mkstemp(suffix=".png"); os.close(pfd); img.save(png)
             pdfbytes = fitz.open(png).convert_to_pdf(); os.remove(png)
             # 이름(경로)을 주면 Ctrl+S 가 묻지 않고 지금 폴더에 「클립보드.pdf」 로 저장해 버린다
             doc = Document.from_bytes(pdfbytes)
-        elif md is not None and md.hasText():
-            doc = Document.blank()
-            A.add_text(doc, 0, fitz.Rect(56, 56, 539, 786), md.text(), 11)
+        elif kind == "text":   # 「파일에서 생성」 의 txt 길처럼 쪽을 늘려 가며 흘린다
+            doc = Document.from_bytes(_engine("convert").text_to_pdf_bytes(md.text()))
         else:
             self.say("클립보드에 그림이나 글자가 없습니다"); return
         self.add_doc(doc)

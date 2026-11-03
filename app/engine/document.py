@@ -23,6 +23,10 @@ class DocumentError(Exception):
     pass
 
 
+class FileLocked(DocumentError):
+    """그 자리에 쓸 수 없다(읽기 전용 파일·다른 프로그램이 잡고 있음). 화면은 「다른 이름으로 저장」 으로 넘긴다."""
+
+
 def _replace(src: str, dst: str):
     """같은 폴더의 사본을 원본 자리에 한 번에 바꿔 끼운다. 다른 프로그램이 잠깐 잡고 있으면 몇 번 다시 해 본다."""
     for k in range(6):
@@ -31,8 +35,21 @@ def _replace(src: str, dst: str):
             return
         except PermissionError:
             if k == 5:
-                raise DocumentError("다른 프로그램이 이 파일을 열고 있어 저장하지 못했습니다(원본은 그대로)") from None
+                raise FileLocked("다른 프로그램이 이 파일을 열고 있어 저장하지 못했습니다(원본은 그대로)") from None
             time.sleep(0.3)
+
+
+def read_only(path: str) -> bool:
+    """있는 파일인데 쓸 수 없나(읽기 전용 속성·권한). 없는 파일은 새로 만들 수 있으니 False."""
+    if not os.path.isfile(path):
+        return False
+    if not os.access(path, os.W_OK):
+        return True
+    try:
+        import stat
+        return bool(os.stat(path).st_file_attributes & stat.FILE_ATTRIBUTE_READONLY)
+    except (AttributeError, OSError):
+        return False
 
 
 def korean_font_name(page: fitz.Page, bold: bool = False) -> str:
@@ -300,7 +317,9 @@ class Document:
 
     @property
     def name(self) -> str:
-        return os.path.basename(self.path) if self.path else "제목 없음.pdf"
+        if self.path:
+            return os.path.basename(self.path)
+        return getattr(self, "title", None) or "제목 없음.pdf"   # 빈 PDF 「제목 없음-2.pdf」
 
     @property
     def page_count(self) -> int:
@@ -319,6 +338,8 @@ class Document:
         target = path or self.path
         if not target:
             raise DocumentError("저장할 이름이 없습니다")
+        if read_only(target):
+            raise FileLocked("읽기 전용 파일이라 저장하지 못했습니다(원본은 그대로)")
         with self.lock:
             fd, tmp = tempfile.mkstemp(suffix=".pdf", dir=os.path.dirname(os.path.abspath(target)) or None)
             os.close(fd)
