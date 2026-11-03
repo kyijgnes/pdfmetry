@@ -30,6 +30,8 @@ from ..engine.document import Document, DocumentError, FileLocked, NeedsPassword
 from . import dialogs as D
 from . import dlg_organize as O
 from .dlg_deco import run_decorate
+from .dlg_prefs import PreferencesDialog
+from .dlg_properties import PropertiesDialog
 from .dlg_measure import MeasureDialog
 from .dlg_signature import SignatureDialog
 from . import dlg_pagebox as PB
@@ -569,22 +571,37 @@ class MainWindow(QMainWindow):
         super().changeEvent(e)
 
     def add_doc(self, doc: Document, view: dict | None = None):
-        """view: 그 문서를 지난번에 닫을 때의 보기(_remember_view). 있으면 환경 설정의 「열 때 확대·보기」 대신 그 자리로 연다."""
+        """view: 그 문서를 지난번에 닫을 때의 보기(_remember_view). 있으면 환경 설정의 「열 때 확대·보기」 대신 그 자리로 연다.
+        환경 설정이 「자동」이고 문서에 초기 보기(속성 창 「보기」)가 적혀 있으면 그 보기·쪽으로 연다."""
         t = DocTab(doc, self)
         self._wire(t)
         self.tabs.append(t)
         self.docstack.addWidget(t)
         i = self.doctabs.addTab(doc.name)
         self.doctabs.setTabToolTip(i, doc.path or "")
-        pl = self.prefs.get("default_layout", "continuous")
-        zm = self.prefs.get("default_zoom", "last")
+        pl = self.prefs.get("default_layout", "auto")
+        zm = self.prefs.get("default_zoom", "auto")
         last = self.settings.get("last_zoom") or {}
-        if zm == "last":   # 마지막으로 쓴 확대: 맞추기였으면 그 맞추기, 직접 고른 배율이면 그 배율
+        iv = doc.initial_view()   # 문서에 적힌 초기 보기(속성 창 「보기」)
+        own = iv != {"mode": "none", "layout": "default", "zoom": "default", "page": 0}
+        if own and (pl == "auto" or zm == "auto"):   # 문서가 정한 보기가 그 문서를 지난번 닫은 자리보다 먼저
+            view = None
+        if pl == "auto":   # 자동: 문서의 레이아웃, 없으면 연속
+            pl = iv["layout"] if iv["layout"] != "default" else "continuous"
+        if zm == "auto":   # 자동: 문서가 정한 배율, 없으면 너비 맞춤
+            z = iv["zoom"]
+            zm, last = (("fixed", {"zoom": z}) if isinstance(z, float) else
+                        (z if z != "default" else "fit_width", last))
+        elif zm == "last":   # 마지막으로 쓴 확대: 맞추기였으면 그 맞추기, 직접 고른 배율이면 그 배율
             zm = last.get("mode", "fit_width")
+        elif re.fullmatch(r"p\d+", zm):   # 고정 배율(p10 … p600)
+            zm, last = "fixed", {"zoom": int(zm[1:]) / 100}
         if view and view.get("layout") in ("single", "continuous", "facing", "facing_continuous"):
             pl = view["layout"]
         if view and view.get("mode") in ("fixed", "fit_width", "fit_page", "fit_height", "actual"):
             zm = view["mode"]; last = {"zoom": view.get("zoom", 1.0)}
+        if not view and own:
+            view = {"page": iv["page"], "y": 0, "x": 0}
         t.viewer.layout_mode = pl
         t.viewer.zoom_mode = zm
         t.viewer.set_layout_mode(pl)
@@ -594,6 +611,10 @@ class MainWindow(QMainWindow):
         t.viewer.setBackgroundBrush(QColor(theme.DARK["CANVAS"] if self.prefs.get("dark") else theme.CANVAS))
         self.doctabs.setCurrentIndex(i)
         self._tab_changed(i)
+        if iv["mode"] in ("outlines", "thumbs"):   # 문서가 정한 탐색 탭
+            self.toggle_side("bookmark" if iv["mode"] == "outlines" else "thumbs")
+        if self.prefs.get("select_mode", "select") != t.viewer.tool:   # 처음 도구(환경 설정 「기본 선택 모드」)
+            self.on_tool(self.prefs.get("select_mode", "select"))
         def first_view():
             if t.viewer.closed:
                 return
@@ -2089,25 +2110,34 @@ class MainWindow(QMainWindow):
             self.say("메일 프로그램을 열었습니다. 파일은 직접 붙이세요: " + t.doc.path)
 
     def properties(self, t: DocTab):
-        dlg = D.PropertiesDialog(self, t.doc, t.doc.path)
-        if dlg.exec():
-            t.doc.set_metadata(dlg.values()); self.mark_modified()
+        def security(kind: str):   # 속성 창 「보안 정책」을 바꾸면 그 자리에서 암호 창을 띄운다
+            if kind == "password":
+                self.encrypt(t)
+            elif kind == "none":
+                self.decrypt(t)
+        words = dict(self.settings.get("word_count") or {})
+        dlg = PropertiesDialog(self, t.doc, t.viewer.current, self.settings, security)
+        ok = dlg.exec()
+        if (self.settings.get("word_count") or {}) != words:   # 단어 수는 취소해도 기억한다
+            save_settings(self.settings)
+        if not ok:
+            return
+        md, view = dlg.changed_metadata(), dlg.initial_view()
+        changed = bool(md)
+        if md:
+            t.doc.set_metadata(md)
+        if view is not None and t.doc.set_initial_view(view):
+            changed = True
+        if changed:
+            self.mark_modified()
 
-    def preferences(self):
-        dlg = D.PreferencesDialog(self, self.prefs)
-        from PySide6.QtWidgets import QLayout, QTabWidget
-        keys = K.ShortcutEditor(self.settings.get("hotkeys"))
-        tabs = dlg.findChild(QTabWidget)
-        if tabs is not None:   # 환경 설정 창 탭에 「단축키」 를 하나 더 단다
-            tabs.addTab(keys, "단축키")
-            dlg.layout().setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)   # 단축키 표가 잘리지 않게 창을 표 최소 크기 이상으로
-        if dlg.exec():
-            self.prefs.update(dlg.values())
-            if tabs is not None:
-                self.settings["hotkeys"] = keys.values(); self._shortcuts()
-            save_settings(self.settings); self.apply_theme()
-            for t in self.tabs:
-                t.viewer.props["author"] = self.prefs.get("author", ""); t.viewer.props["measure_unit"] = self.prefs.get("unit", "cm")
+    def preferences(self, page: str = "general"):
+        dlg = PreferencesDialog(self, self.settings, page)
+        if not dlg.exec():
+            return
+        save_settings(self.settings); self._shortcuts(); self.apply_theme()
+        for t in self.tabs:
+            t.viewer.props["author"] = self.prefs.get("author", ""); t.viewer.props["measure_unit"] = self.prefs.get("unit", "cm")
 
     def show_help(self):
         QMessageBox.information(self, "도움말",

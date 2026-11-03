@@ -12,12 +12,11 @@ from PySide6.QtGui import QColor, QRegularExpressionValidator
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QRadioButton, QSpinBox, QTabWidget, QTextEdit, QToolButton, QVBoxLayout,
+                               QPushButton, QRadioButton, QSpinBox, QTextEdit, QToolButton, QVBoxLayout,
                                QWidget)
 
 from ..engine import annots as A
 from ..engine import pages as P
-from ..engine.document import Document
 from . import theme
 
 PAGE_SIZES_MM = {"A4": (210, 297), "A3": (297, 420), "A5": (148, 210), "B4": (250, 353), "B5": (176, 250),
@@ -609,85 +608,6 @@ class BatchDialog(QDialog):
                 "watermark": {"text": self.wm.text()}, "encrypt": {"user_pw": self.pw.text()}, "ocr": {}, "create": {},
                 "print": {"printer": self.printer.currentText()}}[k]
         return {"op": k, "inputs": self.files.paths(), "out_dir": self.out.text(), "options": opts}
-
-
-# ── 속성 · 환경 설정 ───────────────────────────────────────────
-class PropertiesDialog(QDialog):
-    def __init__(self, parent, doc: Document, path: str | None):
-        super().__init__(parent)
-        self.setWindowTitle("파일 속성"); self.setMinimumWidth(460)
-        lay = QVBoxLayout(self)
-        tabs = QTabWidget(); lay.addWidget(tabs)
-        md = doc.metadata()
-        w1 = QWidget(); f1 = QFormLayout(w1)
-        self.edits = {}
-        for key, label in (("title", "제목"), ("author", "작성자"), ("subject", "주제"), ("keywords", "키워드"),
-                           ("creator", "만든 프로그램"), ("producer", "PDF 생성기")):
-            e = QLineEdit(md.get(key) or ""); self.edits[key] = e; f1.addRow(label, e)
-        f1.addRow("만든 날", QLabel(md.get("creationDate") or "")); f1.addRow("고친 날", QLabel(md.get("modDate") or ""))
-        tabs.addTab(w1, "설명")
-        w2 = QWidget(); f2 = QFormLayout(w2)
-        size = os.path.getsize(path) if path and os.path.exists(path) else 0
-        r = doc.fitz[0].rect if doc.page_count else fitz.Rect(0, 0, 0, 0)
-        f2.addRow("파일", QLabel(path or "(저장 안 됨)")); f2.addRow("크기", QLabel(f"{size / 1024:.1f} KB"))
-        f2.addRow("쪽 수", QLabel(str(doc.page_count)))
-        f2.addRow("쪽 크기", QLabel(f"{r.width / 72 * 25.4:.1f} × {r.height / 72 * 25.4:.1f} mm"))
-        f2.addRow("PDF 버전", QLabel(md.get("format") or ""))
-        f2.addRow("암호", QLabel("걸림" if doc.fitz.is_encrypted else "없음"))
-        f2.addRow("양식", QLabel("있음" if doc.fitz.is_form_pdf else "없음"))
-        f2.addRow("글자층", QLabel("있음" if any(doc.has_text(i) for i in range(min(3, doc.page_count))) else "없음(스캔본일 수 있음)"))
-        tabs.addTab(w2, "정보")
-        w3 = QWidget(); f3 = QFormLayout(w3)
-        perms = doc.fitz.permissions
-        for flag, label in ((fitz.PDF_PERM_PRINT, "인쇄"), (fitz.PDF_PERM_COPY, "복사"), (fitz.PDF_PERM_MODIFY, "바꾸기"),
-                            (fitz.PDF_PERM_ANNOTATE, "주석"), (fitz.PDF_PERM_FORM, "양식"), (fitz.PDF_PERM_ASSEMBLE, "쪽 구성")):
-            f3.addRow(label, QLabel("허용" if perms & flag else "금지"))
-        tabs.addTab(w3, "보안")
-        fonts = sorted({f[3] for i in range(min(doc.page_count, 30)) for f in doc.fitz[i].get_fonts()})
-        w4 = QListWidget(); w4.addItems(fonts); tabs.addTab(w4, f"글꼴 ({len(fonts)})")
-        lay.addWidget(_buttons(self, "저장"))
-
-    def values(self) -> dict:
-        return {k: e.text() for k, e in self.edits.items()}
-
-
-class PreferencesDialog(QDialog):
-    def __init__(self, parent, prefs: dict):
-        super().__init__(parent)
-        self.setWindowTitle("환경 설정"); self.setMinimumWidth(460)
-        lay = QVBoxLayout(self); tabs = QTabWidget(); lay.addWidget(tabs)
-        w = QWidget(); f = QFormLayout(w)
-        self.author = QLineEdit(prefs.get("author", "")); f.addRow("주석 작성자 이름", self.author)
-        self.autosave_style = QCheckBox("마지막에 고친 주석 모양을 기본값으로")
-        self.autosave_style.setChecked(prefs.get("annot_autosave_style", True)); f.addRow(self.autosave_style)
-        self.zoom = QComboBox(); self.zoom.addItems(["창 너비에 맞추기", "창 크기에 맞추기", "실제 크기", "마지막으로 쓴 확대"])
-        self.zoom.setCurrentIndex(["fit_width", "fit_page", "actual", "last"].index(prefs.get("default_zoom", "last")))
-        f.addRow("열 때 확대", self.zoom)
-        self.layout_ = QComboBox(); self.layout_.addItems(["연속", "한 쪽씩", "두 쪽", "두 쪽 연속"])
-        self.layout_.setCurrentIndex(["continuous", "single", "facing", "facing_continuous"].index(prefs.get("default_layout", "continuous")))
-        f.addRow("열 때 보기", self.layout_)
-        self.dark = QCheckBox("어두운 화면"); self.dark.setChecked(prefs.get("dark", False)); f.addRow(self.dark)
-        self.winsize = QComboBox(); self.winsize.addItems(["마지막으로 닫은 크기", "화면 가득", "보통 크기"])
-        self.winsize.setCurrentIndex(["last", "max", "normal"].index(prefs.get("window_size", "last"))); f.addRow("열 때 창 크기", self.winsize)
-        self.restore = QCheckBox("시작할 때 지난번 문서 다시 열기"); self.restore.setChecked(prefs.get("restore", False)); f.addRow(self.restore)
-        self.recent_n = QSpinBox(); self.recent_n.setRange(5, 100); self.recent_n.setValue(prefs.get("recent_n", 30)); f.addRow("최근 파일 개수", self.recent_n)
-        tabs.addTab(w, "일반")
-        w2 = QWidget(); f2 = QFormLayout(w2)
-        self.default_dir = QLineEdit(prefs.get("default_dir", "")); f2.addRow("변환 저장 폴더", self.default_dir)
-        self.share_dir = QLineEdit(prefs.get("share_dir", "")); f2.addRow("공유폴더", self.share_dir)
-        self.ocr_lang = QLineEdit(prefs.get("ocr_lang", "ko")); f2.addRow("OCR 언어", self.ocr_lang)
-        self.unit = QComboBox(); self.unit.addItems(["cm", "mm", "in", "pt"]); self.unit.setCurrentText(prefs.get("unit", "cm")); f2.addRow("측정 단위", self.unit)
-        tabs.addTab(w2, "폴더·도구")
-        lay.addWidget(_buttons(self, "저장"))
-
-    def values(self) -> dict:
-        return {"author": self.author.text(), "annot_autosave_style": self.autosave_style.isChecked(),
-                "default_zoom": ["fit_width", "fit_page", "actual", "last"][self.zoom.currentIndex()],
-                "default_layout": ["continuous", "single", "facing", "facing_continuous"][self.layout_.currentIndex()],
-                "dark": self.dark.isChecked(), "restore": self.restore.isChecked(),
-                "window_size": ["last", "max", "normal"][self.winsize.currentIndex()], "recent_n": self.recent_n.value(),
-                "default_dir": self.default_dir.text(), "share_dir": self.share_dir.text(), "ocr_lang": self.ocr_lang.text(),
-                "unit": self.unit.currentText()}
 
 
 # ── 비교 결과 ──────────────────────────────────────────────────
