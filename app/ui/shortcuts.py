@@ -34,6 +34,7 @@ TABLE: list[tuple[str, str, str, tuple[str, ...]]] = [
     ("search_replace", "검색", "검색 및 바꾸기", ("Ctrl+T",)),
     ("search_next", "검색", "다음 검색 결과", ("F3",)),
     ("search_prev", "검색", "이전 검색 결과", ("Shift+F3",)),
+    ("search_advanced", "검색", "고급 검색", ("Ctrl+Shift+F",)),
     ("zoom_actual", "확대", "실제 크기", ("Ctrl+1",)),
     ("zoom_width", "확대", "창 너비에 맞추기", ("Ctrl+2",)),
     ("zoom_height", "확대", "창 높이에 맞추기", ("Ctrl+3",)),
@@ -90,6 +91,7 @@ TABLE: list[tuple[str, str, str, tuple[str, ...]]] = [
     ("batch_convert", "도구", "일괄 변환", ("Ctrl+F3",)),
     ("print_batch", "도구", "일괄 인쇄", ("Ctrl+F2",)),
     ("help", "공통", "도움말", ("F1",)),
+    ("about", "공통", "제품 버전", ("Shift+Alt+F11",)),
 ]
 NAMES = {k: name for k, _, name, _ in TABLE}
 DEFAULTS = {k: list(keys) for k, _, _, keys in TABLE}
