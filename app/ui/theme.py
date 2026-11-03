@@ -33,6 +33,42 @@ DARK = {"BG": "#1F2023", "BAR": "#26272B", "BAR_LINE": "#35363B", "CANVAS": "#14
 
 CUR: dict = dict(LIGHT)  # 지금 테마. 아이콘이 그릴 때 여기 색을 쓴다(qss() 가 바꿈)
 
+# 스킨: 시스템 테마(윈도우 앱 모드를 따라감) · 라이트 · 다크. prefs["theme"], 옛 prefs["dark"] 는 옮긴다.
+SKINS = (("system", "시스템 테마"), ("light", "라이트"), ("dark", "다크"))
+_system_dark: bool | None = None   # 윈도우가 알려 준 앱 모드(바뀜 신호로 받은 값). 없으면 그때 물어본다
+
+
+def skin(prefs: dict) -> str:
+    """지금 스킨 이름. 옛 설정(dark: true/false)이 남아 있으면 theme 열쇠로 옮긴다."""
+    if "dark" in prefs:
+        old = prefs.pop("dark")
+        prefs.setdefault("theme", "dark" if old else "light")
+    t = prefs.get("theme", "light")
+    return t if t in dict(SKINS) else "light"
+
+
+def set_system_scheme(scheme) -> None:
+    """윈도우 앱 모드가 바뀌었다(QStyleHints.colorSchemeChanged)."""
+    from PySide6.QtCore import Qt
+    global _system_dark
+    _system_dark = scheme == Qt.ColorScheme.Dark
+
+
+def system_dark() -> bool:
+    if _system_dark is not None:
+        return _system_dark
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QGuiApplication
+        return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def is_dark(prefs: dict) -> bool:
+    s = skin(prefs)
+    return system_dark() if s == "system" else s == "dark"
+
 
 def _images(c: dict, dark: bool) -> dict[str, str]:
     """화살표·체크 그림을 1배·2배로 그려 임시 폴더에 둔다. QSS 는 url 의 @2x 를 고해상도 화면에서 알아서 쓴다."""
@@ -160,6 +196,14 @@ def qss(dark: bool = False) -> str:
     QToolButton#rb::menu-button:hover {{ background: {c['PRESSED']}; }}
     QToolButton#rb::menu-arrow {{ image: {down}; width: 10px; height: 6px; }}
     QToolButton#quick {{ background: transparent; border: none; padding: 4px; border-radius: 4px; }}
+    QPushButton#panelclose, QToolButton#stripbtn {{ background: transparent; border: none; border-radius: 4px; padding: 0; }}
+    QPushButton#panelclose:hover, QToolButton#stripbtn:hover {{ background: {c['HOVER']}; }}
+    QToolButton#paneltitlebtn {{ background: transparent; border: none; font-weight: bold; padding: 4px 6px; border-radius: 4px; }}
+    QToolButton#paneltitlebtn:hover {{ background: {c['HOVER']}; }}
+    QWidget#leftfold, QWidget#rightfold {{ background: {c['BAR']}; }}
+    QWidget#leftfold {{ border-right: 1px solid {c['BAR_LINE']}; }}
+    QWidget#rightfold {{ border-left: 1px solid {c['BAR_LINE']}; }}
+    QWidget#statushot {{ background: {c['BAR_LINE']}; }}
     QToolButton#quick:hover {{ background: {c['HOVER']}; }}
     QToolButton#quick:pressed {{ background: {c['PRESSED']}; }}
     QToolButton#quick:checked {{ background: {c['SELECT_BG']}; }}

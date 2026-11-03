@@ -252,11 +252,16 @@ def test_clipboard_kind_files(folder):
 
 
 def test_close_many_asks_from_menu(win, folder, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-    for n in ("x.pdf", "y.pdf", "z.pdf"):
+    from app.ui import window as W
+    for n in ("x.pdf", "y.pdf", "z.pdf", "w.pdf"):
         win.open_path(make_pdf(os.path.join(folder, n)))
     pump()
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
-    assert win.close_tabs(list(win.tabs), confirm=True) is False and len(win.tabs) == 3
-    win.prefs["confirm_close_many"] = False
+    answer = [None]
+    monkeypatch.setattr(W, "ask_close_many", lambda *a, **k: answer[0])
+    assert win.close_tabs(list(win.tabs), confirm=True) is False and len(win.tabs) == 4   # 그만둠
+    answer[0] = "current"   # 현재 탭 닫기: 지금 탭 하나만
+    cur = win.cur()
+    assert win.close_tabs(list(win.tabs), confirm=True) is False and len(win.tabs) == 3 and cur not in win.tabs
+    answer[0] = "always"    # 항상 모든 탭 닫기: 다 닫고 다음부터 묻지 않음
     assert win.close_tabs(list(win.tabs), confirm=True) and not win.tabs
+    assert win.prefs["confirm_close_many"] is False

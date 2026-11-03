@@ -80,8 +80,9 @@ def test_zoom_box_steps_and_filter(win, pdf):
     win.open_path(pdf); pump(0.2)
     box = win.zoom_box
     items = [box.itemText(i) for i in range(box.count())]
-    assert items[0] == "5%" and "33.3%" in items and "1600%" in items and "창 너비" in items
-    assert win.zoom_slider.minimum() == 5 and win.zoom_slider.maximum() == 1600
+    # 배율 칸 목록에는 배율만(맞춤은 상태줄 맞춤 방식 펼침), 슬라이더 눈금은 단계표 차례
+    assert items[0] == "5%" and "33.3%" in items and "1600%" in items and "창 너비" not in items
+    assert win.zoom_slider.minimum() == 0 and win.zoom_slider.maximum() == len(V.PageView.STEPS) - 1
     val = box.validator()
     assert val.validate("12a", 3)[0] == QValidator.State.Invalid
     assert val.validate("250%", 4)[0] == QValidator.State.Acceptable
@@ -98,9 +99,9 @@ def test_page_box_reverts_on_bad_input(win, pdf):
     v = win.cur().viewer
     v.goto(2); pump(0.05)
     win.page_edit.setText("99"); win._goto_entered()
-    assert v.current == 2 and win.page_edit.text() == "3"
+    assert v.current == 2 and win.page_edit.text() == "3 / 6"   # 쪽 칸 하나에 「현재 / 전체」
     win.page_edit.setText("가나"); win._goto_entered()
-    assert win.page_edit.text() == "3"
+    assert win.page_edit.text() == "3 / 6"
     win.page_edit.setText("5"); win._goto_entered()
     assert v.current == 4
 

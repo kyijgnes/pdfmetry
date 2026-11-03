@@ -39,7 +39,7 @@ from . import dlg_split as DS
 from . import dlg_stamp as DST
 from . import dlg_password as PW
 from . import fileops as F
-from . import icons, tab_detach, theme
+from . import icons, sidebars as SB, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
 from .inline_annot import InlineAnnot, NotePopup, comment_style
@@ -49,10 +49,9 @@ from .quick_style import QuickStyle, eraser_radius, has_quick_style, style_key
 from .ribbon import ANNOT_TOOLS, LABELS, TOOL_KEYS, Ribbon, keep_tool
 from .sidebar import AnnotPanel, AttachmentPanel, BookmarkPanel, FieldPanel, LayerPanel, SearchPanel, ThumbnailPanel
 from .start import StartPage
+from .statusbar import StatusBar
 from .update import UpdateUI
 from .viewer import PageView
-from PySide6.QtCore import QRegularExpression  # noqa: E402  (보기 탭: 배율 칸 거르기)
-from PySide6.QtGui import QRegularExpressionValidator  # noqa: E402
 from . import fullscreen, tile as tiler  # noqa: E402
 from .viewer import BG_MODES as VIEW_BG, ZOOM_FITS, ZOOM_MAX, ZOOM_MIN, pct_text  # noqa: E402
 
@@ -63,6 +62,9 @@ PDF_FILTER = "PDF 파일 (*.pdf);;모든 파일 (*)"
 # 리본 단추 앞머리 → 꾸미기 종류(「watermark_update」 는 워터마크 업데이트)
 DECO_KEYS = {"watermark": "watermark", "background": "background", "headerfooter": "header_footer",
              "pagenumber": "page_number", "bates": "bates"}
+MAX_TABS = 50   # 한 창에 여는 탭 수 상한(떼어 낸 창은 따로 센다)
+MAIL_MAX = 20 * 1024 * 1024   # Outlook 에 붙일 수 있는 크기
+NOT_FOUND = "열려고 하는 문서가 존재하지 않습니다. 이동되었거나 이름 변경 또는 삭제되었을 수 있습니다."
 OPEN_FILTER = "PDF·이미지·문서 (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif *.webp *.xps *.epub *.txt *.svg *.cbz);;PDF 파일 (*.pdf);;모든 파일 (*)"
 
 
@@ -90,14 +92,58 @@ def save_settings(s: dict):
         json.dump(s, f, ensure_ascii=False, indent=1)
 
 
+def ask_close_many(parent, n: int) -> str | None:
+    """여러 탭을 닫기 전에 묻는다: "all"(모든 탭 닫기) · "current"(현재 탭 닫기) · "always"(항상 모든 탭 닫기) · None(그만둠)."""
+    box = QMessageBox(parent); box.setWindowTitle("닫기"); box.setIcon(QMessageBox.Icon.Question)
+    box.setText(f"열린 탭 {n}개를 모두 닫을까요?")
+    every = box.addButton("모든 탭 닫기", QMessageBox.ButtonRole.AcceptRole)
+    one = box.addButton("현재 탭 닫기", QMessageBox.ButtonRole.ActionRole)
+    always = box.addButton("항상 모든 탭 닫기", QMessageBox.ButtonRole.ActionRole)
+    box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(every)
+    box.exec()
+    return {every: "all", one: "current", always: "always"}.get(box.clickedButton())
+
+
 class DocTabBar(QTabBar):
     """문서 탭 줄. 가운데 단추로 누르면 그 탭을 닫는다. 탭을 줄 위아래로 끌어내면 tornOff(그 탭 번호)."""
     tornOff = Signal(int)
     TEAR = 24   # 탭 줄 위아래로 이만큼 벗어나면 떼어 낸다
 
+    HOVER_MS = 500   # 파일을 끄는 중 탭 위에 이만큼 머물면 그 탭으로
+
     def __init__(self):
         super().__init__()
         self._press = None
+        self.setAcceptDrops(True)
+        self._hover = -1
+        self._hover_timer = QTimer(self); self._hover_timer.setSingleShot(True); self._hover_timer.setInterval(self.HOVER_MS)
+        self._hover_timer.timeout.connect(lambda: self._hover >= 0 and self.setCurrentIndex(self._hover))
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if not e.mimeData().hasUrls():
+            return super().dragMoveEvent(e)
+        e.acceptProposedAction()
+        i = self.tabAt(e.position().toPoint())
+        if i != self._hover:
+            self._hover = i
+            self._hover_timer.stop()
+            if i >= 0 and i != self.currentIndex():
+                self._hover_timer.start()
+
+    def dragLeaveEvent(self, e):
+        self._hover = -1; self._hover_timer.stop()
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        self._hover = -1; self._hover_timer.stop()
+        self.window().dropEvent(e)   # 탭 줄에 놓아도 창에 놓은 것처럼 연다
 
     def mousePressEvent(self, e):
         p = e.position().toPoint()
@@ -143,7 +189,7 @@ class DocTab(QWidget):
         self.search = SearchPanel(doc)
         self.layers = LayerPanel(doc)
         self.fieldlist = FieldPanel(doc)
-        self.side = QStackedWidget(); self.side.setObjectName("sidepanel"); self.side.setFixedWidth(240)
+        self.side = QStackedWidget(); self.side.setObjectName("sidepanel")
         self.panels = {"thumbs": self.thumbs, "bookmark": self.bookmarks, "comments": self.annots, "attach": self.attachments,
                        "search": self.search, "layers": self.layers, "fields": self.fieldlist}
         for p in self.panels.values():
@@ -155,9 +201,7 @@ class DocTab(QWidget):
         self.warn = QLabel(""); self.warn.setObjectName("warn"); self.warn.hide()
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
         root.addWidget(self.warn)
-        row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(0)
-        row.addWidget(self.side); row.addWidget(self.view_stack, 1); row.addWidget(self.props)
-        root.addLayout(row)
+        root.addWidget(SB.build(self), 1)   # 왼쪽 패널 · 보기 · 속성 패널(폭을 끌어 바꿈)
         self.side_key = ""
         # 신호
         self.thumbs.pageClicked.connect(self.viewer.goto)
@@ -193,9 +237,17 @@ class DocTab(QWidget):
             self.side.hide(); self.side_key = ""
             return
         self.side_key = key
-        self.side.setCurrentWidget(self.panels[key]); self.side.show()
+        self.side.setCurrentWidget(self.panels[key]); self.side.show(); SB.fit(self)
         if key == "search":
             self.search.focus()
+
+    def panel_closed(self, head):
+        """패널 머리의 닫기 ◀ ▶: 그 패널이 든 옆 칸을 닫는다."""
+        if self.props.isAncestorOf(head):
+            self.win.right_action("props")
+        else:
+            self.side.hide(); self.side_key = ""
+            self.win.toggle_side("")
 
     def changed(self, pages: list[int] | None, structural: bool = False, mapping: list[int | None] | None = None):
         """문서가 바뀌었다: 뷰어·썸네일·목록을 새로 그린다.
@@ -277,11 +329,14 @@ class MainWindow(QMainWindow):
         self._receiver = None   # 다른 데서 켠 PDF메트리가 파일을 넘겨 오는 곳(single.Receiver)
         self._closing = False   # 창을 닫는 중(탭마다 설정을 쓰지 않고 끝에 한 번)
         self._emptied = False   # 탭을 모두 다른 창으로 옮겨서 닫는 창(창 크기·열린 문서를 기억하지 않는다)
+        self._user_close = False   # 「끝내기」로 닫는다(제목줄 ✕ 처럼 여러 탭 질문을 한다)
         self._build()
         self.apply_theme()
         self._shortcuts()
         self.show_start()
         tab_detach.register(self)
+        from PySide6.QtGui import QGuiApplication
+        QGuiApplication.styleHints().colorSchemeChanged.connect(self._scheme_changed)
 
     def show_initial(self):
         """켤 때 창 크기: 환경 설정 「열 때 창 크기」(마지막으로 닫은 크기 · 화면 가득 · 보통 크기)."""
@@ -350,8 +405,14 @@ class MainWindow(QMainWindow):
         self.doctabs.tornOff.connect(lambda i: tab_detach.start_drag(self, i))
         tl.addWidget(self.doctabs)
         addb = QToolButton(); addb.setObjectName("quick"); addb.setIcon(icons.icon("add", 16)); addb.setToolTip("열기"); addb.clicked.connect(self.open_dialog)
-        tl.addWidget(addb); tl.addStretch()
+        tl.addWidget(addb)
+        self.tablist = QToolButton(); self.tablist.setObjectName("quick"); self.tablist.setIcon(icons.icon("down", 14)); self.tablist.setToolTip("탭 목록")
+        self.tablist.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tm = QMenu(self.tablist); tm.aboutToShow.connect(lambda m=tm: self._fill_tab_list(m)); self.tablist.setMenu(tm)
+        tl.addWidget(self.tablist); tl.addStretch()
         self.updates = UpdateUI(self); tl.addWidget(self.updates.bar)  # [새 버전 x 설치]·「설치 끝」. 시작 화면에서도 보이는 줄
+        gear = QToolButton(); gear.setObjectName("quick"); gear.setIcon(icons.icon("settings", 16)); gear.setToolTip("환경 설정")
+        gear.clicked.connect(lambda: self.on_action("preferences")); tl.addWidget(gear)
         root.addWidget(tabrow)
         # 리본
         self.ribbon = Ribbon()
@@ -361,10 +422,19 @@ class MainWindow(QMainWindow):
         self.ribbon.rangePicked.connect(self.pick_range)
         self.ribbon.fileMenu.connect(self.show_file_menu)
         root.addWidget(self.ribbon)
+        # 마지막 리본 탭·접힘·빠른 실행 단추를 되살린다
+        if self.settings.get("ribbon_tab") in self.ribbon.pages:
+            self.ribbon.set_tab(self.settings["ribbon_tab"])
+        self.ribbon.set_folded(bool(self.settings.get("ribbon_folded")))
+        self.ribbon.set_qat(self.prefs.get("qat") or {})
+        self.ribbon.tabChanged.connect(lambda k: self.settings.__setitem__("ribbon_tab", k))
+        self.ribbon.foldChanged.connect(lambda on: (self.settings.__setitem__("ribbon_folded", on), save_settings(self.settings)))
+        self.ribbon.qatChanged.connect(self._qat_changed)
         # 본문
         self.body = QStackedWidget()
         self.start = StartPage(self.settings["recent"], self.settings["favorites"])
         self.start.openFile.connect(self.open_dialog); self.start.openPath.connect(self.open_path)
+        self.start.openPath.disconnect(self.open_path); self.start.openPath.connect(self._open_recent)
         self.start.tool.connect(self.start_tool); self.start.newBlank.connect(lambda: self.on_action("create_blank"))
         self.start.recentChanged.connect(lambda: save_settings(self.settings))
         self.body.addWidget(self.start)
@@ -377,10 +447,13 @@ class MainWindow(QMainWindow):
             b = QToolButton(); b.setObjectName("nav"); b.setIcon(icons.icon(name, 16)); b.setToolTip(tip); b.setCheckable(True)
             b.clicked.connect(lambda _, k=key: self.toggle_side(k)); nl.addWidget(b); self.navbtns[key] = b
         nl.addStretch()
+        self.rightstrip = QWidget(); self.rightstrip.setObjectName("rightstrip"); self.rightstrip.setFixedWidth(34)
+        self.bars = SB.Bars(self, self.navstrip, self.rightstrip, lambda: save_settings(self.settings))
+        nl.addWidget(self.bars.left_btn)
         hb = QToolButton(); hb.setObjectName("nav"); hb.setIcon(icons.icon("help", 16)); hb.setToolTip("도움말"); hb.clicked.connect(self.show_help); nl.addWidget(hb)
+        dl.addWidget(self.bars.left_strip)
         dl.addWidget(self.navstrip)
         self.docstack = QStackedWidget(); dl.addWidget(self.docstack, 1)
-        self.rightstrip = QWidget(); self.rightstrip.setObjectName("rightstrip"); self.rightstrip.setFixedWidth(34)
         rl = QVBoxLayout(self.rightstrip); rl.setContentsMargins(0, 6, 0, 6); rl.setSpacing(2)
         self.rightbtns = {}
         for key, name, tip in (("props", "props", "속성"), ("fields", "fields", "양식 칸"), ("sign", "signature", "서명"), ("translate", "translate", "글자 번역·검색")):
@@ -388,47 +461,18 @@ class MainWindow(QMainWindow):
             b.setStyleSheet("QToolButton#nav{border-left:none; border-right:2px solid transparent} QToolButton#nav:checked{border-right:2px solid %s}" % theme.ACCENT)
             b.clicked.connect(lambda _, k=key: self.right_action(k)); rl.addWidget(b); self.rightbtns[key] = b
         rl.addStretch()
+        rl.addWidget(self.bars.right_btn)
         dl.addWidget(self.rightstrip)
+        dl.addWidget(self.bars.right_strip)
+        self.bars.sync()
         self.body.addWidget(docarea)
         root.addWidget(self.body, 1)
-        # 상태줄
-        self.status = QWidget(); self.status.setObjectName("statusbar"); self.status.setFixedHeight(28)
-        sl = QHBoxLayout(self.status); sl.setContentsMargins(8, 0, 8, 0); sl.setSpacing(4)
-        self.size_label = QLabel(""); sl.addWidget(self.size_label)
-        self.msg_label = QLabel(""); self.msg_label.setObjectName("dim"); sl.addWidget(self.msg_label)
-        self.msg_label.setMinimumWidth(1)  # 긴 알림이 창 최소 폭을 밀어 올리지 않게(넘치면 잘리고 툴팁에 원문)
-        sl.addStretch()
-        self.sb_hand = QToolButton(); self.sb_hand.setObjectName("quick"); self.sb_hand.setIcon(icons.icon("hand", 16)); self.sb_hand.setCheckable(True); self.sb_hand.setToolTip("손")
-        self.sb_sel = QToolButton(); self.sb_sel.setObjectName("quick"); self.sb_sel.setIcon(icons.icon("select", 16)); self.sb_sel.setCheckable(True); self.sb_sel.setToolTip("선택")
-        self.sb_hand.clicked.connect(lambda: self.on_tool("hand")); self.sb_sel.clicked.connect(lambda: self.on_tool("select"))
-        sl.addWidget(self.sb_hand); sl.addWidget(self.sb_sel); sl.addSpacing(8)
-        for key, name in (("first", "first"), ("prev", "prev")):
-            b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(name, 14)); b.clicked.connect(lambda _, k=key: self.on_action(k)); sl.addWidget(b)
-        self.page_edit = QLineEdit(); self.page_edit.setFixedWidth(44); self.page_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.page_edit.returnPressed.connect(self._goto_entered); sl.addWidget(self.page_edit)
-        self.page_total = QLabel("/ 0"); sl.addWidget(self.page_total)
-        for key, name in (("next", "next"), ("last", "last")):
-            b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(name, 14)); b.clicked.connect(lambda _, k=key: self.on_action(k)); sl.addWidget(b)
-        self.sb_hist = {}
-        for key, name in (("prev_view", "back"), ("next_view", "forward")):   # 이전 보기 · 다음 보기(Alt+← · Alt+→)
-            b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(name, 14))
-            b.clicked.connect(lambda _, k=key: self.on_action(k)); sl.addWidget(b); self.sb_hist[key] = b
-        sl.addSpacing(8)
-        for key, name, tip in (("layout_single", "single", "한 페이지씩"), ("layout_continuous", "continuous", "연속"),
-                               ("layout_facing", "facing", "두 페이지"), ("layout_facing_continuous", "tile", "두 페이지 연속")):
-            b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(name, 14)); b.setToolTip(tip)
-            b.clicked.connect(lambda _, k=key: self.on_action(k)); sl.addWidget(b)
-        sl.addStretch()
-        zo = QToolButton(); zo.setObjectName("quick"); zo.setIcon(icons.icon("zoomout", 14)); zo.clicked.connect(lambda: self.on_action("zoomout")); sl.addWidget(zo)
-        self.zoom_slider = QSlider(Qt.Orientation.Horizontal); self.zoom_slider.setRange(10, 800); self.zoom_slider.setFixedWidth(110)
-        self.zoom_slider.sliderMoved.connect(self._zoom_slider); sl.addWidget(self.zoom_slider)
-        zi = QToolButton(); zi.setObjectName("quick"); zi.setIcon(icons.icon("zoomin", 14)); zi.clicked.connect(lambda: self.on_action("zoomin")); sl.addWidget(zi)
-        self.zoom_box = QComboBox(); self.zoom_box.setEditable(True); self.zoom_box.setFixedWidth(92)
-        self.zoom_box.addItems(["50%", "75%", "100%", "125%", "150%", "200%", "300%", "400%", "창 너비", "창 높이", "창 크기", "실제 크기"])
-        self.zoom_box.activated.connect(self._zoom_box); self.zoom_box.lineEdit().returnPressed.connect(self._zoom_box)
-        sl.addWidget(self.zoom_box)
-        fs = QToolButton(); fs.setObjectName("quick"); fs.setIcon(icons.icon("fullscreen", 14)); fs.setToolTip("전체 화면"); fs.clicked.connect(lambda: self.on_action("fullscreen")); sl.addWidget(fs)
+        # 상태줄(접으면 아래 감지 띠)
+        self.status = StatusBar(self)
+        for name in ("size_label", "msg_label", "sb_hand", "sb_sel", "sb_hist", "page_edit", "zoom_slider", "zoom_box"):
+            setattr(self, name, getattr(self.status, name))
         root.addWidget(self.status)
+        root.addWidget(self.status.hot)
         self.setAcceptDrops(True)
         self.autosave = F.Autosave(self)   # 고친 문서를 몇 분마다 복구 사본으로(환경 설정 「자동 저장」)
 
@@ -453,11 +497,50 @@ class MainWindow(QMainWindow):
 
     # ── 테마 ──────────────────────────────────────────────────
     def apply_theme(self):
-        dark = bool(self.prefs.get("dark"))
+        """스킨(prefs["theme"]: 시스템 테마 · 라이트 · 다크)대로 칠한다. 시스템이면 윈도우 앱 모드를 따른다."""
+        dark = theme.is_dark(self.prefs)
         QApplication.instance().setStyleSheet(theme.qss(dark))
-        self.ribbon.set_toggle("dark", dark)
         for t in self.tabs:
             t.viewer.setBackgroundBrush(QColor(theme.DARK["CANVAS"] if dark else theme.CANVAS))
+
+    def set_skin(self, name: str):
+        if name not in dict(theme.SKINS):
+            return
+        self.prefs["theme"] = name; self.prefs.pop("dark", None)
+        save_settings(self.settings)
+        for w in [self] + tab_detach.others(self):   # 떼어 낸 창의 문서 바탕도
+            w.apply_theme()
+
+    def _scheme_changed(self, scheme):
+        """윈도우 앱 모드가 바뀌었다: 스킨이 「시스템 테마」 면 바로 다시 칠한다."""
+        theme.set_system_scheme(scheme)
+        if theme.skin(self.prefs) == "system":
+            self.apply_theme()
+
+    def save_settings_now(self):
+        save_settings(self.settings)
+
+    def _qat_changed(self, key: str, on: bool):
+        q = self.prefs.setdefault("qat", {})
+        q[key] = on
+        save_settings(self.settings)
+
+    def _fill_tab_list(self, m: QMenu):
+        """탭 목록 ▾: 열린 문서 이름(고친 것은 ●), 지금 탭에 체크."""
+        m.clear()
+        cur = self.cur()
+        for i, t in enumerate(self.tabs):
+            a = m.addAction(self._tab_label(t), lambda i=i: self.doctabs.setCurrentIndex(i))
+            a.setCheckable(True); a.setChecked(t is cur)
+        if not self.tabs:
+            m.addAction("열린 문서 없음").setEnabled(False)
+
+    def _tab_room(self) -> bool:
+        """탭을 하나 더 열 자리가 있나(없으면 알림)."""
+        if len(self.tabs) < MAX_TABS:
+            return True
+        QMessageBox.information(self, "탭", f"탭은 {MAX_TABS}개까지 열 수 있습니다. 다른 탭을 닫고 여세요.")
+        return False
 
     # ── 탭·문서 ───────────────────────────────────────────────
     def cur(self) -> DocTab | None:
@@ -468,7 +551,7 @@ class MainWindow(QMainWindow):
         self.body.setCurrentWidget(self.start)
         self.start.reload()
         self.ribbon.set_enabled_all(False)
-        self.status.hide()
+        self.status.set_active(False)
         self.doctabs.blockSignals(True); self.doctabs.setCurrentIndex(-1); self.doctabs.blockSignals(False)
 
     def _tab_changed(self, i: int):
@@ -478,7 +561,7 @@ class MainWindow(QMainWindow):
         self.body.setCurrentWidget(self.body.widget(1))
         self.docstack.setCurrentWidget(t)
         self.ribbon.set_enabled_all(True)
-        self.status.show()
+        self.status.set_active(True)
         self.setWindowTitle(f"{t.doc.name} - {APP_NAME}")
         for k, b in self.navbtns.items():
             b.setChecked(t.side.isVisible() and t.side_key == k)
@@ -533,8 +616,14 @@ class MainWindow(QMainWindow):
         return ("● " if t.doc.modified else "") + t.doc.name
 
     def attach_tab(self, t: DocTab, index: int = -1):
-        """다른 창에서 옮겨 온 탭을 index 자리(-1 이면 끝)에 붙이고 그 탭을 보여 준다."""
+        """다른 창에서 옮겨 온 탭을 index 자리(-1 이면 끝)에 붙이고 그 탭을 보여 준다.
+        이 창이 꽉 찼으면(MAX_TABS) 알리고 새 창에 붙인다."""
+        if len(self.tabs) >= MAX_TABS:
+            self._tab_room()
+            w = MainWindow(settings=self.settings); w.show(); w.attach_tab(t)
+            return
         t.win = self
+        self.bars.apply_tab(t)
         self._wire(t)
         if not 0 <= index <= len(self.tabs):
             index = len(self.tabs)
@@ -577,7 +666,10 @@ class MainWindow(QMainWindow):
     def add_doc(self, doc: Document, view: dict | None = None):
         """view: 그 문서를 지난번에 닫을 때의 보기(_remember_view). 있으면 환경 설정의 「열 때 확대·보기」 대신 그 자리로 연다.
         환경 설정이 「자동」이고 문서에 초기 보기(속성 창 「보기」)가 적혀 있으면 그 보기·쪽으로 연다."""
+        if len(self.tabs) >= MAX_TABS:
+            self._tab_room(); doc.close(); return None
         t = DocTab(doc, self)
+        self.bars.apply_tab(t)
         self._wire(t)
         self.tabs.append(t)
         self.docstack.addWidget(t)
@@ -613,13 +705,20 @@ class MainWindow(QMainWindow):
         t.viewer.props["author"] = self.prefs.get("author", "")
         t.viewer.props["measure_unit"] = self.prefs.get("unit", "cm")
         # apply_theme 은 그때 열린 탭만 칠한다. 어두운 화면에서 새로 연 문서도 문서 뒤 바탕을 맞춘다
-        t.viewer.setBackgroundBrush(QColor(theme.DARK["CANVAS"] if self.prefs.get("dark") else theme.CANVAS))
+        t.viewer.setBackgroundBrush(QColor(theme.DARK["CANVAS"] if theme.is_dark(self.prefs) else theme.CANVAS))
         self.doctabs.setCurrentIndex(i)
         self._tab_changed(i)
-        if iv["mode"] in ("outlines", "thumbs"):   # 문서가 정한 탐색 탭
-            self.toggle_side("bookmark" if iv["mode"] == "outlines" else "thumbs")
-        if self.prefs.get("select_mode", "select") != t.viewer.tool:   # 처음 도구(환경 설정 「기본 선택 모드」)
-            self.on_tool(self.prefs.get("select_mode", "select"))
+        side = view.get("side") if view else None   # 지난번 닫을 때 열려 있던 왼쪽 패널
+        if iv["mode"] in ("outlines", "thumbs") and not side:   # 문서가 정한 탐색 탭
+            side = "bookmark" if iv["mode"] == "outlines" else "thumbs"
+        if side in t.panels:
+            if self.bars.left_collapsed:   # 접힌 막대는 펴지 않고 펼 때 그 패널이 열리게
+                t.side_key = side; t.side.setCurrentWidget(t.panels[side]); self.bars._open_left.add(t)
+            else:
+                self.toggle_side(side)
+        tool = view.get("tool") if view and view.get("tool") in ("hand", "select") else self.prefs.get("select_mode", "select")
+        if tool != t.viewer.tool:   # 처음 도구(지난번 그 문서의 손·선택, 없으면 환경 설정 「기본 선택 모드」)
+            self.on_tool(tool)
         def first_view():
             if t.viewer.closed:
                 return
@@ -631,6 +730,17 @@ class MainWindow(QMainWindow):
             else:
                 t.viewer.goto(0, remember=False)
         QTimer.singleShot(60, first_view)
+        return t
+
+    def _open_recent(self, path: str):
+        """시작 화면 최근·즐겨찾기 목록에서 연다. 없어진 파일은 알리고 목록에서 지운다."""
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "파일 열기 실패", NOT_FOUND)
+            self.settings["recent"][:] = [r for r in self.settings["recent"] if r["path"] != path]
+            self.settings["favorites"][:] = [p for p in self.settings["favorites"] if p != path]
+            save_settings(self.settings); self.start.reload()
+            return
+        self.open_path(path)
 
     def open_path(self, path: str, password: str | None = None):
         path = os.path.abspath(path)
@@ -651,6 +761,8 @@ class MainWindow(QMainWindow):
             g = self.normalGeometry() if self.isMaximized() else self.geometry()
             w.resize(g.size()); w.move(g.topLeft() + QPointF(40, 40).toPoint()); w.show()
             w.open_path(path, password); return
+        if not self._tab_room():
+            return
         try:
             doc = Document(path, password)
         except NeedsPassword:
@@ -669,8 +781,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "열기", str(e)); return
         except DocumentError as e:
             QMessageBox.critical(self, "열기", str(e)); return
-        self.add_doc(doc, view=self._saved_view(path))
-        self.add_recent(path)
+        if self.add_doc(doc, view=self._saved_view(path)) is not None:
+            self.add_recent(path)
 
     def add_recent(self, path: str):
         rec = self.settings["recent"]
@@ -700,6 +812,7 @@ class MainWindow(QMainWindow):
         m.addAction("저장" + self.key_text("save"), lambda: self.save(t)).setEnabled(t.doc.modified or not t.doc.path)
         m.addAction("다른 이름으로 저장" + self.key_text("saveas"), lambda: self.save(t, ask=True))
         m.addSeparator()
+        m.addAction("파일 이름 바꾸기", lambda: self.rename_dialog(t)).setEnabled(bool(path) and not t.doc.modified)
         m.addAction("파일 위치 열기", lambda: subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])).setEnabled(bool(path))
         m.addAction("경로 복사", lambda: (QApplication.clipboard().setText(os.path.normpath(path)), self.say("경로를 복사했습니다")
                                          )).setEnabled(bool(path))
@@ -712,12 +825,54 @@ class MainWindow(QMainWindow):
         m.addAction("모두 닫기", lambda: self.close_tabs(list(self.tabs), confirm=True))
         m.exec(self.doctabs.mapToGlobal(pos))
 
+    def rename_dialog(self, t: DocTab):
+        old = os.path.splitext(os.path.basename(t.doc.path))[0]
+        name, ok = QInputDialog.getText(self, "파일 이름 바꾸기", "새 이름", text=old)
+        if ok and name.strip() and name.strip() != old:
+            self.rename_file(t, name.strip())
+
+    def rename_file(self, t: DocTab, name: str) -> bool:
+        """디스크의 파일 이름을 바꾸고 탭·창 제목·최근·즐겨찾기 목록을 따라 바꾼다(고친 문서는 저장 뒤에)."""
+        old = os.path.abspath(t.doc.path)
+        ext = os.path.splitext(old)[1]
+        if not name.lower().endswith(ext.lower()):
+            name += ext
+        if re.search(r'[\\/:*?"<>|]', name):
+            QMessageBox.warning(self, "파일 이름 바꾸기", '파일 이름에 \\ / : * ? " < > | 는 쓸 수 없습니다.'); return False
+        new = os.path.join(os.path.dirname(old), name)
+        if os.path.exists(new) and os.path.normcase(new) != os.path.normcase(old):
+            QMessageBox.warning(self, "파일 이름 바꾸기", f"같은 이름의 파일이 이미 있습니다.\n{new}"); return False
+        try:
+            os.rename(old, new)
+        except OSError as e:
+            QMessageBox.warning(self, "파일 이름 바꾸기", f"이름을 바꾸지 못했습니다 ({e.strerror or e})"); return False
+        t.doc.path = new
+        for r in self.settings["recent"]:
+            if os.path.abspath(r["path"]) == old:
+                r["path"] = new
+        self.settings["favorites"][:] = [new if os.path.abspath(p) == old else p for p in self.settings["favorites"]]
+        if t in self.tabs:
+            i = self.tabs.index(t)
+            self.doctabs.setTabText(i, self._tab_label(t)); self.doctabs.setTabToolTip(i, new)
+        self.update_title()
+        save_settings(self.settings)
+        return True
+
     def close_tabs(self, tabs: list, confirm: bool = False) -> bool:
         """여러 탭을 뒤에서부터 닫는다. 저장을 묻다가 [취소] 하면 거기서 멈춘다.
-        confirm: 탭 메뉴에서 사람이 고른 것(환경 설정 「여러 탭 닫기 전 확인」 이면 먼저 묻는다)."""
-        if confirm and len(tabs) > 1 and self.prefs.get("confirm_close_many", True) and QMessageBox.question(
-                self, "닫기", f"탭 {len(tabs)}개를 닫을까요?") != QMessageBox.StandardButton.Yes:
-            return False
+        confirm: 탭 메뉴에서 사람이 고른 것(환경 설정 「여러 탭 닫기 전 확인」 이면 먼저 묻는다:
+        모든 탭 닫기 · 현재 탭 닫기 · 항상 모든 탭 닫기). 다 닫았으면 참."""
+        if confirm and len(tabs) > 1 and self.prefs.get("confirm_close_many", True):
+            how = ask_close_many(self, len(tabs))
+            if how is None:
+                return False
+            if how == "current":
+                t = self.cur()
+                if t is not None:
+                    self.close_tab(self.tabs.index(t))
+                return False
+            if how == "always":
+                self.prefs["confirm_close_many"] = False; save_settings(self.settings)
         for t in reversed(tabs):
             if t in self.tabs and not self.close_tab(self.tabs.index(t)):
                 return False
@@ -730,7 +885,8 @@ class MainWindow(QMainWindow):
         v = t.viewer
         page, y, x = v.view_pos()
         state = {"page": page, "y": y, "x": x, "zoom": round(v.zoom, 4), "mode": v.zoom_mode, "layout": v.layout_mode,
-                 "cover": v.cover_separate}
+                 "cover": v.cover_separate, "side": t.side_key if t.side_key and (t.side.isVisible() or t in self.bars._open_left) else "",
+                 "tool": v.tool if v.tool in ("hand", "select") else "select"}
         path = os.path.abspath(t.doc.path)
         for r in self.settings["recent"]:
             if os.path.abspath(r["path"]) == path:
@@ -765,6 +921,19 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, e: QCloseEvent):
+        # 사람이 닫을 때(제목줄 ✕·Alt+F4·끝내기) 탭이 여럿이면 먼저 묻는다
+        if (e.spontaneous() or self._user_close) and not self._emptied and len(self.tabs) > 1                 and self.prefs.get("confirm_close_many", True):
+            self._user_close = False
+            how = ask_close_many(self, len(self.tabs))
+            if how is None:
+                e.ignore(); return
+            if how == "current":
+                if self.cur() is not None:
+                    self.close_tab(self.tabs.index(self.cur()))
+                e.ignore(); return
+            if how == "always":
+                self.prefs["confirm_close_many"] = False
+        self._user_close = False
         rest = tab_detach.others(self)
         if not self._emptied:
             self._remember_window()
@@ -824,10 +993,11 @@ class MainWindow(QMainWindow):
         self.msg_label.setText(msg); self.msg_label.setToolTip(msg)
         QTimer.singleShot(5000, lambda: self.msg_label.setText("") if self.msg_label.text() == msg else None)
 
-    def _zoom_slider(self, v: int):
+    def _zoom_slider(self, i: int):
+        """상태줄 슬라이더: 눈금 하나가 확대 단계표 한 칸."""
         t = self.cur()
-        if t:
-            t.viewer.zoom_mode = "fixed"; t.viewer.set_zoom(v / 100)
+        if t and 0 <= i < len(PageView.STEPS):
+            t.viewer.zoom_mode = "fixed"; t.viewer.set_zoom(PageView.STEPS[i])
 
     def _remember_zoom(self, t: DocTab):
         if t is self.cur():   # 다음에 여는 문서가 따라갈 확대(환경 설정 「열 때 확대」가 마지막 확대일 때)
@@ -838,18 +1008,11 @@ class MainWindow(QMainWindow):
             return
         v = t.viewer
         w, h = t.doc.page_size(v.current)
-        self.size_label.setText(f"{w / 72 * 2.54:.2f} x {h / 72 * 2.54:.2f} cm")
-        self.page_edit.setText(str(v.current + 1)); self.page_total.setText(f"/ {t.doc.page_count}")
-        if self.zoom_slider.maximum() != int(ZOOM_MAX * 100):   # 확대 범위·목록을 단계표로(상태줄을 지을 때는 옛 값)
-            self.zoom_slider.setRange(int(ZOOM_MIN * 100), int(ZOOM_MAX * 100))
-            self.zoom_box.clear(); self.zoom_box.addItems([pct_text(z) for z in PageView.STEPS] + list(ZOOM_FITS))
-            self.zoom_box.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9.%]*"), self.zoom_box))
-        self.zoom_slider.blockSignals(True); self.zoom_slider.setValue(int(round(v.zoom * 100))); self.zoom_slider.blockSignals(False)
-        self.zoom_box.setEditText(pct_text(v.zoom))
+        labels = P.labels(t.doc)
+        self.status.show_page(v.current, t.doc.page_count, labels[v.current] if 0 <= v.current < len(labels) else "")
+        self.status.sync_view(v, self.prefs, w, h)   # 쪽 크기(단위) · 배율 · 맞춤·보기 방식 펼침 아이콘 · 손/선택
         v.sync_prefs(self.prefs)
         self.ribbon.set_enabled("tile", tiler.doc_count() >= 2)
-        self.sb_hand.setChecked(v.tool == "hand"); self.sb_sel.setChecked(v.tool == "select")
-        self.sb_hist["prev_view"].setEnabled(bool(v._back)); self.sb_hist["next_view"].setEnabled(bool(v._fwd))
         i = self.tabs.index(t)
         self.doctabs.setTabText(i, ("● " if t.doc.modified else "") + t.doc.name)
 
@@ -857,15 +1020,14 @@ class MainWindow(QMainWindow):
         t = self.cur()
         if not t:
             return
-        txt = self.page_edit.text().strip()
+        txt = self.status.page_text()
         labels = P.labels(t.doc)
         if txt in labels:
             t.viewer.goto(labels.index(txt))
         elif txt.isdigit() and 1 <= int(txt) <= t.doc.page_count:
             t.viewer.goto(int(txt) - 1)
         else:   # 못 읽으면 지금 쪽으로 되돌린다
-            cur = t.viewer.current
-            self.page_edit.setText(labels[cur] if 0 <= cur < len(labels) and labels[cur] else str(cur + 1))
+            self.status.show_page()
 
     def _zoom_box(self, *_):
         t = self.cur()
@@ -883,10 +1045,18 @@ class MainWindow(QMainWindow):
         self.zoom_box.setEditText(pct_text(t.viewer.zoom))
 
     def toggle_side(self, key: str):
+        """왼쪽 패널 열고 닫기(같은 단추를 다시 누르면 닫음). key 가 빈 글자면 단추 켜짐만 맞춘다.
+        막대를 통째로 접어 두었으면 먼저 편다."""
         t = self.cur()
         if not t:
             return
-        t.show_side(key)
+        if key:
+            if self.bars.left_collapsed:
+                self.bars.set_left(False)
+                if t.side.isVisible() and t.side_key == key:   # 펴면서 그 패널이 다시 열렸다
+                    key = ""
+            if key:
+                t.show_side(key)
         for k, b in self.navbtns.items():
             b.setChecked(t.side.isVisible() and t.side_key == k)
 
@@ -895,7 +1065,11 @@ class MainWindow(QMainWindow):
         if not t:
             return
         if key == "props":
-            t.props.setVisible(not t.props.isVisible()); self.rightbtns["props"].setChecked(t.props.isVisible())
+            if self.bars.right_collapsed:   # 접은 오른쪽 막대는 펴면서 속성을 연다
+                self.bars.set_right(False); t.props.show()
+            else:
+                t.props.setVisible(not t.props.isVisible())
+            SB.fit(t); self.rightbtns["props"].setChecked(t.props.isVisible())
         elif key == "fields":
             self.toggle_side("fields"); self.rightbtns["fields"].setChecked(t.side.isVisible() and t.side_key == "fields")
         elif key == "sign":
@@ -1079,8 +1253,8 @@ class MainWindow(QMainWindow):
 
     def on_toggle(self, key: str, on: bool):
         t = self.cur()
-        if key == "dark":
-            self.prefs["dark"] = on; save_settings(self.settings); self.apply_theme(); return
+        if key == "dark":   # 옛 「어두운 화면」 켜고 끄기(지금은 스킨 다크·라이트)
+            self.set_skin("dark" if on else "light"); return
         if not t:
             return
         if key == "edit_all":
@@ -1101,7 +1275,7 @@ class MainWindow(QMainWindow):
                 self.settings.setdefault("keep_tool", {})[tool] = on; save_settings(self.settings)
             self._sync_keep(t)
         elif key == "read_mode":
-            self.ribbon.stack.setVisible(not on); self.navstrip.setVisible(not on); self.rightstrip.setVisible(not on)
+            self.ribbon.stack.setVisible(not on and not self.ribbon.folded); self.bars.set_read_mode(on)
             if on:
                 t.side.hide(); t.props.hide()
 
@@ -1115,13 +1289,15 @@ class MainWindow(QMainWindow):
             elif key == "save" and t: self.save(t)
             elif key == "saveas" and t: self.save(t, ask=True)
             elif key == "close" and t: self.close_tab(self.tabs.index(t))
-            elif key == "quit": self.close()
+            elif key == "quit": self._user_close = True; self.close()
             elif key == "print" and t: self.print_doc(t)
             elif key == "print_batch": self.batch_dialog()
             elif key == "properties" and t: self.properties(t)
             elif key == "preferences": self.preferences()
             elif key == "help": self.show_help()
             elif key == "mail" and t: self.mail(t)
+            elif key.startswith("skin_"): self.set_skin(key[5:])
+            elif key == "ribbon_fold": self.ribbon.set_folded(not self.ribbon.folded)
             elif key == "next_tab" and self.tabs: self.doctabs.setCurrentIndex((self.doctabs.currentIndex() + 1) % len(self.tabs))
             elif key == "prev_tab" and self.tabs: self.doctabs.setCurrentIndex((self.doctabs.currentIndex() - 1) % len(self.tabs))
             elif key == "undo" and t:
@@ -1177,7 +1353,8 @@ class MainWindow(QMainWindow):
             elif key in ("search_next", "search_prev"):
                 if t.search.hits: t.search.step(1 if key == "search_next" else -1)
                 else: self.show_search()
-            elif key == "side_left":
+            elif key == "side_left":   # F4: 내용 칸만 열고 닫기(막대를 접어 두었으면 편다)
+                if self.bars.left_collapsed: self.bars.set_left(False)
                 if t.side.isVisible(): t.side.hide()
                 else: t.show_side(t.side_key or "thumbs")
                 for k, b in self.navbtns.items(): b.setChecked(t.side.isVisible() and t.side_key == k)
@@ -1187,7 +1364,6 @@ class MainWindow(QMainWindow):
             elif key in ("ribbon_next", "ribbon_prev"):
                 keys = list(self.ribbon.pages); i = keys.index(self.ribbon.current_tab) if self.ribbon.current_tab in keys else 0
                 self.ribbon.set_tab(keys[(i + (1 if key == "ribbon_next" else -1)) % len(keys)])
-            elif key == "ribbon_fold": self.ribbon.stack.setVisible(not self.ribbon.stack.isVisible())
             elif key == "bookmark_add": t.show_side("bookmark") if not t.side.isVisible() else None; t.bookmarks.add()
             elif key == "bookmark_rename":
                 if not t.bookmarks.tree.currentItem(): self.say("이름을 바꿀 북마크를 먼저 고르세요"); return
@@ -2025,6 +2201,8 @@ class MainWindow(QMainWindow):
 
     def view_checked(self, key: str):
         """보기 탭 펼침 메뉴의 체크(리본이 메뉴를 열 때 묻는다). 체크가 없는 항목은 None."""
+        if key.startswith("skin_"):   # 스킨은 문서 없이도
+            return theme.skin(self.prefs) == key[5:]
         t = self.cur()
         if t is None:
             return None
@@ -2152,6 +2330,9 @@ class MainWindow(QMainWindow):
         if not t.doc.path or t.doc.modified:
             if QMessageBox.question(self, "메일", "먼저 저장해야 보낼 수 있습니다. 저장할까요?") != QMessageBox.StandardButton.Yes or not self.save(t):
                 return
+        if os.path.getsize(t.doc.path) > MAIL_MAX:
+            QMessageBox.warning(self, "문서 크기가 20MB를 초과했습니다", "20MB 이상의 문서는 Outlook에 첨부할 수 없습니다.")
+            return
         try:
             import win32com.client  # noqa: F401
             ol = win32com.client.Dispatch("Outlook.Application"); mail = ol.CreateItem(0)

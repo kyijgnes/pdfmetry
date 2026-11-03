@@ -17,15 +17,35 @@ from ..engine.document import Bookmark, Document
 from . import icons, theme
 
 
-def panel_head(title: str, buttons=()) -> QWidget:
-    """패널 머리: 제목 + 오른쪽 작은 단추들. 패널마다 높이·여백·밑줄이 달랐던 것을 한 모양으로."""
+def panel_head(title: str, buttons=(), more=None, closable: bool = True) -> QWidget:
+    """패널 머리: 제목 + 오른쪽 작은 단추들 + 닫기 ◀. 패널마다 높이·여백·밑줄이 달랐던 것을 한 모양으로.
+    more: QMenu 를 채우는 함수. 주면 제목이 단추가 되어 누르면 그 패널의 더보기 메뉴가 뜬다.
+    closable: 닫기 단추. 누르면 패널을 품은 탭의 panel_closed(머리)를 불러 그 옆 칸을 닫는다."""
     w = QWidget(); w.setObjectName("panelhead"); w.setFixedHeight(32)
     w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
     hl = QHBoxLayout(w); hl.setContentsMargins(10, 0, 4, 0); hl.setSpacing(0)
-    t = QLabel(title); t.setObjectName("paneltitle"); hl.addWidget(t); hl.addStretch()
+    if more is None:
+        t = QLabel(title); t.setObjectName("paneltitle")
+    else:
+        hl.setContentsMargins(4, 0, 4, 0)
+        t = QToolButton(); t.setObjectName("paneltitlebtn"); t.setText(title)
+        t.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        m = QMenu(t); m.aboutToShow.connect(lambda: (m.clear(), more(m))); t.setMenu(m)
+    hl.addWidget(t); hl.addStretch()
     for name, tip, fn in buttons:
         b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(name, 16)); b.setToolTip(tip)
         b.clicked.connect(fn); hl.addWidget(b)
+    if closable:
+        # QPushButton: 패널이 머리의 QToolButton 을 세어 쓰므로(썸네일 작게·크게) 다른 종류로
+        c = QPushButton(); c.setObjectName("panelclose"); c.setFlat(True); c.setFixedSize(24, 24)
+        c.setIcon(icons.icon("prev", 14)); c.setToolTip("닫기")
+        def close():
+            p = w.parentWidget()
+            while p is not None and not hasattr(p, "panel_closed"):
+                p = p.parentWidget()
+            if p is not None:
+                p.panel_closed(w)
+        c.clicked.connect(close); hl.addWidget(c)
     return w
 
 

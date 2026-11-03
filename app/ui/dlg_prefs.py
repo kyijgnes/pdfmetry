@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 from ..appinfo import APP_NAME
 from . import dialogs as D
 from . import shortcuts as K
+from . import theme
 from .dlg_properties import UNIT_PT, nav_buttons
 
 PAGES = (("general", "일반"), ("font", "글꼴"), ("ocr", "OCR"), ("unit", "단위"), ("password", "비밀번호"),
@@ -181,7 +182,7 @@ class PreferencesDialog(QDialog):
         self.autosave_style.setChecked(p.get("annot_autosave_style", True)); f.addRow(self.autosave_style)
         # 알PDF 에 없는 우리 칸
         self.author = QLineEdit(p.get("author", "")); f.addRow("주석 작성자 이름", self.author)
-        self.dark = QCheckBox("어두운 화면"); self.dark.setChecked(p.get("dark", False)); f.addRow(self.dark)
+        self.skin = self._combo(theme.SKINS, theme.skin(p)); f.addRow("스킨", self.skin)
         self.winsize = self._combo((("last", "마지막으로 닫은 크기"), ("max", "화면 가득"), ("normal", "보통 크기")),
                                    p.get("window_size", "last"))
         f.addRow("열 때 창 크기", self.winsize)
@@ -203,7 +204,7 @@ class PreferencesDialog(QDialog):
             "autosave_min": self.autosave_min.value(), "restore": self.restore.isChecked(),
             "confirm_close_many": self.confirm_many.isChecked(), "same_window": self.same_window.isChecked(),
             "annot_autosave_style": self.autosave_style.isChecked(), "author": self.author.text(),
-            "dark": self.dark.isChecked(), "window_size": self.winsize.currentData(),
+            "theme": self.skin.currentData(), "window_size": self.winsize.currentData(),
             "share_dir": self.share_dir.text(), "default_dir": self.default_dir.text()})
 
     # ── 글꼴 ─────────────────────────────────────────────────────

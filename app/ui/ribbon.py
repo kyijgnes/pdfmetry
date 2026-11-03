@@ -101,7 +101,7 @@ TABS: list[tuple[str, str, list]] = [
         ("compare", "compare", "비교", "action", None), ("snapshot_tool", "snapshot", "캡처", "action", None),
         ("grid", "grid", "눈금자 & 격자", "menu", [("toggle_grid", "격자"), ("toggle_ruler", "눈금자")]),
         ("tile", "tile", "타일", "menu", [("tile_h", "가로 바둑판식 배열"), ("tile_v", "세로 바둑판식 배열")]), SEP,
-        ("dark", "dark", "어두운 화면", "toggle", None),
+        ("skin", "dark", "스킨", "menu", [("skin_system", "시스템 테마"), ("skin_light", "라이트"), ("skin_dark", "다크")]),
     ]),
     ("page", "구성", [
         ("thumb_out", "zoomout", "", "action", None), ("thumb_in", "zoomin", "", "action", None), SEP,
@@ -181,7 +181,11 @@ def keep_tool(settings: dict, key: str) -> bool:
     return bool((settings.get("keep_tool") or {}).get(key, key not in KEEP_OFF))
 
 # 열 때 지금 상태에 체크를 다는 메뉴(창의 view_checked(항목)이 켜짐을 알려 준다)
-CHECK_MENUS = {"zoom_menu", "layout_menu", "canvas_menu", "grid"}
+CHECK_MENUS = {"zoom_menu", "layout_menu", "canvas_menu", "grid", "skin"}
+
+# 빠른 실행 ▾ 의 단추 켜고 끄기(prefs["qat"]). 「리본」 은 리본 아랫줄 보이기(F8 접기와 같은 것)
+QAT_ITEMS = (("save", "저장"), ("print", "인쇄"), ("undo", "실행 취소"), ("redo", "다시 실행"), ("mail", "메일로 보내기"),
+             ("ribbon", "리본"))
 
 COMMENT_ANNOT_KEYS = [it[0] for t, _, items in TABS if t == "comment" for it in items
                       if it != SEP and it[0] not in ("show_annots", "snapshot")]
@@ -196,6 +200,8 @@ class Ribbon(QWidget):
     searchRequested = Signal(str)
     fileMenu = Signal()
     rangePicked = Signal(str)     # 구성 탭 범위 콤보: all·even·odd 또는 넣은 범위 글
+    qatChanged = Signal(str, bool)   # 빠른 실행 ▾ 체크(단추 열쇠, 보임)
+    foldChanged = Signal(bool)    # 리본 아랫줄 접힘
     RANGE_ITEMS = (("짝수 페이지", "even"), ("홀수 페이지", "odd"), ("모든 페이지", "all"))
 
     def __init__(self, parent=None):
@@ -212,6 +218,11 @@ class Ribbon(QWidget):
             b.clicked.connect(lambda _, k=key: self.action.emit(k)); tl.addWidget(b); self.quick[key] = b
         qm = QToolButton(); qm.setObjectName("quick"); qm.setIcon(icons.icon("down", 14)); qm.setToolTip("빠른 실행 단추")
         menu = QMenu(qm)
+        self.qat_acts: dict[str, QAction] = {}
+        for key, label in QAT_ITEMS:
+            a = menu.addAction(label); a.setCheckable(True); a.setChecked(True)
+            a.toggled.connect(lambda on, k=key: self._qat_toggled(k, on)); self.qat_acts[key] = a
+        menu.addSeparator()
         for key, label in (("saveas", "다른 이름으로 저장"), ("properties", "파일 속성"), ("preferences", "환경 설정")):
             menu.addAction(label, lambda k=key: self.action.emit(k))
         qm.setMenu(menu); qm.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup); tl.addWidget(qm)
@@ -243,6 +254,7 @@ class Ribbon(QWidget):
         shade.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True); lay.addWidget(shade)
         self._widths: dict[str, tuple[int, list[int], list[QToolButton]]] = {}
         self.current_tab = "home"
+        self.folded = False
         self.set_edit_target("all")
         self.set_tab("home")
 
@@ -409,6 +421,33 @@ class Ribbon(QWidget):
             self.quickStyle.emit(key, btn)
         else:
             self.tool.emit("hand")
+
+    # ── 빠른 실행 · 접기 ────────────────────────────────────────
+    def _qat_toggled(self, key: str, on: bool):
+        if key == "ribbon":
+            self.set_folded(not on)
+        else:
+            self.quick[key].setVisible(on)
+        self.qatChanged.emit(key, on)
+
+    def set_qat(self, shown: dict):
+        """빠른 실행 단추 보이기(prefs["qat"], 없는 열쇠는 보임). 「리본」 은 set_folded 가 맡는다."""
+        for key, a in self.qat_acts.items():
+            if key == "ribbon":
+                continue
+            on = bool(shown.get(key, True))
+            a.blockSignals(True); a.setChecked(on); a.blockSignals(False)
+            self.quick[key].setVisible(on)
+
+    def set_folded(self, on: bool):
+        """리본 아랫줄 접기(F8 · 빠른 실행 「리본」 체크)."""
+        on = bool(on)
+        self.stack.setVisible(not on)
+        a = self.qat_acts["ribbon"]
+        a.blockSignals(True); a.setChecked(not on); a.blockSignals(False)
+        if on != self.folded:
+            self.folded = on
+            self.foldChanged.emit(on)
 
     def set_tab(self, key: str):
         self.current_tab = key
