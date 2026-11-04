@@ -303,6 +303,8 @@ def test_table_recognize_two_tables_copy_html(win, boxes):
     md = QApplication.clipboard().mimeData()
     assert md.hasHtml() and "<table" in md.html() and "r1c1" in md.html()
     assert "r0c0\tr0c1\tr0c2" in md.text()
+    # offscreen Qt 는 HTML 이 든 클립보드를 남긴 채 끝나면 죽고(종료 139), 그 전에 다음 창의 setStyleSheet 에서 죽기도 한다
+    QApplication.clipboard().clear()
     # 두 번째 표를 눌러 고른다
     rr = tool._scene_rect(1)
     from PySide6.QtGui import QMouseEvent
