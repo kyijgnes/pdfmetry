@@ -1431,7 +1431,7 @@ class MainWindow(QMainWindow):
                                    "crop_pages": "crop", "rotate_pages": "rotate", "delete_blank": "delete_blank"}.get(key, key), pages or [v.current])
             # 변환
             elif key.startswith("to_"): self.convert(t, key[3:])
-            elif key == "convert_settings": self.convert(t, "docx")
+            elif key == "convert_settings": self.convert_settings()
             elif key == "batch": self.batch_dialog()
             # 도구
             elif key == "ocr": self.ocr(t)
@@ -1843,8 +1843,9 @@ class MainWindow(QMainWindow):
             m.addAction(icons.icon("share"), "공유폴더에 저장", lambda: self.save_to_dir(self.prefs["share_dir"])).setEnabled(bool(t))
         m.addSeparator()
         em = m.addMenu(icons.icon("export"), "내보내기"); em.setEnabled(bool(t))
-        for label, key in (("Word", "to_docx"), ("Excel", "to_xlsx"), ("PowerPoint", "to_pptx"), ("이미지", "to_png"), ("HTML", "to_html"),
-                           ("RTF", "to_rtf"), ("텍스트", "to_txt"), ("Epub", "to_epub"), ("PDF/A", "to_pdfa"), ("한글(HWPX)", "to_hwpx")):
+        for label, key in (("한글(HWPX)", "to_hwpx"), ("Word", "to_docx"), ("Excel", "to_xlsx"), ("PowerPoint", "to_pptx"), ("이미지", "to_png"),
+                           ("HTML", "to_html"), ("RTF", "to_rtf"), ("텍스트", "to_txt"), ("Epub", "to_epub"), ("이미지 기반 PDF", "to_imgpdf"),
+                           ("PDF/A", "to_pdfa")):
             em.addAction(label, lambda k=key: self.on_action(k))
         a = m.addAction(icons.icon("print"), "인쇄하기" + self.key_text("print"), lambda: self.on_action("print")); a.setEnabled(bool(t))
         a = m.addAction(icons.icon("mail"), "메일로 보내기", lambda: self.on_action("mail")); a.setEnabled(bool(t))
@@ -1998,10 +1999,12 @@ class MainWindow(QMainWindow):
 
     # ── 변환·도구 ─────────────────────────────────────────────
     def convert(self, t: DocTab, fmt: str):
-        from .dlg_convert import ConvertDialog, FORMATS
+        from .dlg_convert import FORMATS, IMAGE_KEYS, OCR_KEYS, ConvertDialog, convert_done_box, label_of
         d, v = t.doc, t.viewer
         store = self.settings.setdefault("convert", {})
-        dlg = ConvertDialog(self, d.page_count, v.current, fmt if fmt in {k for _, k, _ in FORMATS} else "docx", d.name, d.path, store)
+        out_store = self.settings.setdefault("convert_out", {})
+        dlg = ConvertDialog(self, d.page_count, v.current, fmt if fmt in {k for _, k, _ in FORMATS} else "docx", d.name, d.path,
+                            store, out_store, self.prefs)
         if not dlg.exec():
             return
         save_settings(self.settings)
@@ -2010,29 +2013,30 @@ class MainWindow(QMainWindow):
         C = _engine("convert")
         src = d.copy()  # 지금 상태 그대로 변환(열린 문서를 그냥 save 하면 암호 문서가 망가진다)
         dpi = vals["dpi"] or None
-        label = dlg.fmt.currentText().split(" (")[0]
+        label = label_of(fmt).split(" (")[0]
 
         def job(progress=None):
             try:
                 if pages and fmt in ("rtf", "pdfa", "hwpx", "xml"):
                     src.select(pages)  # 이 넷은 쪽 범위를 받지 않아 고른 범위가 무시됐다
-                if fmt in ("jpg", "jpeg", "png", "bmp", "gif", "tiff"):
+                if fmt in IMAGE_KEYS:
                     if vals["mode"] == "extract":
                         return C.extract_images(src, folder, pages=pages, progress=progress, stem=stem)
-                    return C.to_images(src, folder, fmt=fmt, dpi=dpi, pages=pages, progress=progress, stem=stem,
-                                       merge=vals["mode"] == "merge")
-                if fmt == "docx":
-                    if vals["ocr"] != "off":
-                        self._ocr_before_word(src, pages, vals["ocr"] == "all", progress)
-                    return C.to_word(src, out, pages=pages, progress=progress)
-                if fmt == "xlsx": return C.to_excel(src, out, pages=pages, progress=progress)
+                    merge = vals["mode"] == "merge"
+                    return C.to_images(src, folder, fmt=fmt, dpi=dpi, pages=pages, progress=progress, stem=stem, merge=merge,
+                                       zoom=vals["zoom"], frame_w=vals["frame_w"], frame_color=vals["frame_color"])
+                if fmt in OCR_KEYS and vals["ocr"] != "off":
+                    self._ocr_before_convert(src, None if fmt == "rtf" else pages, vals["ocr"] == "all", progress)
+                if fmt == "docx": return C.to_word(src, out, pages=pages, progress=progress)
+                if fmt == "xlsx": return C.to_excel(src, out, pages=pages, progress=progress, one_sheet=vals["one_sheet"])
                 if fmt == "pptx": return C.to_pptx(src, out, pages=pages, dpi=vals["pptx_dpi"], progress=progress)
                 if fmt == "txt": return C.to_text(src, out, pages=pages)
                 if fmt == "html": return C.to_html(src, out, pages=pages)
                 if fmt == "xml": return C.to_xml(src, out)
                 if fmt == "rtf": return C.to_rtf(src, out)
-                if fmt == "epub": return C.to_epub(src, out, pages=pages)
+                if fmt == "epub": return C.to_epub(src, out, pages=pages, cover=vals["cover"])
                 if fmt == "pdfa": return C.to_pdfa(src, out)
+                if fmt == "imgpdf": return C.to_image_pdf(src, out, pages=pages, progress=progress)
                 if fmt == "hwpx": return C.to_hwpx(src, out, progress=progress)
                 raise RuntimeError(f"모르는 형식: {fmt}")
             finally:
@@ -2042,13 +2046,21 @@ class MainWindow(QMainWindow):
             files = res if isinstance(res, list) else [res]
             shown = files[0] if len(files) == 1 else folder
             self.say(f"변환했습니다: {shown}")
-            self._offer_open(shown, "변환 성공")
+            convert_done_box(self, label, files, folder,
+                             open_file=lambda p: self.open_path(p) if p.lower().endswith(".pdf") else os.startfile(p))
 
-    def _ocr_before_word(self, src, pages, force: bool, progress=None):
-        """Word 로 내보내기 전에 글자층이 없는 쪽(force 면 모든 쪽)을 인식해 넣는다. 인식이 안 되는 PC 면 그냥 넘어간다."""
+    def convert_settings(self):
+        """「설정 변환」: 형식별 설정을 모은 창. 고친 값은 변환 창 [설정] 과 같은 settings["convert"] 에."""
+        from .dlg_convert_settings import ConvertSettingsDialog
+        dlg = ConvertSettingsDialog(self, self.settings.setdefault("convert", {}), self.prefs)
+        if dlg.exec():
+            save_settings(self.settings)
+
+    def _ocr_before_convert(self, src, pages, force: bool, progress=None):
+        """변환 전에 글자층이 없는 쪽(force 면 모든 쪽)을 인식해 넣는다. 인식이 안 되는 PC 면 그냥 넘어간다."""
         O = _engine("ocr")
         try:
-            O.ocr_pages(src, pages=pages, lang=self.prefs.get("ocr_lang") or "ko", dpi=300, progress=progress, force=force)
+            O.ocr_pages(src, pages=pages, lang=self.prefs.get("ocr_langs") or ["ko"], dpi=300, progress=progress, force=force)
         except Exception:  # noqa: BLE001
             pass
 

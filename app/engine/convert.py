@@ -70,6 +70,48 @@ def _visible_blocks(page: fitz.Page, pd: dict) -> list[dict]:
     return sorted(pd.get("blocks", []), key=key)
 
 
+def _find_tables(page: fitz.Page) -> list[tuple[fitz.Rect, list[list[str]]]]:
+    """쪽의 표(선으로 그은 칸)를 (자리, 칸 글자 줄들) 로. 못 찾거나 비면 빈 목록."""
+    out = []
+    try:
+        found = list(page.find_tables().tables)
+    except Exception:  # noqa: BLE001
+        return out
+    for tb in found:
+        try:
+            rows = tb.extract()
+        except Exception:  # noqa: BLE001
+            continue
+        rows = [[_clean("" if c is None else str(c).replace("\n", " ")) for c in r] for r in rows or []]
+        if rows and any(any(c.strip() for c in r) for r in rows):
+            out.append((fitz.Rect(tb.bbox), rows))
+    return out
+
+
+def _in_any(bbox, boxes: list[fitz.Rect]) -> bool:
+    """덩어리 가운데 점이 표 안에 있으면 그 표의 글로 본다."""
+    r = fitz.Rect(bbox)
+    c = fitz.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
+    return any(c in bx for bx in boxes)
+
+
+def _flow(page: fitz.Page, pd: dict, tables) -> list[tuple[str, object]]:
+    """쪽 안 차례대로 ("block", 덩어리) · ("table", 칸 줄들). 표 안 글 덩어리는 표로 대신한다."""
+    rm = page.rotation_matrix
+    boxes = [r for r, _ in tables]
+    items = []
+    for b in _visible_blocks(page, pd):
+        if boxes and _in_any(b["bbox"], boxes):
+            continue
+        r = fitz.Rect(b["bbox"]) * rm
+        items.append(((round(r.y0 / 4), r.x0), "block", b))
+    for rect, rows in tables:
+        r = rect * rm
+        items.append(((round(r.y0 / 4), r.x0), "table", rows))
+    items.sort(key=lambda it: it[0])
+    return [(kind, obj) for _k, kind, obj in items]
+
+
 def _upright_image(page: fitz.Page, block: dict) -> tuple[bytes, str, float] | None:
     """그림 덩어리를 보이는 방향 그대로 (바이트, 확장자, 보이는 폭 pt). 쪽이 돌았거나 그림이 돌아 들어간 것
     (회전된 스캔 쪽)은 원본 그림이 누워 있으니 그 자리를 그려서 쓴다."""
@@ -211,10 +253,18 @@ def _save_image(im, path: str, fmt: str, quality: int = 90) -> None:
 
 
 def to_images(doc: fitz.Document, out_dir: str, fmt: str = "png", dpi: int | None = 150, pages=None,
-              progress: Progress = None, stem: str = "page", merge: bool = False, quality: int = 90) -> list[str]:
+              progress: Progress = None, stem: str = "page", merge: bool = False, quality: int = 90,
+              zoom: int = 100, frame_w: int = 0, frame_color: str = "#FFFFFF") -> list[str]:
     """쪽마다 그림 파일 하나(<stem>_p0001.png). merge 면 쪽을 위아래로 이어 한 장(<stem>.png).
-    dpi 가 None 이면 쪽마다 가장 큰 그림의 해상도(없으면 150). 만든 파일 경로 목록."""
-    from PIL import Image
+    dpi 가 None 이면 쪽마다 가장 큰 그림의 해상도(없으면 150). 만든 파일 경로 목록.
+    merge 일 때만 zoom(1~200 %, 쪽 그림 크기)과 frame_w(px)·frame_color(#RRGGBB) 테두리를 쪽마다 두른다."""
+    from PIL import Image, ImageColor
+    scale = max(1, min(200, int(zoom or 100))) / 100 if merge else 1.0
+    fw = max(0, min(20, int(frame_w or 0))) if merge else 0
+    try:
+        fcol = ImageColor.getrgb(frame_color or "#FFFFFF")[:3]
+    except ValueError:
+        fcol = (255, 255, 255)
     fmt = fmt.lower().lstrip(".")
     fmt = _IMG_ALIAS.get(fmt, fmt)
     if fmt not in IMAGE_FORMATS:
@@ -226,9 +276,13 @@ def to_images(doc: fitz.Document, out_dir: str, fmt: str = "png", dpi: int | Non
     for k, pno in enumerate(targets):
         _say(progress, k, len(targets), f"그림으로 뜨는 중 {pno + 1}쪽")
         page = doc[pno]
-        pix = page.get_pixmap(dpi=dpi or source_dpi(page), alpha=False)
+        pix = page.get_pixmap(dpi=max(1, round((dpi or source_dpi(page)) * scale)), alpha=False)
         im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         if merge:
+            if fw:
+                framed = Image.new("RGB", (im.width + 2 * fw, im.height + 2 * fw), fcol)
+                framed.paste(im, (fw, fw))
+                im = framed
             strips.append(im)
             continue
         path = os.path.join(out_dir, f"{stem}_p{pno + 1:04d}.{fmt}")
@@ -279,13 +333,32 @@ def extract_images(doc: fitz.Document, out_dir: str, pages=None, progress: Progr
 
 
 # ── PDF → 글자 · HTML ───────────────────────────────────────────────────
-def to_text(doc: fitz.Document, out_path: str, pages=None, layout: bool = False) -> str:
-    """글자만 뽑아 .txt 로. layout=True 면 읽는 차례로 정렬."""
+def _annot_texts(page: fitz.Page) -> list[str]:
+    """쪽에 붙은 주석(노트·글 상자·말풍선 등)의 내용 글. 팝업은 부모와 같은 글이라 뺀다."""
+    out = []
+    try:
+        for a in page.annots() or []:
+            if a.type[0] == fitz.PDF_ANNOT_POPUP:
+                continue
+            t = _clean((a.info or {}).get("content") or "").strip()
+            if t:
+                out.append(t)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def to_text(doc: fitz.Document, out_path: str, pages=None, layout: bool = False, annots: bool = True) -> str:
+    """글자만 뽑아 .txt 로. layout=True 면 읽는 차례로 정렬. annots 면 주석 내용을 그 쪽 글 끝에 덧붙인다."""
     _ensure_dir(out_path)
     chunks = []
     for pno in _pages(doc, pages):
         page = doc[pno]
-        chunks.append(page.get_text("text", sort=layout))
+        text = page.get_text("text", sort=layout)
+        notes = _annot_texts(page) if annots else []
+        if notes:
+            text = text.rstrip("\n") + ("\n" if text.strip() else "") + "\n".join(notes) + "\n"
+        chunks.append(text)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\f".join(chunks) if len(chunks) > 1 else (chunks[0] if chunks else ""))
     return out_path
@@ -340,8 +413,8 @@ def to_xml(doc: fitz.Document, out_path: str, pages=None) -> str:
 
 
 # ── PDF → Word · RTF ────────────────────────────────────────────────────
-def to_word(doc: fitz.Document, out_path: str, pages=None, progress: Progress = None) -> str:
-    """문단·글자 크기·굵게·기울임·그림을 살려 .docx 로(판형은 첫 쪽 크기)."""
+def to_word(doc: fitz.Document, out_path: str, pages=None, progress: Progress = None, tables: bool = True) -> str:
+    """문단·글자 크기·굵게·기울임·그림을 살려 .docx 로(판형은 첫 쪽 크기). tables 면 선으로 그은 표를 Word 표로."""
     from docx import Document as DocxDocument
     from docx.enum.section import WD_ORIENT
     from docx.enum.text import WD_BREAK
@@ -372,7 +445,10 @@ def to_word(doc: fitz.Document, out_path: str, pages=None, progress: Progress = 
                 _apply_page_size(section, page.rect, WD_ORIENT, Emu)
         pd = _page_text_dict(page)
         usable_w = page.rect.width - 2 * 36
-        for block in _visible_blocks(page, pd):
+        for kind, block in _flow(page, pd, _find_tables(page) if tables else []):
+            if kind == "table":
+                _docx_table(dx, block)
+                continue
             if block.get("type") == 1:
                 _docx_image(dx, page, block, usable_w, Pt)
                 continue
@@ -409,6 +485,18 @@ def _apply_page_size(section, rect: fitz.Rect, WD_ORIENT, Emu) -> None:
     section.top_margin = section.bottom_margin = m
 
 
+def _docx_table(dx, rows: list[list[str]]) -> None:
+    ncol = max(len(r) for r in rows)
+    tb = dx.add_table(rows=len(rows), cols=ncol)
+    try:
+        tb.style = "Table Grid"
+    except Exception:  # noqa: BLE001
+        pass
+    for i, r in enumerate(rows):
+        for j in range(ncol):
+            tb.cell(i, j).text = r[j] if j < len(r) else ""
+
+
 def _docx_image(dx, page: fitz.Page, block: dict, usable_w: float, Pt) -> None:
     got = _upright_image(page, block)
     if not got:
@@ -430,16 +518,64 @@ def _docx_image(dx, page: fitz.Page, block: dict, usable_w: float, Pt) -> None:
         return
 
 
-def to_rtf(doc: fitz.Document, out_path: str, pages=None) -> str:
-    """간단한 RTF(문단 + 글자 크기, 한글은 \\uN 으로)."""
+def _rtf_table(rows: list[list[str]], width_pt: float) -> list[str]:
+    ncol = max(len(r) for r in rows)
+    cw = int(max(400, width_pt * 20 / ncol))   # twip
+    out = []
+    for r in rows:
+        line = ["\\trowd\\trgaph108"]
+        for j in range(ncol):
+            line.append(f"\\clbrdrt\\brdrs\\clbrdrl\\brdrs\\clbrdrb\\brdrs\\clbrdrr\\brdrs\\cellx{cw * (j + 1)}")
+        line.append("\\pard\\intbl ")
+        for j in range(ncol):
+            line.append(_rtf_escape(r[j] if j < len(r) else "") + "\\cell ")
+        line.append("\\row")
+        out.append("".join(line))
+    out.append("\\pard")
+    return out
+
+
+def _rtf_picture(page: fitz.Page, block: dict, usable_w: float) -> str | None:
+    got = _upright_image(page, block)
+    if not got:
+        return None
+    data, _ext, bw = got
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+    except Exception:  # noqa: BLE001
+        return None
+    w_pt = max(10.0, min(bw, usable_w))
+    h_pt = w_pt * im.height / max(1, im.width)
+    hexs = buf.getvalue().hex()
+    return (f"\\pard{{\\pict\\pngblip\\picw{im.width}\\pich{im.height}\\picwgoal{int(w_pt * 20)}\\pichgoal{int(h_pt * 20)} "
+            f"{hexs}}}\\par")
+
+
+def to_rtf(doc: fitz.Document, out_path: str, pages=None, tables: bool = True) -> str:
+    """간단한 RTF(문단 + 글자 크기, 한글은 \\uN 으로). 그림은 png 로, tables 면 선으로 그은 표를 RTF 표로."""
     _ensure_dir(out_path)
     out = ["{\\rtf1\\ansi\\ansicpg949\\deff0{\\fonttbl{\\f0\\fnil\\fcharset129 Malgun Gothic;}}\\f0"]
     targets = _pages(doc, pages)
     for k, pno in enumerate(targets):
         if k > 0:
             out.append("\\page")
-        pd = doc[pno].get_text("dict")
-        for block in pd.get("blocks", []):
+        page = doc[pno]
+        pd = _page_text_dict(page)
+        usable_w = page.rect.width - 2 * 36
+        for kind, block in _flow(page, pd, _find_tables(page) if tables else []):
+            if kind == "table":
+                out.extend(_rtf_table(block, usable_w))
+                continue
+            if block.get("type") == 1:
+                pic = _rtf_picture(page, block, usable_w)
+                if pic:
+                    out.append(pic)
+                continue
             if block.get("type") != 0:
                 continue
             for line in block.get("lines", []):
@@ -489,47 +625,41 @@ def _append_text_row(ws, values: list[str]):
             c.data_type = "s"
 
 
-def to_excel(doc: fitz.Document, out_path: str, pages=None, progress: Progress = None) -> str:
-    """쪽마다 표를 찾아 시트 하나씩(p1_t1), 표가 없으면 글자 줄을 시트(p1) 에."""
+def to_excel(doc: fitz.Document, out_path: str, pages=None, progress: Progress = None, one_sheet: bool = False) -> str:
+    """쪽마다 시트 하나(p1, p2 …)에 표와 표 밖 글 줄을 쪽 안 차례대로(표와 글 사이는 빈 줄 하나).
+    one_sheet 면 모든 쪽을 시트 하나(「Sheet1」)에 이어 쓴다."""
     from openpyxl import Workbook
 
     _ensure_dir(out_path)
     wb = Workbook()
     wb.remove(wb.active)
     targets = _pages(doc, pages)
+    ws_all = wb.create_sheet("Sheet1") if one_sheet else None
     for k, pno in enumerate(targets):
         _say(progress, k, len(targets), f"표 찾는 중 {pno + 1}쪽")
         page = doc[pno]
-        tables = []
-        try:
-            tables = list(page.find_tables().tables)
-        except Exception:
-            tables = []
-        boxes = []
-        for ti, tb in enumerate(tables):
-            try:
-                rows = tb.extract()
-            except Exception:
+        ws = ws_all if one_sheet else wb.create_sheet(_sheet_name(f"p{pno + 1}"))
+        if one_sheet and k > 0 and ws.max_row >= 1 and any(c.value is not None for c in ws[ws.max_row]):
+            ws.append([])   # 쪽 사이 빈 줄
+        last = None
+        for kind, obj in _flow(page, page.get_text("dict"), _find_tables(page)):
+            if kind == "table":
+                if last is not None:
+                    ws.append([])
+                for row in obj:
+                    _append_text_row(ws, row)
+                last = "table"
                 continue
-            if not rows:
+            if obj.get("type") != 0:
                 continue
-            ws = wb.create_sheet(_sheet_name(f"p{pno + 1}_t{ti + 1}"))
-            for row in rows:
-                _append_text_row(ws, [("" if c is None else str(c).replace("\n", " ")) for c in row])
-            boxes.append(fitz.Rect(tb.bbox))
-        # 표 밖 본문도 쓴다(전에는 표가 하나라도 있으면 쪽의 나머지 글을 통째로 버렸다)
-        lines = []
-        for b in page.get_text("dict", sort=True).get("blocks", []):
-            for l in b.get("lines", []):
-                if any(bx.intersects(fitz.Rect(l["bbox"])) for bx in boxes):
-                    continue
+            for l in obj.get("lines", []):
                 t = "".join(s["text"] for s in l["spans"])
-                if t.strip():
-                    lines.append(t)
-        if lines or not boxes:
-            ws = wb.create_sheet(_sheet_name(f"p{pno + 1}" if not boxes else f"p{pno + 1}_본문"))
-            for line in lines:
-                _append_text_row(ws, [line])
+                if not t.strip():
+                    continue
+                if last == "table":
+                    ws.append([])
+                _append_text_row(ws, [t])
+                last = "text"
     if not wb.sheetnames:
         wb.create_sheet("빈 문서")
     wb.save(out_path)
@@ -572,9 +702,22 @@ def to_pptx(doc: fitz.Document, out_path: str, pages=None, dpi: int = 150, progr
 
 
 # ── PDF → EPUB ─────────────────────────────────────────────────────────
-def to_epub(doc: fitz.Document, out_path: str, pages=None) -> str:
-    """최소 EPUB 3(쪽마다 xhtml 하나, 그림 base64 로 안에)."""
+def to_epub(doc: fitz.Document, out_path: str, pages=None, cover: str = "") -> str:
+    """최소 EPUB 3(쪽마다 xhtml 하나, 그림 base64 로 안에). cover 가 그림 파일이면 표지(cover-image)로 맨 앞에."""
     _ensure_dir(out_path)
+    cover_item = None   # (안 이름, media-type, 바이트)
+    if cover:
+        if not os.path.isfile(cover):
+            raise EngineError(f"표지 그림을 찾을 수 없습니다: {cover}")
+        ext = os.path.splitext(cover)[1].lower()
+        mt = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif"}.get(ext)
+        data = _read(cover)
+        if not mt:   # bmp·tiff 같은 것은 EPUB 이 못 받으니 png 로
+            from PIL import Image
+            buf = io.BytesIO()
+            Image.open(io.BytesIO(data)).convert("RGB").save(buf, "PNG")
+            data, ext, mt = buf.getvalue(), ".png", "image/png"
+        cover_item = ("cover" + (".jpg" if ext == ".jpeg" else ext), mt, data)
     targets = _pages(doc, pages)
     title = (doc.metadata or {}).get("title") or os.path.splitext(os.path.basename(out_path))[0] or "문서"
     uid = f"urn:uuid:{uuid.uuid4()}"
@@ -587,6 +730,15 @@ def to_epub(doc: fitz.Document, out_path: str, pages=None) -> str:
     spine = []
     nav_items = []
     pages_xhtml: list[tuple[str, str]] = []
+    if cover_item:
+        cname, cmt, _ = cover_item
+        manifest.append(f'<item id="cover-image" href="{cname}" media-type="{cmt}" properties="cover-image"/>')
+        manifest.append('<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append('<itemref idref="cover"/>')
+        pages_xhtml.append(("cover.xhtml", '<?xml version="1.0" encoding="UTF-8"?>\n'
+                            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>표지</title>'
+                            '<style>body{margin:0;text-align:center}img{max-width:100%;max-height:100vh}</style></head>'
+                            f'<body><img src="{cname}" alt="표지"/></body></html>'))
     for pno in targets:
         name = f"page{pno + 1:04d}.xhtml"
         body = _xhtml_body(doc[pno])
@@ -602,11 +754,13 @@ def to_epub(doc: fitz.Document, out_path: str, pages=None) -> str:
            '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
            f'<head><title>차례</title></head><body><nav epub:type="toc" id="toc"><h1>차례</h1><ol>'
            f'{"".join(nav_items)}</ol></nav></body></html>')
+    cover_meta = '<meta name="cover" content="cover-image"/>' if cover_item else ""
     opf = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">'
            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
            f'<dc:identifier id="uid">{uid}</dc:identifier><dc:title>{_html.escape(title)}</dc:title>'
-           f'<dc:language>ko</dc:language><meta property="dcterms:modified">{now}</meta></metadata>'
+           f'<dc:language>ko</dc:language><meta property="dcterms:modified">{now}</meta>'
+           f'{cover_meta}</metadata>'
            f'<manifest>{"".join(manifest)}</manifest><spine>{"".join(spine)}</spine></package>')
     with zipfile.ZipFile(out_path, "w") as z:
         z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", compress_type=zipfile.ZIP_STORED)
@@ -615,6 +769,31 @@ def to_epub(doc: fitz.Document, out_path: str, pages=None) -> str:
         z.writestr("OEBPS/nav.xhtml", nav, compress_type=zipfile.ZIP_DEFLATED)
         for name, xhtml in pages_xhtml:
             z.writestr(f"OEBPS/{name}", xhtml, compress_type=zipfile.ZIP_DEFLATED)
+        if cover_item:
+            z.writestr(f"OEBPS/{cover_item[0]}", cover_item[2], compress_type=zipfile.ZIP_STORED)
+    return out_path
+
+
+# ── PDF → 이미지 기반 PDF ───────────────────────────────────────────────
+def to_image_pdf(doc: fitz.Document, out_path: str, pages=None, dpi: int = 150, progress: Progress = None) -> str:
+    """쪽마다 보이는 그대로 그림으로 떠서 같은 크기 쪽에 깐 새 PDF. 글자층·주석·양식은 남지 않는다."""
+    _ensure_dir(out_path)
+    targets = _pages(doc, pages)
+    out = fitz.open()
+    try:
+        for k, pno in enumerate(targets):
+            _say(progress, k, len(targets), f"그림으로 뜨는 중 {pno + 1}쪽")
+            page = doc[pno]
+            pix = page.get_pixmap(dpi=dpi, alpha=False, annots=True)
+            r = page.rect   # 회전이 들어간 보이는 크기
+            np_ = out.new_page(width=r.width, height=r.height)
+            np_.insert_image(np_.rect, stream=pix.tobytes("jpeg", jpg_quality=90))
+        if not len(out):
+            raise EngineError("변환할 쪽이 없습니다")
+        out.save(out_path, garbage=3, deflate=True)
+    finally:
+        out.close()
+    _say(progress, len(targets), len(targets), "이미지 기반 PDF 변환 끝")
     return out_path
 
 

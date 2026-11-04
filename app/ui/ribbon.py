@@ -81,7 +81,7 @@ TABS: list[tuple[str, str, list]] = [
         ("to_xlsx", "excel", "Excel로 변환", "action", None), ("to_pptx", "ppt", "PowerPoint로 변환", "action", None),
         ("to_png", "image", "이미지로 변환", "action", None), ("to_txt", "text", "텍스트로 변환", "action", None),
         ("convert_more", "more", "더보기", "menu", [("to_html", "HTML로"), ("to_rtf", "RTF로"), ("to_epub", "EPUB로"), ("to_pdfa", "PDF/A로"),
-                                                    ("convert_settings", "설정 변환")]), SEP,
+                                                    ("to_imgpdf", "이미지 기반 PDF로"), ("convert_settings", "설정 변환")]), SEP,
         ("batch", "batch", "일괄 변환", "action", None),
     ]),
     ("view", "보기", [
