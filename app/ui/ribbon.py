@@ -124,17 +124,20 @@ TABS: list[tuple[str, str, list]] = [
                                                   ("extract_data", "데이터 추출"), ("print", "인쇄")]),
     ]),
     ("form", "양식", [
-        ("form_edit", "edit", "양식 편집", "toggle", None), SEP,
+        ("form_edit", "edit", "양식 편집", "toggle", None), ("form_keep", "pin", "도구 선택 유지", "toggle", None), SEP,
         ("ftext", "ftext", "텍스트 칸", "tool", None), ("fcheck", "fcheck", "체크 박스", "tool", None), ("fradio", "fradio", "라디오 버튼", "tool", None),
         ("fcombo", "fcombo", "콤보 박스", "tool", None), ("flist", "flist", "목록 박스", "tool", None), ("fbutton", "fbutton", "누름 버튼", "tool", None),
         ("fimage", "fimage", "이미지 칸", "tool", None), ("fsign", "fsign", "서명 칸", "tool", None), ("fdate", "fdate", "날짜 칸", "tool", None), SEP,
-        ("recognize", "recognize", "양식 인식", "action", None), ("form_export", "export", "데이터 추출", "action", None),
-        ("form_more", "more", "더보기", "menu", [("form_import", "데이터 가져오기"), ("form_reset", "기본값으로 되돌리기"),
-                                                 ("form_set_default", "지금 값을 기본값으로"), ("form_preview", "미리보기"),
-                                                 ("align_left", "정렬: 왼쪽"), ("align_right", "정렬: 오른쪽"), ("align_top", "정렬: 위"),
-                                                 ("align_bottom", "정렬: 아래"), ("align_hcenter", "정렬: 가로 가운데"), ("align_vcenter", "정렬: 세로 가운데"),
-                                                 ("align_dist_h", "정렬: 가로로 같은 간격"), ("align_dist_v", "정렬: 세로로 같은 간격"),
-                                                 ("align_page_both", "페이지 가운데")]),
+        ("form_reset", "refresh", "기본 데이터 복구", "action", None),
+        ("form_align", "align", "정렬", "menu", [("align_left", "왼쪽 맞춤"), ("align_right", "오른쪽 맞춤"), ("align_top", "위쪽 맞춤"),
+                                                ("align_bottom", "아래쪽 맞춤"), ("align_hcenter", "가로 가운데 맞춤"),
+                                                ("align_vcenter", "세로 가운데 맞춤"), MENU_SEP,
+                                                ("align_page_h", "페이지 가로 가운데"), ("align_page_v", "페이지 세로 가운데"),
+                                                ("align_page_both", "페이지 한가운데")]),
+        ("form_more", "more", "더보기", "menu", [("extract_data", "데이터 추출"), ("recognize", "양식 인식"), ("calc_order", "계산 순서"),
+                                                 ("form_export", "데이터 내보내기"), ("form_import", "데이터 가져오기"),
+                                                 ("form_reset", "기본 데이터 복구"), MENU_SEP, ("form_set_default", "지금 값을 기본값으로")]),
+        ("recognize", "recognize", "양식 인식", "action", None), ("extract_data", "export", "데이터 추출", "action", None),
     ]),
     ("protect", "보안", [
         ("encrypt", "lock", "암호화", "action", None), ("decrypt", "unlock", "암호 풀기", "action", None), SEP,
@@ -158,7 +161,7 @@ LABELS.update({"hand": "손", "select": "선택", "zoomin": "확대", "zoomout":
                "m_distance": "거리 측정", "m_perimeter": "둘레 측정", "m_area": "넓이 측정", "crop": "자르기", "link": "링크", "redact": "교정 표시",
                "ocrarea": "영역 OCR", "addtext": "텍스트 추가", "addimage": "이미지 추가", "snapshot": "스크린샷",
                "triangle": "삼각형", "cross": "십자가", "bent_arrow": "구부러진 위쪽 화살표", "balloon": "말풍선",
-               "annot_color": "색", "keep_tool": "도구 계속 쓰기"})
+               "annot_color": "색", "keep_tool": "도구 계속 쓰기", "form_keep": "도구 선택 유지"})
 
 # 메뉴 항목 중 뷰어 도구가 되는 것
 TOOL_KEYS = {"hand", "select", "addtext", "addimage", "link", "crop", "pencil", "eraser", "highlight", "areahl", "underline",

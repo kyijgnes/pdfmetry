@@ -1220,12 +1220,16 @@ def reset_form(doc: fitz.Document) -> None:
             save_widget(w)
 
 
-def set_form_defaults(doc: fitz.Document) -> int:
-    """지금 값을 칸마다 기본값(DV)으로 적는다(「재설정」 이 이 값으로 돌아감). 적은 칸 수. in place."""
+def set_form_defaults(doc: fitz.Document, items: Sequence[tuple[int, int]] | None = None) -> int:
+    """지금 값을 칸마다 기본값(DV)으로 적는다(「재설정」 이 이 값으로 돌아감). items=(쪽, xref) 를 주면 그 칸만.
+    적은 칸 수. in place."""
     n = 0
     seen: set[int] = set()
-    for page in doc:
+    only = set(items) if items is not None else None
+    for pno, page in enumerate(doc):
         for w in page.widgets():
+            if only is not None and (pno, w.xref) not in only:
+                continue
             holder = w.xref
             pt, pv = doc.xref_get_key(w.xref, "Parent")
             if w.field_type == fitz.PDF_WIDGET_TYPE_RADIOBUTTON and pt == "xref":

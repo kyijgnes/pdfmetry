@@ -40,6 +40,7 @@ from . import dlg_split as DS
 from . import dlg_stamp as DST
 from . import dlg_password as PW
 from . import fileops as F
+from . import form_tools as FT
 from . import icons, sidebars as SB, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
@@ -594,7 +595,7 @@ class MainWindow(QMainWindow):
         self._sync_status(t)
         self.ribbon.reflect_tool(t.viewer.tool)
         self.ribbon.set_toggle("edit_all", t.viewer.edit_mode); self.ribbon.set_edit_target(t.viewer.edit_target)
-        self.ribbon.set_toggle("form_edit", t.viewer.form_mode)
+        self.ribbon.set_toggle("form_edit", t.viewer.form_mode); self.ribbon.set_toggle("form_keep", FT.keep_on(self.prefs))
         self.ribbon.set_toggle("show_annots", t.viewer.show_annots)
         self.ribbon.set_annot_enabled(t.viewer.show_annots); self._sync_keep(t)
         self.ribbon.set_enabled("undo", t.doc.can_undo()); self.ribbon.set_enabled("redo", t.doc.can_redo())
@@ -1124,6 +1125,8 @@ class MainWindow(QMainWindow):
         if tool in ANNOT_TOOLS:
             if not keep_tool(self.settings, tool):
                 self.on_tool("select")
+        elif tool in FT.DEFAULT_SIZE and FT.keep_on(self.prefs):
+            pass   # 「도구 선택 유지」: 칸 도구를 켜 둔 채 이어 만든다
         elif tool in ("addtext", "addimage", "link", "crop", "snapshot", "ocrarea", "escape") or tool.startswith("f"):
             self.on_tool("select" if not t.viewer.form_mode else "form")
 
@@ -1291,6 +1294,8 @@ class MainWindow(QMainWindow):
             self._set_edit(t, on)
         elif key == "form_edit":
             t.viewer.set_form_mode(on); self.ribbon.reflect_tool(t.viewer.tool)
+        elif key == "form_keep":
+            self.prefs["form_keep_tool"] = on; save_settings(self.settings)
         elif key == "show_annots":
             # 보기 설정이다. 파일의 주석 숨김 표시를 바꾸면 저장할 때 주석이 숨은 채로 남는다.
             t.viewer.show_annots = on
@@ -1452,16 +1457,16 @@ class MainWindow(QMainWindow):
             elif key == "extract_data": self.extract_data(t)
             elif key == "search": self.show_search()
             # 양식
-            elif key == "recognize":
-                n = A.recognize_fields(d); t.changed(None); self.say(f"양식 칸 {n}개를 만들었습니다")
+            elif key in FT.KEYS: FT.run(self, t, key)
             elif key == "form_export": self.form_data(t, "export")
             elif key == "form_import": self.form_data(t, "import")
             elif key == "form_reset": d.snapshot(); _engine("tools").reset_form(d.fitz); t.changed(None)   # 칸마다 기본값으로
             elif key == "form_set_default":
                 d.snapshot(); n = _engine("tools").set_form_defaults(d.fitz); t.changed(None); self.say(f"{n}칸의 지금 값을 기본값으로 정했습니다")
             elif key == "form_preview": v.set_form_mode(False); self.ribbon.set_toggle("form_edit", False); self.say("미리보기: 칸을 두 번 눌러 값을 넣습니다")
+            elif key.startswith("align_") and FT.align(self, t, key[6:]): pass   # 여러 칸을 골랐으면 창 없이 바로
             elif key.startswith("align_"):
-                # 뷰어는 칸을 하나만 고르므로, 그 쪽의 칸을 창에서 여럿 골라 맞춘다
+                # 칸을 하나만 골랐으면 그 쪽의 칸을 창에서 여럿 골라 맞춘다
                 pg = v.sel.page if v.sel and v.sel.kind == "widget" else v.current
                 ws = [(w.xref, w.field_name, w.field_type_string) for w in d.fitz[pg].widgets()]
                 if not ws: self.say("이 쪽에는 양식 칸이 없습니다"); return

@@ -419,7 +419,7 @@ def test_radio_group_export_import(tmp_path):
     from app.engine import annots as A
     d = _app_doc()
     xs = [A.add_field(d, 0, fitz.Rect(50, 500 + 30 * k, 64, 514 + 30 * k), "radio") for k in range(3)]
-    assert {w.field_name for w in d.fitz[0].widgets()} == {"라디오 버튼"}  # 차례로 찍으면 한 묶음
+    assert {w.field_name for w in d.fitz[0].widgets()} == {"라디오 버튼1"}  # 차례로 찍으면 한 묶음
     assert [w.on_state() for w in d.fitz[0].widgets()] == ["Choice1", "Choice2", "Choice3"]
     A.set_field_value(d, 0, xs[1], True)
     assert [w.field_value for w in d.fitz[0].widgets()] == ["Off", "Choice2", "Off"]
@@ -427,14 +427,14 @@ def test_radio_group_export_import(tmp_path):
     assert [w.field_value for w in d.fitz[0].widgets()] == ["Off", "Choice2", "Off"]
     out = str(tmp_path / "f.json")
     tools.export_form_data(d.fitz, out)
-    assert json.load(open(out, encoding="utf-8"))["fields"] == {"라디오 버튼": "Choice2"}
-    json.dump({"라디오 버튼": "Choice3"}, open(out, "w", encoding="utf-8"), ensure_ascii=False)
+    assert json.load(open(out, encoding="utf-8"))["fields"] == {"라디오 버튼1": "Choice2"}
+    json.dump({"라디오 버튼1": "Choice3"}, open(out, "w", encoding="utf-8"), ensure_ascii=False)
     tools.import_form_data(d.fitz, out)
     assert [w.field_value for w in d.fitz[0].widgets()] == ["Off", "Off", "Choice3"]
     A.reset_fields(d)
     assert [w.field_value for w in d.fitz[0].widgets()] == ["Off", "Off", "Off"]
     A.rename_field(d, 0, xs[2], "다른 묶음")
-    assert [w.field_name for w in d.fitz[0].widgets()] == ["라디오 버튼", "라디오 버튼", "다른 묶음"]
+    assert [w.field_name for w in d.fitz[0].widgets()] == ["라디오 버튼1", "라디오 버튼1", "다른 묶음"]
 
 
 def _form_doc():

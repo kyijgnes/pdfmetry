@@ -30,8 +30,9 @@ def build(v, i: int, sp: QPointF) -> QMenu:
     elif s and s.kind == "link":
         _link(v, m, s)
     elif s and s.kind == "widget":
-        m.addAction("속성", lambda: v.requestDialog.emit("field_props", s))
-        m.addAction("삭제", v.delete_selection)
+        _widget(v, m, s)
+    elif v.form_mode:
+        _form_blank(v, m)
     elif s and s.kind == "block":
         _block(v, m, s)
     elif s and s.kind == "image":
@@ -41,6 +42,62 @@ def build(v, i: int, sp: QPointF) -> QMenu:
     else:
         _blank(v, m, i, sp)
     return m
+
+
+def pick_widget_at(v, i: int, sp: QPointF) -> None:
+    """양식 편집에서 고르지 않은 칸 위를 오른쪽 클릭하면 그 칸 하나를 고른다(고른 칸 위면 그대로)."""
+    if not v.form_mode or i < 0:
+        return
+    pt = v.to_page(i, sp)
+    for w in v.doc.fitz[i].widgets():
+        if fitz.Rect(w.rect).contains(pt):
+            if (i, w.xref) not in v.sel_fields:
+                v.select_fields([(i, w.xref)])
+            return
+
+
+ALIGN_ITEMS = (("left", "왼쪽"), ("right", "오른쪽"), ("top", "위쪽"), ("bottom", "아래쪽"),
+               ("hcenter", "가로 가운데"), ("vcenter", "세로 가운데"), None,
+               ("page_h", "페이지 가로 가운데"), ("page_v", "페이지 세로 가운데"), ("page_both", "페이지 한가운데"))
+
+
+def _widget(v, m: QMenu, s):
+    """양식 칸 우클릭 열한 줄. 여러 칸이 골라져 있으면 맞춤·배포·복사본이 그 칸들에."""
+    many = len(v.sel_fields) > 1
+    m.addAction("속성", lambda: v.requestDialog.emit("field_props", s))
+    m.addSeparator()
+    m.addAction("자르기", lambda: _act(v, "field_cut"))
+    m.addAction("복사", lambda: _act(v, "field_copy"))
+    from . import form_tools as FT
+    m.addAction("붙여넣기", lambda: _act(v, "field_paste")).setEnabled(bool(FT.CLIP))
+    m.addAction("삭제", v.delete_selection)
+    m.addAction("모두 선택", lambda: _act(v, "field_select_all"))
+    m.addSeparator()
+    al = m.addMenu("맞춤")
+    for it in ALIGN_ITEMS:
+        if it is None:
+            al.addSeparator(); continue
+        a = al.addAction(it[1], lambda h=it[0]: _act(v, "align_" + h))
+        a.setEnabled(many or it[0].startswith("page"))
+    ds = m.addMenu("배포")
+    for h, lbl in (("dist_h", "가로"), ("dist_v", "세로")):
+        ds.addAction(lbl, lambda h=h: _act(v, "align_" + h)).setEnabled(len(v.sel_fields) >= 3)
+    m.addAction("여러 필드 복사본 만들기", lambda: _act(v, "copies"))
+    m.addAction("탭 순서 설정", lambda: _act(v, "tab_order"))
+    m.addAction("기본값으로 설정", lambda: _act(v, "field_set_default"))
+    if s.extra.get("type") == "Signature":
+        signature_items(v, m, s)
+
+
+def signature_items(v, m: QMenu, s) -> None:
+    """서명 칸에만 붙는 줄(디지털 서명 덩어리가 채운다)."""
+
+
+def _form_blank(v, m: QMenu):
+    from . import form_tools as FT
+    m.addAction("붙여넣기", lambda: _act(v, "field_paste")).setEnabled(bool(FT.CLIP))
+    m.addAction("모두 선택", lambda: _act(v, "field_select_all"))
+    m.addAction("탭 순서 설정", lambda: _act(v, "tab_order"))
 
 
 def _act(v, key: str):
@@ -239,6 +296,7 @@ def _select(v, i: int, t: tuple[str, int, fitz.Rect]):
             return
         v.sel = Selection("widget", i, xref, fitz.Rect(w.rect), text=w.field_name,
                           extra={"type": w.field_type_string, "value": w.field_value})
+        v.sel_fields = [(i, xref)]
     _reveal(v, i, v.sel.rect)
     v.selectionChanged.emit(v.sel)
     v.viewport().update()

@@ -24,6 +24,7 @@ from ..engine import annots as A
 from ..engine import stamps as ST
 from ..engine.document import Document
 from . import context_menu as CM
+from . import form_tools as FT
 from . import theme
 
 GAP = 12  # 쪽 사이 간격(px)
@@ -391,6 +392,8 @@ class PageView(QGraphicsView):
                       "measure": None}      # 측정 축척·스냅·라벨(settings.json 의 measure)
 
         self.sel: Selection | None = None
+        self.sel_fields: list[tuple[int, int]] = []   # 양식 편집에서 고른 칸들(쪽, xref), 고른 차례. 하나면 sel 과 같은 칸
+        self._group_from: fitz.Rect | None = None      # 여러 칸 함께 옮기기: 누를 때 잡은 칸 자리
         self._drag_start: QPointF | None = None  # 화면(뷰포트) 좌표
         self._drag_page = -1
         self._drag_rect: QRectF | None = None    # 장면 좌표
@@ -1154,6 +1157,7 @@ class PageView(QGraphicsView):
         self.clear_selection()
 
     def clear_selection(self):
+        self.sel_fields = []
         if self.sel is not None:
             self.sel = None
             self.selectionChanged.emit(None)
@@ -1234,6 +1238,8 @@ class PageView(QGraphicsView):
             self._drag_end_scene = sp
             if t == "form":
                 self._drag_rect = QRectF(sp, sp)
+                if not e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+                    self.clear_selection()
                 return
             self._drag_rect = QRectF(sp, sp)
             self.clear_selection()
@@ -1390,7 +1396,8 @@ class PageView(QGraphicsView):
                 self._select_words(i, pr, click=small, scene_pt=sp)
             elif t == "form":
                 if not small:
-                    self._make_field(i, pr)
+                    self._band_select(i, pr, bool(e.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                                                   | Qt.KeyboardModifier.ShiftModifier)))
             elif t in TOOLS_MARKUP:
                 pt = self.to_page(i, sp)
                 if small:
@@ -1431,6 +1438,10 @@ class PageView(QGraphicsView):
                         self._shape_done(i, pr, r, click=True)
             elif t == "zoomarea":
                 self.zoom_to_rect(r, small, sp)
+            elif t in FT.DEFAULT_SIZE and self._drag_start is not None \
+                    and (e.position() - self._drag_start).manhattanLength() < 5:
+                # 끈 거리가 5px 안 되면 클릭: 누른 점을 왼쪽 위로 기본 크기
+                self._make_field(i, FT.default_rect(t, self.to_page(i, self._drag_start_scene or sp)), sized=True)
             elif not small:
                 self._shape_done(i, pr, r)
             self.viewport().update()
@@ -1523,8 +1534,16 @@ class PageView(QGraphicsView):
             self.prev_page(); return
         if ctrl and k == Qt.Key.Key_Plus and e.modifiers() & Qt.KeyboardModifier.KeypadModifier:
             self.zoom_in(); return   # 숫자 키판 + (큰 키판 Ctrl++ 는 Ctrl+Shift+= 오른쪽 회전이라 단축키 표에 없다)
+        if self.form_mode and self.sel and self.sel.kind == "widget":   # 양식 칸 자르기·복사(앱 안 클립보드)
+            for std, key in ((QKeySequence.StandardKey.Copy, "field_copy"), (QKeySequence.StandardKey.Cut, "field_cut")):
+                if e.matches(std):
+                    self.requestDialog.emit("action", key); return
+        if self.form_mode and e.matches(QKeySequence.StandardKey.Paste) and FT.CLIP:
+            self.requestDialog.emit("action", "field_paste"); return
         if e.matches(QKeySequence.StandardKey.Copy):
             self.copy_selection(); return
+        if e.matches(QKeySequence.StandardKey.SelectAll) and self.form_mode:
+            self.select_all_fields(self.sel.page if self.sel and self.sel.kind == "widget" else self.current); return
         if e.matches(QKeySequence.StandardKey.SelectAll) and self.tool in ("select", "hand"):
             i = self.current
             ws = self.words(i)
@@ -1567,16 +1586,56 @@ class PageView(QGraphicsView):
                     self.viewport().update()
                     return True
         if self.form_mode:
+            mods = e.modifiers() if e is not None else Qt.KeyboardModifier.NoModifier
+            add = bool(mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
             for w in self.doc.fitz[i].widgets():
                 if fitz.Rect(w.rect).contains(pt):
-                    self.sel = Selection("widget", i, w.xref, fitz.Rect(w.rect), text=w.field_name,
-                                         extra={"type": w.field_type_string, "value": w.field_value})
-                    self.selectionChanged.emit(self.sel)
+                    key = (i, w.xref)
+                    if add:   # Ctrl·Shift+클릭: 더하고 빼기
+                        if key in self.sel_fields:
+                            self.select_fields([k for k in self.sel_fields if k != key])
+                        else:
+                            self.select_fields((self.sel_fields or self._one_field()) + [key])
+                        return True
+                    if key not in self.sel_fields:
+                        self.sel_fields = [key]
+                    self._set_widget_sel(i, w)
+                    self._group_from = fitz.Rect(w.rect)
                     self._moving_annot = True
                     self._move_last = pt
                     self.viewport().update()
                     return True
         return False
+
+    def _one_field(self) -> list[tuple[int, int]]:
+        s = self.sel
+        return [(s.page, s.xref)] if s and s.kind == "widget" else []
+
+    def _set_widget_sel(self, i: int, w: fitz.Widget):
+        self.sel = Selection("widget", i, w.xref, fitz.Rect(w.rect), text=w.field_name,
+                             extra={"type": w.field_type_string, "value": w.field_value})
+        self.selectionChanged.emit(self.sel)
+
+    def select_fields(self, items: list[tuple[int, int]]):
+        """양식 칸 여럿을 고른다. 마지막 칸이 sel(속성 창·우클릭이 보는 칸)."""
+        items = list(dict.fromkeys(items))
+        if not items:
+            self.clear_selection(); return
+        pg, x = items[-1]
+        w = next((w for w in self.doc.fitz[pg].widgets() if w.xref == x), None)
+        if w is None:
+            self.clear_selection(); return
+        self.sel_fields = items
+        self._set_widget_sel(pg, w)
+        self.viewport().update()
+
+    def select_all_fields(self, page: int):
+        self.select_fields([(page, w.xref) for w in self.doc.fitz[page].widgets()])
+
+    def _band_select(self, i: int, pr: fitz.Rect, add: bool):
+        """빈 곳에서 끈 네모에 걸친 칸들을 고른다."""
+        hit = [(i, w.xref) for w in self.doc.fitz[i].widgets() if fitz.Rect(w.rect).intersects(pr)]
+        self.select_fields((self.sel_fields if add else []) + hit)
 
     def _select_block_or_image(self, i: int, sp: QPointF) -> bool:
         pt = self.to_page(i, sp)
@@ -1697,7 +1756,13 @@ class PageView(QGraphicsView):
         if s.kind == "annot":
             A.delete(self.doc, s.page, s.xref)
         elif s.kind == "widget":
-            A.delete_field(self.doc, s.page, s.xref)
+            items = self.sel_fields or [(s.page, s.xref)]
+            self.doc.snapshot()
+            for pg, x in items:
+                A.delete_field(self.doc, pg, x, snapshot=False)
+            self.clear_selection()
+            self.refresh_pages(sorted({pg for pg, _ in items}))
+            return
         elif s.kind == "link":
             A.delete_link(self.doc, s.page, s.xref)
         elif s.kind == "block":
@@ -1733,12 +1798,21 @@ class PageView(QGraphicsView):
                 self.refresh_pages([s.page])
             self.viewport().update()
         elif s.kind == "widget":
-            self.doc.snapshot()
-            for w in self.doc.fitz[s.page].widgets():
-                if w.xref == s.xref:
-                    w.rect = s.rect
-                    A.save_widget(w)
-            self.refresh_pages([s.page])
+            g = self._group_from
+            if g is None or any(abs(a - b) > 0.01 for a, b in zip(g, s.rect)):
+                self.doc.snapshot()
+                dx, dy = (s.rect.x0 - g.x0, s.rect.y0 - g.y0) if g is not None else (0, 0)
+                group = len(self.sel_fields) > 1 and self._resize_corner < 0
+                pages = set()
+                for pg, x in (self.sel_fields if group else [(s.page, s.xref)]):
+                    p = self.doc.fitz[pg]
+                    pages.add(pg)
+                    for w in p.widgets():
+                        if w.xref == x:
+                            w.rect = s.rect if (pg, x) == (s.page, s.xref) else fitz.Rect(w.rect) + (dx, dy, dx, dy)
+                            A.save_widget(w)
+                self.refresh_pages(sorted(pages))
+            self._group_from = None
         elif s.kind in ("block", "image"):
             self.place_content(s.rect)
         self._move_last = None
@@ -1932,18 +2006,22 @@ class PageView(QGraphicsView):
     _drag_start_scene: QPointF | None = None
     _drag_end_scene: QPointF | None = None
 
-    def _make_field(self, i: int, pr: fitz.Rect):
+    def _make_field(self, i: int, pr: fitz.Rect, sized: bool = False):
         t = self.tool if self.tool.startswith("f") and self.tool != "form" else "f" + self.props["field_type"]
         kind = {"ftext": "text", "fcheck": "checkbox", "fradio": "radio", "fcombo": "combo", "flist": "list",
                 "fbutton": "button", "fimage": "image", "fsign": "signature", "fdate": "text"}.get(t, "text")
-        if kind in ("checkbox", "radio"):
+        if sized:
+            pass
+        elif kind in ("checkbox", "radio"):
             s = max(10, min(pr.width, pr.height))
             pr = fitz.Rect(pr.x0, pr.y0, pr.x0 + s, pr.y0 + s)
         if pr.height < 8:
             pr.y1 = pr.y0 + 18
-        A.add_field(self.doc, i, pr, kind, date=(t == "fdate"), label="버튼" if kind == "button" else "")
+        x = A.add_field(self.doc, i, pr, kind, date=(t == "fdate"), label="버튼" if kind == "button" else "")
         self.refresh_pages([i])
         self.toolDone.emit(t)
+        if self.form_mode and self.tool == "form":   # 선택 도구로 돌아갔으면 만든 칸을 고른 채로
+            self.select_fields([(i, x)])
 
     def _finish_poly(self):
         if len(self._poly) < 2:
@@ -1978,6 +2056,7 @@ class PageView(QGraphicsView):
 
     # ── 오른쪽 클릭 ───────────────────────────────────────────
     def _context_menu(self, e: QMouseEvent, i: int, sp: QPointF):
+        CM.pick_widget_at(self, i, sp)
         CM.build(self, i, sp).exec(e.globalPosition().toPoint())
 
     def _markup_sel(self, kind: str):
@@ -2044,6 +2123,17 @@ class PageView(QGraphicsView):
             p.setBrush(QColor(60, 140, 240, 25))
             for w in self.doc.fitz[i].widgets():
                 p.drawRect(self.from_page_rect(i, fitz.Rect(w.rect)))
+            many = {x for pg, x in self.sel_fields if pg == i} if len(self.sel_fields) > 1 else set()
+            s = self.sel
+            if many:   # 여러 칸 고름: 다른 칸도 고른 테두리(함께 옮기는 중이면 옮긴 자리에)
+                g = self._group_from if self._moving_annot and s and s.rect is not None else None
+                o = (s.rect.x0 - g.x0, s.rect.y0 - g.y0) if g is not None else (0, 0)
+                p.save()
+                p.setPen(QPen(accent, 1.5, Qt.PenStyle.DashLine)); p.setBrush(QColor(60, 140, 240, 45))
+                for w in self.doc.fitz[i].widgets():
+                    if w.xref in many and not (s and (i, w.xref) == (s.page, s.xref)):
+                        p.drawRect(self.from_page_rect(i, fitz.Rect(w.rect) + (o[0], o[1], o[0], o[1])))
+                p.restore()
         # 고른 것
         s = self.sel
         if s and s.page == i:

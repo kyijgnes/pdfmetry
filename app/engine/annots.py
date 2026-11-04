@@ -1652,19 +1652,31 @@ FIELD_TYPE_KO = {"text": "텍스트", "checkbox": "체크 박스", "radio": "라
                  "list": "목록 박스", "button": "누름 버튼", "signature": "디지털 서명", "image": "이미지", "date": "날짜"}
 
 
-def _unique_name(doc: Document, base: str) -> str:
-    names = {w.field_name for i in range(doc.page_count) for w in doc.fitz[i].widgets()}
-    n, name = 1, base
-    while name in names:
+def _unique_name(doc: Document, base: str, taken: set[str] | None = None) -> str:
+    """기본 이름 + 번호(텍스트1, 텍스트2 …), 문서 안에서 겹치지 않게."""
+    names = {w.field_name for i in range(doc.page_count) for w in doc.fitz[i].widgets()} | (taken or set())
+    n = 1
+    while f"{base}{n}" in names:
         n += 1
-        name = f"{base}{n}"
-    return name
+    return f"{base}{n}"
+
+
+def _copy_name(doc: Document, name: str, taken: set[str] | None = None) -> str:
+    """복사한 칸 이름: 끝 번호를 떼고 겹치지 않는 다음 번호(텍스트1 → 텍스트2)."""
+    base = re.sub(r"\d+$", "", name) or name
+    names = {w.field_name for i in range(doc.page_count) for w in doc.fitz[i].widgets()} | (taken or set())
+    n = 2 if base == name else 1
+    while f"{base}{n}" in names:
+        n += 1
+    return f"{base}{n}"
 
 
 def add_field(doc: Document, page: int, r: fitz.Rect, ftype: str, name: str | None = None, value=None,
               options: list[str] | None = None, label: str = "", fontsize: float = 10,
-              border: Color | None = (0.6, 0.6, 0.6), fill: Color | None = (1, 1, 1), date: bool = False) -> int:
-    doc.snapshot()
+              border: Color | None = (0.6, 0.6, 0.6), fill: Color | None = (1, 1, 1), date: bool = False,
+              snapshot: bool = True) -> int:
+    if snapshot:
+        doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
         base_ko = FIELD_TYPE_KO.get("date" if date else ftype, ftype)
@@ -1696,11 +1708,15 @@ def add_field(doc: Document, page: int, r: fitz.Rect, ftype: str, name: str | No
         if radio:
             x = annot.xref
             doc.fitz.xref_set_key(x, "Ff", str(_RADIO_FLAGS))
-            # 이름을 안 주면 이 쪽에서 마지막에 만든 라디오 묶음에 붙인다(예·아니요를 차례로 찍으면 한 묶음)
-            group = name
-            if not group:
-                prev = [r for r in p.widgets() if r.field_type == fitz.PDF_WIDGET_TYPE_RADIOBUTTON and r.xref != x]
-                group = max(prev, key=lambda r: r.xref).field_name if prev else w.field_name
+            # 이름을 안 주면 문서에서 마지막에 만든 라디오 묶음에 붙인다(다른 쪽에 찍어도 한 묶음)
+            group = name or getattr(doc, "_last_radio", "")
+            names = {r.field_name for i in range(doc.page_count) for r in doc.fitz[i].widgets()
+                     if r.field_type == fitz.PDF_WIDGET_TYPE_RADIOBUTTON and r.xref != x}
+            if not group or (not name and group not in names):
+                prev = [(r.xref, r.field_name) for i in range(doc.page_count) for r in doc.fitz[i].widgets()
+                        if r.field_type == fitz.PDF_WIDGET_TYPE_RADIOBUTTON and r.xref != x]
+                group = max(prev)[1] if prev else w.field_name
+            doc._last_radio = group
             _radio_move(doc.fitz, x, group)
             _refresh_widget(p, x)
         return annot.xref
@@ -1905,8 +1921,9 @@ def set_field_value(doc: Document, page: int, xref: int, value):
                 return
 
 
-def delete_field(doc: Document, page: int, xref: int):
-    doc.snapshot()
+def delete_field(doc: Document, page: int, xref: int, snapshot: bool = True):
+    if snapshot:
+        doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
         for w in p.widgets():
@@ -1975,19 +1992,27 @@ def align_fields(doc: Document, items: list[tuple[int, int]], how: str):
             save_widget(w)
 
 
-def recognize_fields(doc: Document, pages: Sequence[int] | None = None) -> int:
-    """양식 인식(간단판): 글자 뒤에 오는 긴 밑줄·빈 네모를 찾아 텍스트 칸을 만든다."""
+def recognize_fields(doc: Document, pages: Sequence[int] | None = None, progress=None) -> int:
+    """양식 인식(간단판): 글자 뒤에 오는 긴 밑줄·빈 네모는 텍스트 칸, 작은 빈 정사각형은 체크 박스로.
+    progress(i, n) 를 주면 쪽마다 부른다. 만든 칸이 없으면 되돌리기 기록도 남기지 않는다."""
     made = 0
+    was = doc.modified
     doc.snapshot()
     with doc.lock:
-        for i in (pages if pages is not None else range(doc.page_count)):
+        todo = list(pages if pages is not None else range(doc.page_count))
+        for k, i in enumerate(todo):
+            if progress:
+                progress(k, len(todo))
             p = doc.fitz[i]
             existing = [fitz.Rect(w.rect) for w in p.widgets()]
             for d in p.get_drawings():
                 r = fitz.Rect(d["rect"])
+                empty = d.get("fill") in (None, (1, 1, 1))
+                is_check = (8 <= r.width <= 20 and 8 <= r.height <= 20 and abs(r.width - r.height) <= 2
+                            and empty and d.get("color") is not None)
                 is_line = r.height <= 2 and r.width >= 40
-                is_box = 8 <= r.height <= 40 and r.width >= 40 and d.get("fill") in (None, (1, 1, 1))
-                if not (is_line or is_box):
+                is_box = 8 <= r.height <= 40 and r.width >= 40 and empty
+                if not (is_check or is_line or is_box):
                     continue
                 fr = fitz.Rect(r.x0, r.y0 - 14, r.x1, r.y1) if is_line else r
                 if any(fr.intersects(e) for e in existing):
@@ -1995,12 +2020,125 @@ def recognize_fields(doc: Document, pages: Sequence[int] | None = None) -> int:
                 if p.get_text("text", clip=fr).strip():
                     continue
                 w = fitz.Widget()
-                w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
-                w.field_name = _unique_name(doc, "텍스트")
+                if is_check:
+                    w.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
+                    w.field_name = _unique_name(doc, FIELD_TYPE_KO["checkbox"])
+                    w.field_value = False
+                else:
+                    w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+                    w.field_name = _unique_name(doc, FIELD_TYPE_KO["text"])
+                    w.text_fontsize = 10
                 w.rect = fr
-                w.text_fontsize = 10
                 w.border_width = 0
                 p.add_widget(w)
                 existing.append(fr)
                 made += 1
+    if not made:
+        doc._undo.pop()   # 바뀐 것이 없으니 Ctrl+Z 한 번이 헛돌지 않게
+        doc.modified = was
     return made
+
+
+# ── 칸 복사 · 여러 복사본 · 탭 순서 ─────────────────────────────────
+_KIND_OF = {fitz.PDF_WIDGET_TYPE_TEXT: "text", fitz.PDF_WIDGET_TYPE_CHECKBOX: "checkbox",
+            fitz.PDF_WIDGET_TYPE_RADIOBUTTON: "radio", fitz.PDF_WIDGET_TYPE_COMBOBOX: "combo",
+            fitz.PDF_WIDGET_TYPE_LISTBOX: "list", fitz.PDF_WIDGET_TYPE_BUTTON: "button",
+            fitz.PDF_WIDGET_TYPE_SIGNATURE: "signature"}
+# 새 칸이 스스로 갖는 열쇠(복사하지 않음)
+_OWN_KEYS = {"Type", "Subtype", "P", "Parent", "T", "Rect", "AP", "Kids", "AS", "V", "DV", "FT", "Ff",
+             "StructParent", "NM", "M", "Opt"}
+
+
+def field_spec(doc: Document, page: int, xref: int) -> dict | None:
+    """칸 하나를 다시 만들 수 있게 적어 둔다(앱 안 클립보드·복사본에 씀). 원본을 지워도 이것으로 붙일 수 있다."""
+    with doc.lock:
+        f = doc.fitz
+        w = next((w for w in f[page].widgets() if w.xref == xref), None)
+        if w is None:
+            return None
+        keys = {}
+        for k in f.xref_get_keys(xref):
+            if k not in _OWN_KEYS:
+                keys[k] = f.xref_get_key(xref, k)
+        kind = _KIND_OF.get(w.field_type, "text")
+        val = w.field_value
+        if kind in ("checkbox", "radio"):
+            val = val not in ("Off", "", None, False)
+        return {"doc": id(doc), "page": page, "kind": kind, "rect": tuple(w.rect), "name": w.field_name,
+                "value": val, "options": list(w.choice_values or []), "caption": w.button_caption or "",
+                "flags": w.field_flags, "keys": keys}
+
+
+def paste_fields(doc: Document, page: int, specs: list[dict], dx: float = 0, dy: float = 0,
+                 snapshot: bool = True) -> list[int]:
+    """적어 둔 칸들을 page 쪽에 (dx, dy) 만큼 옮겨 만든다. 이름은 겹치면 다음 번호. 만든 xref 들."""
+    if not specs:
+        return []
+    if snapshot:
+        doc.snapshot()
+    out = []
+    with doc.lock:
+        f = doc.fitz
+        p = f[page]
+        taken: set[str] = set()
+        for s in specs:
+            kind = s["kind"]
+            name = _copy_name(doc, s["name"], taken)
+            taken.add(name)
+            r = fitz.Rect(s["rect"]) + (dx, dy, dx, dy)
+            val = s["value"] if kind not in ("text", "combo", "list") or s["value"] not in (None, "") else None
+            x = add_field(doc, page, r, kind, name=name, value=val, options=s["options"] or None,
+                          label=s["caption"], snapshot=False)
+            same = s["doc"] == id(doc)
+            for k, (t, v) in s["keys"].items():
+                if t == "null" or (not same and (t == "xref" or re.search(r"\d+\s+0\s+R", v or ""))):
+                    continue   # 다른 문서의 객체 번호는 이 문서에서 뜻이 없다
+                f.xref_set_key(x, k, fitz.get_pdf_str(v) if t == "string" else v)
+            if kind != "radio" and s["flags"]:
+                f.xref_set_key(x, "Ff", str(s["flags"]))
+            p = f[page]
+            _refresh_widget(p, x)
+            out.append(x)
+    return out
+
+
+def duplicate_fields(doc: Document, items: list[tuple[int, int]], down: int, across: int,
+                     dx: float, dy: float) -> list[int]:
+    """고른 칸들을 아래로 down 줄 · 옆으로 across 칸 격자로 복사한다(원본이 왼쪽 위 한 칸, 1 이면 그 방향은 안 늘림).
+    dx·dy 는 한 칸 건너는 거리(pt). 만든 xref 들."""
+    down, across = max(1, int(down)), max(1, int(across))
+    if not items or down * across == 1:
+        return []
+    specs = [sp for pg, x in items if (sp := field_spec(doc, pg, x))]
+    doc.snapshot()
+    out = []
+    for r in range(down):
+        for c in range(across):
+            if r == 0 and c == 0:
+                continue
+            for sp in specs:
+                out += paste_fields(doc, sp["page"], [sp], c * dx, r * dy, snapshot=False)
+    return out
+
+
+def set_tab_order(doc: Document, page: int, xrefs: list[int]) -> None:
+    """page 쪽 Annots 배열에서 칸들이 xrefs 차례로 오게 한다(다른 주석 자리는 그대로). /Tabs 는 지워 배열 차례를 따른다."""
+    doc.snapshot()
+    with doc.lock:
+        f = doc.fitz
+        px = f[page].xref
+        cur = _get_refs(f, px, "Annots")
+        want = [x for x in xrefs if x in cur]
+        it = iter(want)
+        new = [next(it) if x in want else x for x in cur]
+        _set_refs(f, px, "Annots", new)
+        if f.xref_get_key(px, "Tabs")[0] != "null":
+            del_keys(f, px, ("Tabs",))
+
+
+def tab_order(doc: Document, page: int) -> list[int]:
+    """page 쪽 칸 xref 들, Annots 배열 차례."""
+    with doc.lock:
+        f = doc.fitz
+        ws = {w.xref for w in f[page].widgets()}
+        return [x for x in _get_refs(f, f[page].xref, "Annots") if x in ws]
