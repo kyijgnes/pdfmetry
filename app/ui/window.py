@@ -1456,6 +1456,12 @@ class MainWindow(QMainWindow):
                 n = A.recognize_fields(d); t.changed(None); self.say(f"양식 칸 {n}개를 만들었습니다")
             elif key == "form_export": self.form_data(t, "export")
             elif key == "form_import": self.form_data(t, "import")
+            elif key == "calc_order" and t:
+                from .dlg_field_props import CalcOrderDialog
+                dlg = CalcOrderDialog(self, d)
+                if dlg.exec():
+                    d.snapshot(); _engine("form_props").set_calc_order(d, dlg.order()); _engine("form_calc").recalc(d)
+                    t.changed(None)
             elif key == "form_reset": d.snapshot(); _engine("tools").reset_form(d.fitz); t.changed(None)   # 칸마다 기본값으로
             elif key == "form_set_default":
                 d.snapshot(); n = _engine("tools").set_form_defaults(d.fitz); t.changed(None); self.say(f"{n}칸의 지금 값을 기본값으로 정했습니다")
@@ -1758,27 +1764,16 @@ class MainWindow(QMainWindow):
                          content=vals["content"], author=vals["author"])
                 t.changed([s.page])
         elif kind == "field_props":
-            s = data
-            pg = d.fitz[s.page]  # 쪽 객체를 붙잡아 둔다(놓치면 칸이 풀려 w.update 가 멈춘다)
-            w = next((w for w in pg.widgets() if w.xref == s.xref), None)
-            if not w: return
-            radio = w.field_type == fitz.PDF_WIDGET_TYPE_RADIOBUTTON
-            dlg = D.FieldPropsDialog(self, w.field_name, w.field_type_string, w.field_value, w.choice_values or [], radio=radio)
-            if dlg.exec():
-                vals = dlg.values(); d.snapshot()
-                if w.field_type in (fitz.PDF_WIDGET_TYPE_COMBOBOX, fitz.PDF_WIDGET_TYPE_LISTBOX): w.choice_values = vals["options"]
-                if w.field_type in (fitz.PDF_WIDGET_TYPE_CHECKBOX, fitz.PDF_WIDGET_TYPE_RADIOBUTTON):
-                    v = vals["value"].strip()
-                    w.field_value = v.lower() in ("yes", "on", "true", "1", "예") or v == (w.on_state() or "")
-                elif w.field_type != fitz.PDF_WIDGET_TYPE_BUTTON: w.field_value = vals["value"]
-                A.save_widget(w)
-                A.rename_field(d, s.page, s.xref, vals["name"])  # 라디오는 같은 이름 묶음으로 옮겨 간다
-                t.changed([s.page])
+            from .dlg_field_props import FieldPropsDialog
+            sel = getattr(t.viewer, "sel_fields", None)
+            items = list(sel) if sel else [(data.page, data.xref)]
+            FieldPropsDialog(self, d, items, on_change=lambda pages: t.changed(pages or None)).exec()
         elif kind == "fill_field":
             w = data["widget"]
             val = D.fill_field(self, w)
             if val is not None:
-                A.set_field_value(d, data["page"], data["xref"], val); t.changed([data["page"]])
+                A.set_field_value(d, data["page"], data["xref"], val)
+                t.changed(sorted({data["page"], *_engine("form_calc").recalc(d)}))   # 계산 칸 다시 셈
         elif kind == "open_uri":
             if QMessageBox.question(self, "링크", f"이 주소를 열까요?\n{data}") == QMessageBox.StandardButton.Yes:
                 webbrowser.open(data)

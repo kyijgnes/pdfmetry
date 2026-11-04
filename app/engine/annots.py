@@ -1772,9 +1772,12 @@ def save_widget(w: fitz.Widget) -> None:
     radio = w.field_type == fitz.PDF_WIDGET_TYPE_RADIOBUTTON
     if radio and w.field_value in ("Off", "", None):
         w.field_value = False
+    from . import form_props
+    kept = form_props.keep_actions(w.parent.parent, w.xref)   # update 가 지우는 자바스크립트 아닌 동작
     w.update()
     if radio:
         _sync_radio(w.parent.parent, w.xref)
+    form_props.after_save(w, kept)   # 동작 되살리기 · 체크 모양 · 서식대로 보이는 글
 
 
 def reset_widget(w: fitz.Widget) -> None:
