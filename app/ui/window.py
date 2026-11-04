@@ -701,8 +701,13 @@ class MainWindow(QMainWindow):
         own = iv != {"mode": "none", "layout": "default", "zoom": "default", "page": 0}
         if own and (pl == "auto" or zm == "auto"):   # 문서가 정한 보기가 그 문서를 지난번 닫은 자리보다 먼저
             view = None
-        if pl == "auto":   # 자동: 문서의 레이아웃, 없으면 연속
-            pl = iv["layout"] if iv["layout"] != "default" else "continuous"
+        # 자동: 문서의 레이아웃, 없으면 연속. 한 쪽씩 넘기는 보기는 연속 스크롤로 바꾼다
+        # (한글이 내보낸 PDF 는 늘 /SinglePage 라 쪽마다 끊겨 넘어갔다, 11-04 사용자)
+        doc_pl = {"default": "continuous", "single": "continuous", "facing": "facing_continuous"}.get(iv["layout"], iv["layout"])
+        if pl == "auto":
+            pl = doc_pl
+            if view and view.get("layout") == iv["layout"]:   # 문서 값을 물려받아 적어 둔 것이면 다시 따르지 않는다
+                view = dict(view, layout=pl)
         if zm == "auto":   # 자동: 문서가 정한 배율, 없으면 너비 맞춤
             z = iv["zoom"]
             zm, last = (("fixed", {"zoom": z}) if isinstance(z, float) else

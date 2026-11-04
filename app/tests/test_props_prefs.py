@@ -79,9 +79,22 @@ def test_open_follows_document_initial_view(win, pdf):
     d = Document(pdf); d.set_initial_view({"layout": "facing", "zoom": "fit_width", "page": 2}); d.save(); d.close()
     win.open_path(pdf); pump(0.4)
     v = win.cur().viewer
-    assert v.layout_mode == "facing" and v.zoom_mode == "fit_width"
+    assert v.layout_mode == "facing_continuous" and v.zoom_mode == "fit_width"   # 한 줄씩 넘기는 보기는 연속으로
     assert v.current in (2, 3)   # 두 쪽 보기라 짝의 어느 쪽이든
     assert v.tool == "select"    # 기본 선택 모드
+
+
+def test_open_single_page_document_scrolls_continuously(win, pdf):
+    """한글이 내보낸 PDF 처럼 /SinglePage 가 박혀 있어도 자동이면 연속 스크롤로, 물려받아 기억한 single 도 따르지 않는다."""
+    d = Document(pdf); d.set_initial_view({"layout": "single"}); d.save(); d.close()
+    win.open_path(pdf); pump(0.4)
+    t = win.cur()
+    assert t.viewer.layout_mode == "continuous"
+    win.close_tab(win.tabs.index(t)); pump(0.2)
+    r = next(r for r in win.settings["recent"] if os.path.abspath(r["path"]) == os.path.abspath(pdf))
+    r["view"]["layout"] = "single"   # 옛 버전이 문서 값을 물려받아 적어 둔 모양
+    win.open_path(pdf); pump(0.4)
+    assert win.cur().viewer.layout_mode == "continuous"
 
 
 def test_open_fixed_zoom_pref(win, pdf):
