@@ -2082,31 +2082,50 @@ class MainWindow(QMainWindow):
             work.close()
 
     def merge(self):
+        """「PDF 병합」 창(지금 문서가 먼저 들어감). [적용] 뒤 결과를 연다."""
+        from .dlg_merge import MergeDialog
         t = self.cur()
-        dlg = D.FileListDialog(self, "PDF 병합", "합치기", OPEN_FILTER, paths=[t.doc.path] if t and t.doc.path else None)
-        if not dlg.exec() or len(dlg.paths()) < 1:
-            return
-        paths = dlg.paths()
-        out, _ = QFileDialog.getSaveFileName(self, "합친 PDF", os.path.splitext(paths[0])[0] + "_합침.pdf", PDF_FILTER)
-        if not out:
-            return
-        res = D.ProgressDialog(self, "PDF 병합", P.merge, paths, out).run()
-        if res:
-            self.open_path(out)
+        has = bool(t and t.doc.path and os.path.isfile(t.doc.path))
+        dlg = MergeDialog(self, [t.doc.path] if has else None, [t.doc.password] if has else None)
+        if dlg.exec() and dlg.out_path:
+            self.open_path(dlg.out_path)
 
     def compare(self, t: DocTab):
-        p, _ = QFileDialog.getOpenFileName(self, "비교할 다른 PDF", "", PDF_FILTER)
-        if not p:
+        """「파일 비교」 창에서 두 문서를 고르고, 나란히 담아 칠한 결과를 새 탭(오른쪽 「변경 내용 목록」)으로 연다."""
+        from .dlg_compare import CompareSelectDialog, ComparePanel, attach_panel
+        C = _engine("compare")
+        docs = [(x.doc.name, x.doc.path, x) for w in F.windows(self) for x in w.tabs]
+        dlg = CompareSelectDialog(self, (t.doc.name, t.doc.path, t) if t else None, docs)
+        if not dlg.exec():
             return
-        other = self._open_other(p)
-        if other is None:
+        picked = dlg.values()
+        work: list = []
+        for it in picked:
+            if it.get("tab") is not None:
+                work.append(it["tab"].doc.copy())   # 보는 문서는 그리는 일꾼이 같이 쓴다. 비교 일꾼에는 사본을 준다
+            else:
+                other = self._open_other(it["path"])
+                if other is None:
+                    for f in work:
+                        f.close()
+                    return
+                work.append(other.fitz)
+        name_a, name_b = picked[0]["name"], picked[1]["name"]
+        title = f"파일 비교_{os.path.splitext(name_b)[0]}.pdf"
+        out = F.temp_out(title)
+        res = D.ProgressDialog(self, "파일 비교", C.build, work[0], work[1], out, name_a, name_b).run()
+        for f in work:
+            f.close()
+        if res is None:
             return
-        T = _engine("tools")
-        mine = t.doc.copy()  # 보는 문서는 그리는 일꾼이 같이 쓴다. 비교 일꾼에는 사본을 준다
-        res = D.ProgressDialog(self, "PDF 비교", T.compare, mine, other.fitz).run()
-        mine.close(); other.close()
-        if res is not None:
-            D.CompareDialog(self, t.doc.name, os.path.basename(p), res).exec()
+        if not res["items"]:
+            QMessageBox.information(self, "파일 비교", C.NO_DIFF); return
+        new = Document(out)
+        new.ask_save = True
+        new.save_hint = os.path.join(os.path.dirname(picked[1]["path"]), title) if picked[1].get("path") else None
+        tab = self.add_doc(new)
+        if tab is not None:
+            attach_panel(tab, ComparePanel(tab, res["items"], name_a, name_b))
 
     def _open_other(self, path: str) -> Document | None:
         """비교 등에 쓸 다른 PDF 를 연다. 암호가 걸려 있으면 물어서 열고, 틀리면 다시 묻는다."""
@@ -2125,35 +2144,40 @@ class MainWindow(QMainWindow):
                 return None
 
     def compress(self, t: DocTab):
-        size = os.path.getsize(t.doc.path) if t.doc.path and os.path.exists(t.doc.path) else len(t.doc.to_bytes())
-        dlg = D.CompressDialog(self, size, self.prefs.get("compress_level", "high"), self.prefs.get("compress_meta", True))
-        if not dlg.exec():
-            return
-        vals = dlg.values()
-        self.prefs["compress_level"] = vals["level"]; self.prefs["compress_meta"] = vals["remove_metadata"]; save_settings(self.settings)
-        out, _ = QFileDialog.getSaveFileName(self, "압축한 PDF", self._suggest(t, "_압축.pdf"), PDF_FILTER)
-        if not out:
-            return
-        T = _engine("tools")
-        src = t.doc.copy()
-        # 못 줄이면 엔진이 파일을 만들지 않고 NotSmaller 를 낸다(ProgressDialog 가 그 문구를 띄움)
-        res = D.ProgressDialog(self, "PDF 압축", T.compress, src, out, password=t.doc.password, before=size, **vals).run()
-        src.close()
-        if res:
-            QMessageBox.information(self, "PDF 압축", f"{size / 1024:.0f} KB → {res['after'] / 1024:.0f} KB "
-                                    f"({(1 - res['after'] / size) * 100:.0f}% 줄임)\n{out}")
-            self.open_path(out)
+        """「PDF 압축」 창(지금 문서가 들어감). 저장 안 한 편집이 있으면 그 상태로 압축한다."""
+        from .dlg_compress import CompressDialog
+        paths, pws, sources, origins = [], [], {}, {}
+        if t:
+            d = t.doc
+            if d.path and os.path.isfile(d.path) and d.path.lower().endswith(".pdf"):
+                paths, pws = [d.path], [d.password]
+                if d.modified:
+                    sources[d.path] = d.copy()
+            else:   # 새 문서·다른 형식에서 연 문서: 지금 상태를 임시 파일로 떠서 넣는다
+                name = d.name if d.name.lower().endswith(".pdf") else os.path.splitext(d.name)[0] + ".pdf"
+                tmp = F.temp_out(name)
+                with open(tmp, "wb") as f:
+                    f.write(d.to_bytes())
+                paths, pws = [tmp], [d.password]
+                hint = getattr(d, "save_hint", None)
+                origins[tmp] = os.path.dirname(hint) if hint else (os.path.dirname(d.path) if d.path else F.documents_dir())
+        CompressDialog(self, paths, pws, sources, origins).exec()
 
     def flatten(self, t: DocTab):
-        out, _ = QFileDialog.getSaveFileName(self, "평면화한 PDF", self._suggest(t, "_평면화.pdf"), PDF_FILTER)
-        if not out:
-            return
+        """묻지 않고 지금 상태(저장 안 한 편집 포함)를 평면화해 저장 안 된 새 탭 「이름_평면화」 로 연다. 원본 탭은 그대로."""
         T = _engine("tools")
+        name = os.path.splitext(t.doc.name)[0] + "_평면화.pdf"
+        out = F.temp_out(name)
         src = t.doc.copy()
         res = D.ProgressDialog(self, "평면화", T.flatten, src, out, password=t.doc.password).run()
         src.close()
-        if res:
-            self.open_path(out)
+        if not res:
+            return
+        new = Document(out, t.doc.password)
+        new.ask_save = True   # 「저장」 해도 임시 폴더에 그냥 쓰지 않고 저장 위치를 묻는다
+        new.save_hint = os.path.join(os.path.dirname(t.doc.path), name) if t.doc.path else None
+        new.modified = True
+        self.add_doc(new)
 
     def deskew(self, t: DocTab):
         T = _engine("tools")

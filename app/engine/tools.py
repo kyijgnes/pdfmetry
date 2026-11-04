@@ -139,6 +139,34 @@ class NotSmaller(EngineError):
     """압축해도 원본보다 작아지지 않았다(결과 파일은 만들지 않음)."""
 
 
+NOT_SMALLER = "이 PDF의 크기가 최대한으로 축소되었으며 더 이상 축소할 수 없습니다."
+# 사용자 지정 창에서 고르는 해상도(dpi). 중간 단계 기본 120 도 목록에 둔다(없으면 그대로 확인해도 값이 바뀐다)
+CUSTOM_DPIS = (72, 96, 120, 144, 150, 300, 400, 600)
+# 해상도 → JPEG 품질: 「해상도 ≥ 지정값」 인 첫 줄의 품질, 없으면 100
+_QUALITY_BY_DPI = ((72, 45), (96, 55), (120, 70), (150, 85), (300, 95), (600, 100), (1200, 100))
+CUSTOM_KEYS = ("dedupe", "streams", "bookmarks", "attach", "meta", "annots")
+
+
+def quality_for_dpi(dpi: int) -> int:
+    return next((q for d, q in _QUALITY_BY_DPI if d >= dpi), 100)
+
+
+def compress_defaults(level: str) -> dict:
+    """단계별 사용자 지정 기본값: 그 단계 해상도 · 중복 제거·스트림 압축·메타데이터 삭제 켬, 나머지 끔."""
+    return {"dpi": _LEVELS.get(level, _LEVELS["high"])["dpi_target"], "dedupe": True, "streams": True,
+            "bookmarks": False, "attach": False, "meta": True, "annots": False}
+
+
+def _level_options(level: str, custom: dict | None) -> tuple[dict, dict]:
+    """(그림 줄이기 값, 사용자 지정 값). 해상도를 바꿨으면 문턱·품질도 그 해상도에 맞춘다."""
+    c = {**compress_defaults(level), **(custom or {})}
+    opt = dict(_LEVELS[level])
+    dpi = int(c.get("dpi") or opt["dpi_target"])
+    if dpi != opt["dpi_target"]:
+        opt = dict(dpi_threshold=int(dpi * 1.1), dpi_target=dpi, quality=quality_for_dpi(dpi))
+    return opt, c
+
+
 def _keep_copy(doc: fitz.Document, password: str | None = None) -> fitz.Document:
     """암호·권한을 그대로 둔 작업 사본. 여기서 고치고 encryption=KEEP 으로 저장하면 결과에도 같은 암호가 남는다.
     (그냥 tobytes 로 뜬 사본은 암호가 풀려, 압축·평면화·일괄 결과가 암호 없이 나갔다)"""
@@ -150,15 +178,19 @@ def _keep_copy(doc: fitz.Document, password: str | None = None) -> fitz.Document
 
 
 def compress(doc: fitz.Document, out_path: str, level: str = "high",
-             progress: Progress = None, password: str | None = None, remove_metadata: bool = True,
-             before: int | None = None) -> dict:
+             progress: Progress = None, password: str | None = None, remove_metadata: bool | None = None,
+             before: int | None = None, custom: dict | None = None) -> dict:
     """그림을 다시 눌러 담고 쓰레기 객체를 걷어 저장. {"before": 바이트, "after": 바이트}. 암호는 그대로.
 
     흑백(1비트) 그림도 같은 해상도로 줄인다. 원본보다 작아지지 않으면 out_path 를 만들지 않고 NotSmaller.
-    before: 원본 파일 크기(사본을 넘길 때. 없으면 doc.name 파일이나 지금 바이트 길이로 잰다)."""
+    before: 원본 파일 크기(사본을 넘길 때. 없으면 doc.name 파일이나 지금 바이트 길이로 잰다).
+    custom: 그 단계의 사용자 지정 값(compress_defaults 꼴: dpi · dedupe · streams · bookmarks · attach · meta · annots).
+    remove_metadata 는 옛 인자(주면 custom 의 meta 보다 앞선다)."""
     if level not in _LEVELS:
         raise EngineError(f"압축 단계가 잘못됐습니다: {level}")
-    opt = _LEVELS[level]
+    opt, c = _level_options(level, custom)
+    if remove_metadata is not None:
+        c["meta"] = bool(remove_metadata)
     work = _keep_copy(doc, password)
     # 다시 쓴 바이트 길이가 아니라 실제 파일 크기와 대조한다(원본보다 커진 것도 줄었다고 보였다)
     # 사본을 encryption 없이 tobytes 하면 사본의 암호가 떨어져 KEEP 저장이 깨진다(길이만 잴 때도 KEEP)
@@ -174,16 +206,12 @@ def compress(doc: fitz.Document, out_path: str, level: str = "high",
                 _manual_recompress(work, opt, progress)
         else:
             _manual_recompress(work, opt, progress)
-        if remove_metadata:
-            work.set_metadata({})
-            try:
-                work.del_xml_metadata()
-            except Exception:  # noqa: BLE001
-                pass
+        _strip_content(work, c)
         _say(progress, 1, 2, "저장하는 중")
         _subset(work)
-        work.save(tmp, garbage=4, deflate=True, clean=True, deflate_images=True, deflate_fonts=True,
-                  encryption=fitz.PDF_ENCRYPT_KEEP)
+        streams = bool(c["streams"])
+        work.save(tmp, garbage=4 if c["dedupe"] else 1, deflate=streams, clean=streams, deflate_images=True,
+                  deflate_fonts=True, encryption=fitz.PDF_ENCRYPT_KEEP)
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -193,10 +221,33 @@ def compress(doc: fitz.Document, out_path: str, level: str = "high",
     after = os.path.getsize(tmp)
     if after >= before:  # 커진 파일을 「압축」 이라고 남기지 않는다
         os.remove(tmp)
-        raise NotSmaller(f"더 줄일 수 없는 PDF 입니다(원본 {before / 1024:.0f} KB, 압축해 보니 {after / 1024:.0f} KB)")
+        raise NotSmaller(NOT_SMALLER)
     os.replace(tmp, out_path)
     _say(progress, 2, 2, "압축 끝")
     return {"before": before, "after": after}
+
+
+def _strip_content(work: fitz.Document, c: dict) -> None:
+    """사용자 지정 「삭제된 콘텐츠 압축」: 북마크 · 첨부 파일 · 문서 정보와 메타데이터 · 모든 메모와 양식."""
+    if c.get("bookmarks"):
+        work.set_toc([])
+    if c.get("attach"):
+        for name in list(work.embfile_names()):
+            work.embfile_del(name)
+    if c.get("annots") or c.get("attach"):
+        for page in work:
+            for a in list(page.annots() or []):
+                if c.get("annots") or a.type[0] == fitz.PDF_ANNOT_FILE_ATTACHMENT:
+                    page.delete_annot(a)
+            if c.get("annots"):
+                for wd in list(page.widgets() or []):
+                    page.delete_widget(wd)
+    if c.get("meta"):
+        work.set_metadata({})
+        try:
+            work.del_xml_metadata()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _rewrite_options(opt: dict):
