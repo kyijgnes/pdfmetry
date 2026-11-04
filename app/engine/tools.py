@@ -1290,37 +1290,76 @@ def align_widgets(doc: fitz.Document, items: Sequence[tuple[int, int]], how: str
     return len(ws)
 
 
-def extract_data(docs_paths: Sequence[str], out_xlsx: str, progress: Progress = None) -> str:
-    """여러 PDF 의 양식 값을 엑셀 한 장으로(PDF 하나 = 한 줄, 칸 이름 = 열)."""
-    from openpyxl import Workbook
+FORM_NONE = "검색된 양식 필드가 없습니다."
 
-    rows = []
+
+def form_row(doc: fitz.Document) -> dict[str, object]:
+    """문서 하나의 양식 값 {칸 이름: 값}(라디오 묶음은 고른 값 하나). 칸이 없으면 빈 dict."""
+    return _form_values(form_fields(doc))
+
+
+def write_data_table(rows: Sequence[tuple[str, dict, str]], out_path: str) -> str:
+    """[(파일 이름, {칸: 값}, 비고)] 를 표 한 장으로. 열 = 「파일」 · 칸 이름들(처음 나온 차례) · 「비고」.
+    .csv 면 엑셀이 한글을 바로 읽는 UTF-8(BOM), 그 밖(.xlsx)이면 엑셀 파일."""
     names: list[str] = []
-    n = len(docs_paths)
-    for i, p in enumerate(docs_paths):
-        _say(progress, i, n, f"양식 읽는 중 {os.path.basename(p)}")
-        try:
-            d = fitz.open(p)
-        except Exception:
-            rows.append((p, {}, "열지 못함"))
-            continue
-        try:
-            vals = {fd["name"]: fd["value"] for fd in form_fields(d)}
-        finally:
-            d.close()
+    for _, vals, _ in rows:
         for k in vals:
             if k not in names:
                 names.append(k)
-        rows.append((p, vals, ""))
+    head = ["파일", *names, "비고"]
+    body = [[name, *[_cell(vals.get(k, "")) for k in names], note] for name, vals, note in rows]
+    if out_path.lower().endswith(".csv"):
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+            wr = csv.writer(f)
+            wr.writerow(head)
+            wr.writerows(body)
+        return out_path
+    from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
     ws.title = "양식 자료"
-    ws.append(["파일", *names, "비고"])
-    for p, vals, note in rows:
-        ws.append([os.path.basename(p), *[_cell(vals.get(k, "")) for k in names], note])
-    wb.save(out_xlsx)
-    _say(progress, n, n, "엑셀 저장 끝")
-    return out_xlsx
+    ws.append(head)
+    for r in body:
+        ws.append(r)
+    wb.save(out_path)
+    return out_path
+
+
+def extract_data_doc(doc: fitz.Document, out_path: str, name: str) -> str:
+    """지금 문서 하나의 양식 값을 CSV 한 장(머리 줄 + 값 한 줄)으로. 칸이 없으면 EngineError(FORM_NONE)."""
+    vals = form_row(doc)
+    if not vals:
+        raise EngineError(FORM_NONE)
+    return write_data_table([(name, vals, "")], out_path)
+
+
+def extract_data(docs_paths: Sequence[str], out_path: str, progress: Progress = None,
+                 passwords: Sequence[str | None] | None = None) -> str:
+    """여러 PDF 의 양식 값을 표 한 장으로(PDF 하나 = 한 줄, 칸 이름 = 열). out_path 가 .csv 면 CSV, 그 밖은 .xlsx."""
+    rows = []
+    pws = list(passwords or [])
+    n = len(docs_paths)
+    for i, p in enumerate(docs_paths):
+        _say(progress, i, n, f"양식 읽는 중 {os.path.basename(p)}")
+        rows.append((os.path.basename(p), *_read_form(p, pws[i] if i < len(pws) else None)))
+    write_data_table(rows, out_path)
+    _say(progress, n, n, "저장 끝")
+    return out_path
+
+
+def _read_form(path: str, password: str | None = None) -> tuple[dict, str]:
+    """(양식 값, 비고). 못 열면 ({}, 까닭)."""
+    try:
+        d = fitz.open(path)
+    except Exception:  # noqa: BLE001
+        return {}, "열지 못함"
+    try:
+        if d.needs_pass and not d.authenticate(password or ""):
+            return {}, "암호가 걸린 파일"
+        vals = form_row(d)
+        return vals, "" if vals else FORM_NONE
+    finally:
+        d.close()
 
 
 def _cell(v):
@@ -1388,105 +1427,272 @@ def print_pdf(path: str, printer: str | None = None, pages: Iterable[int] | None
 
 
 # ── 일괄 처리 ───────────────────────────────────────────────────────────
-def _out_name(inp: str, out_dir: str, suffix: str = "", ext: str | None = None) -> str:
-    stem, old_ext = os.path.splitext(os.path.basename(inp))
-    return os.path.join(out_dir, f"{stem}{suffix}{ext if ext is not None else old_ext}")
+CANCELLED = "취소됨"
+# 결과 이름 뒤에 붙는 말(변환·인쇄·생성·데이터 내보내기는 붙이지 않음)
+BATCH_SUFFIX = {"compress": "_압축", "watermark": "_워터마크", "background": "_배경", "header_footer": "_머리글",
+                "page_number": "_페이지번호", "bates": "_베이츠", "encrypt": "_보안", "ocr": "_OCR", "blank": "_공백삭제"}
+DECO_OPS = ("watermark", "background", "header_footer", "page_number", "bates")
+# 옛 변환 이름(target) → 변환 창 형식 키
+_OLD_TARGET = {"text": "txt", "word": "docx", "excel": "xlsx", "images": "png"}
+_IMAGE_FMTS = ("jpg", "jpeg", "png", "bmp", "gif", "tiff")
+_CONVERT_EXT = {"docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "txt": ".txt", "html": ".html", "xml": ".xml",
+                "rtf": ".rtf", "epub": ".epub", "pdfa": ".pdf", "imgpdf": ".pdf", "hwpx": ".hwpx"}
+_CONVERT_OCR = ("docx", "xlsx", "pptx", "txt", "html", "rtf", "epub")
 
 
-def batch(jobs: Sequence[dict], progress: Progress = None) -> list[dict]:
-    """여러 일을 차례로. jobs = [{"op", "inputs", "out_dir", "options"}].
+def _free(p: str, taken: set | None) -> bool:
+    return not os.path.exists(p) and (taken is None or os.path.normcase(p) not in taken)
 
-    op: convert(options.target = images/text/html/word/rtf/excel/pptx/epub/pdfa/hwpx, 그 밖의 kw 는 변환 함수로)
-        compress(level) · watermark(text/image_path/...) · encrypt(user_pw/owner_pw/allow_*)
-        ocr(lang/dpi/force) · create(여러 입력을 PDF 하나로; options.name) · print(printer/copies)
-    결과: [{"input", "output", "ok", "error"}]
+
+def _out_name(inp: str, out_dir: str, suffix: str = "", ext: str | None = None, taken: set | None = None) -> str:
+    """out_dir 안 「원래이름+suffix+ext」, 있으면 「_1」 · 「_2」 로 비킨다. taken 은 이번 일괄에서 이미 쓰기로 한 경로
+    (normcase 한 것)이고, 고른 경로를 거기 더한다. ext 가 "" 면 폴더 이름으로 본다(이미지 여러 장)."""
+    stem = os.path.splitext(os.path.basename(inp))[0] + suffix
+    if ext is None:
+        ext = os.path.splitext(inp)[1]
+    p = os.path.join(out_dir, stem + ext)
+    n = 1
+    while not _free(p, taken):
+        p = os.path.join(out_dir, f"{stem}_{n}{ext}")
+        n += 1
+    if taken is not None:
+        taken.add(os.path.normcase(p))
+    return p
+
+
+def _stopped(stop) -> bool:
+    if stop is None:
+        return False
+    is_set = getattr(stop, "is_set", None)
+    return bool(is_set() if is_set else stop())
+
+
+def batch(jobs: Sequence[dict], progress: Progress = None, stop=None, on_row=None) -> list[dict]:
+    """여러 일을 차례로. jobs = [{"op", "inputs", "out_dir", "options", "passwords"?}].
+
+    out_dir 이 비면(None·"") 파일마다 자기 폴더(원본 파일 위치)에 저장한다. 결과 이름이 겹치면 「_1」 로 비킨다.
+    stop: 멈춤 깃발(threading.Event 나 bool 을 돌려주는 함수). 서면 남은 파일은 「취소됨」.
+    on_row(줄 번호, rec): 파일 하나를 시작할 때(rec None)와 끝날 때(rec) 부른다. 줄 번호는 모든 일에 걸쳐 0부터.
+
+    op: convert(options.fmt = 변환 창 형식 키, 옛 target 도 받음, 그 밖은 형식 설정과 ocr·langs)
+        compress(level · custom) · watermark/background/header_footer/page_number/bates(settings · range,
+        옛 워터마크 kw 도 받음) · encrypt(user_pw/owner_pw/method/allow_*) · ocr(lang/dpi/force) · blank
+        create(파일마다 PDF 로, options.name 을 주면 옛 동작대로 하나로 합침) · export_data(options.name 표 한 장)
+        print(printer/copies)
+    결과: 줄마다 {"input", "output", "ok", "error", "cancelled"}(create 합치기는 일 하나에 한 줄)
     """
     from . import convert as _cv
     from . import ocr as _ocr
 
     results: list[dict] = []
-    total = sum(1 if j.get("op") == "create" else len(j.get("inputs", [])) for j in jobs) or 1
-    done = 0
+    total = sum(1 if (j.get("op") == "create" and "name" in (j.get("options") or {})) else len(j.get("inputs", []))
+                for j in jobs) or 1
+    row = 0
+    taken: set[str] = set()
+
+    def start(k: int):
+        if on_row:
+            on_row(k, None)
+
+    def finish(k: int, rec: dict):
+        results.append(rec)
+        if on_row:
+            on_row(k, rec)
+
     for job in jobs:
         op = job.get("op")
         inputs = list(job.get("inputs", []))
-        out_dir = job.get("out_dir") or (os.path.dirname(inputs[0]) if inputs else os.getcwd())
+        pws = list(job.get("passwords") or [])
+        fixed = job.get("out_dir") or ""
         opts = dict(job.get("options") or {})
-        os.makedirs(out_dir, exist_ok=True)
-        if op == "create":
-            name = opts.pop("name", "합친 문서.pdf")
-            out = os.path.join(out_dir, name)
-            try:
-                _cv.from_files(inputs, out)
-                results.append({"input": inputs, "output": out, "ok": True, "error": ""})
-            except Exception as e:
-                results.append({"input": inputs, "output": out, "ok": False, "error": str(e)})
-            done += 1
-            _say(progress, done, total, name)
+
+        def folder(inp: str, fixed=fixed) -> str:
+            d = fixed or os.path.dirname(os.path.abspath(inp)) or os.getcwd()
+            os.makedirs(d, exist_ok=True)
+            return d
+
+        if op == "create" and "name" in opts:
+            rec = {"input": inputs, "output": "", "ok": False, "error": "", "cancelled": False}
+            start(row)
+            if _stopped(stop):
+                rec.update(error=CANCELLED, cancelled=True)
+            else:
+                out = os.path.join(folder(inputs[0]) if inputs else (fixed or os.getcwd()), opts["name"])
+                rec["output"] = out
+                try:
+                    _cv.from_files(inputs, out)
+                    rec["ok"] = True
+                except Exception as e:  # noqa: BLE001
+                    rec["error"] = str(e)
+            finish(row, rec)
+            row += 1
+            _say(progress, row, total, opts["name"])
             continue
-        for inp in inputs:
-            _say(progress, done, total, os.path.basename(inp))
-            rec = {"input": inp, "output": "", "ok": False, "error": ""}
-            try:
-                rec["output"] = _batch_one(op, inp, out_dir, dict(opts), _cv, _ocr)
-                rec["ok"] = True
-            except Exception as e:
-                rec["error"] = str(e)
-            results.append(rec)
-            done += 1
+        if op == "export_data":
+            row = _export_rows(inputs, pws, opts, folder, taken, stop, start, finish, row, progress, total)
+            continue
+        for i, inp in enumerate(inputs):
+            _say(progress, row, total, os.path.basename(inp))
+            start(row)
+            rec = {"input": inp, "output": "", "ok": False, "error": "", "cancelled": False}
+            if _stopped(stop):
+                rec.update(error=CANCELLED, cancelled=True)
+            else:
+                try:
+                    rec["output"] = _batch_one(op, inp, folder(inp), dict(opts), _cv, _ocr,
+                                               password=pws[i] if i < len(pws) else None, taken=taken)
+                    rec["ok"] = True
+                except Exception as e:  # noqa: BLE001
+                    rec["error"] = str(e) or "실패"
+            finish(row, rec)
+            row += 1
     _say(progress, total, total, "일괄 처리 끝")
     return results
 
 
-def _batch_one(op: str, inp: str, out_dir: str, opts: dict, _cv, _ocr) -> str:
+def _export_rows(inputs, pws, opts, folder, taken, stop, start, finish, row, progress, total) -> int:
+    """데이터 내보내기: 파일마다 양식 값을 읽어 줄 상태를 남기고, 끝에 표 한 장(CSV)을 첫 파일 폴더(또는 지정 폴더)에."""
+    name = opts.get("name") or "양식 데이터.csv"
+    stem, ext = os.path.splitext(name)
+    ext = ext or ".csv"
+    table, recs = [], []
+    for i, inp in enumerate(inputs):
+        _say(progress, row, total, os.path.basename(inp))
+        start(row)
+        rec = {"input": inp, "output": "", "ok": False, "error": "", "cancelled": False}
+        if _stopped(stop):
+            rec.update(error=CANCELLED, cancelled=True)
+        else:
+            vals, note = _read_form(inp, pws[i] if i < len(pws) else None)
+            table.append((os.path.basename(inp), vals, note))
+            rec["ok"], rec["error"] = bool(vals), note
+        recs.append((row, rec))
+        row += 1
+    out = ""
+    if table:
+        out = _out_name(stem + ext, folder(inputs[0]), "", ext, taken)
+        write_data_table(table, out)
+    for k, rec in recs:
+        if not rec["cancelled"] and out:
+            rec["output"] = out
+        finish(k, rec)
+    return row
+
+
+def _save_keep(doc: fitz.Document, out: str) -> str:
+    """결과에도 원본의 암호·권한을 그대로 둔다(encryption=KEEP)."""
+    _subset(doc)
+    doc.save(out, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    return out
+
+
+def _convert(doc: fitz.Document, inp: str, out_dir: str, opts: dict, _cv, _ocr, taken: set | None) -> str:
+    """변환 창과 같은 형식 키·설정으로 파일 하나를 바꾼다. 쪽 범위는 없음(모든 쪽)."""
+    target = opts.get("target", "")
+    fmt = opts.get("fmt") if not target else _OLD_TARGET.get(target, target)
+    if target == "images" and opts.get("fmt"):
+        fmt = opts["fmt"]   # 옛 꼴: target=images, fmt=jpg
+    fmt = fmt or "txt"
+    stem = os.path.splitext(os.path.basename(inp))[0]
+    if fmt in _IMAGE_FMTS:
+        mode = opts.get("mode", "pages")
+        dpi = opts.get("dpi") or None
+        if mode == "merge":
+            out = _out_name(inp, out_dir, "", "." + fmt, taken)
+            files = _cv.to_images(doc, out_dir, fmt=fmt, dpi=dpi, merge=True,
+                                  stem=os.path.splitext(os.path.basename(out))[0], zoom=opts.get("zoom", 100),
+                                  frame_w=opts.get("frame_w", 1), frame_color=opts.get("frame_color", "#FFFFFF"))
+            return files[0] if files else out
+        sub = _out_name(inp, out_dir, "", "", taken)   # 쪽마다 한 장은 이름 폴더 하나에
+        os.makedirs(sub, exist_ok=True)
+        if mode == "extract":
+            _cv.extract_images(doc, sub, stem=stem)
+        else:
+            _cv.to_images(doc, sub, fmt=fmt, dpi=dpi, stem=stem)
+        return sub
+    if fmt not in _CONVERT_EXT:
+        raise EngineError(f"모르는 변환 종류입니다: {fmt}")
+    ocr_mode = opts.get("ocr", "off")
+    if ocr_mode in ("all", "scan") and fmt in _CONVERT_OCR:
+        try:   # 인식이 안 되는 PC 면 그냥 넘어간다(변환 창과 같음)
+            _ocr.ocr_pages(doc, lang=opts.get("langs") or ["ko"], dpi=300, force=ocr_mode == "all")
+        except Exception:  # noqa: BLE001
+            pass
+    suffix = "_pdfa" if fmt == "pdfa" else "_이미지" if fmt == "imgpdf" else ""
+    out = _out_name(inp, out_dir, suffix, _CONVERT_EXT[fmt], taken)
+    if fmt == "docx":
+        return _cv.to_word(doc, out)
+    if fmt == "xlsx":
+        return _cv.to_excel(doc, out, one_sheet=bool(opts.get("one_sheet")))
+    if fmt == "pptx":
+        return _cv.to_pptx(doc, out, dpi=int(opts.get("pptx_dpi", 150)))
+    if fmt == "txt":
+        return _cv.to_text(doc, out)
+    if fmt == "html":
+        return _cv.to_html(doc, out)
+    if fmt == "xml":
+        return _cv.to_xml(doc, out)
+    if fmt == "rtf":
+        return _cv.to_rtf(doc, out)
+    if fmt == "epub":
+        return _cv.to_epub(doc, out, cover=opts.get("cover", ""))
+    if fmt == "pdfa":
+        return _cv.to_pdfa(doc, out)
+    if fmt == "imgpdf":
+        return _cv.to_image_pdf(doc, out)
+    return _cv.to_hwpx(doc, out)
+
+
+def _deco(doc: fitz.Document, kind: str, opts: dict, stem: str) -> None:
+    """꾸미기 템플릿(settings · range)을 넣는다. 옛 꼴(워터마크 kw 를 바로)도 받는다."""
+    from .deco import add_decoration
+    if "settings" not in opts:
+        if kind != "watermark":
+            raise EngineError("넣을 템플릿을 고르세요")
+        from .deco_mark import watermark
+        watermark(doc, **opts)
+        return
+    from .deco_store import range_pages
+    try:
+        pages = range_pages(opts.get("range"), doc.page_count)
+    except ValueError as e:
+        raise EngineError(str(e)) from e
+    add_decoration(doc, kind, pages=pages, file_name=stem, **dict(opts["settings"]))
+
+
+def _batch_one(op: str, inp: str, out_dir: str, opts: dict, _cv, _ocr, password: str | None = None,
+               taken: set | None = None) -> str:
+    """파일 하나. 결과 경로(이미지 쪽마다는 폴더)."""
     if op == "print":
         return print_pdf(inp, printer=opts.get("printer"), pages=opts.get("pages"), copies=opts.get("copies", 1))
+    if op == "create":
+        out = _out_name(inp, out_dir, "", ".pdf", taken)
+        return _cv.from_files([inp], out)
     doc = fitz.open(inp)
-    pw = opts.pop("password", "")
+    pw = opts.pop("password", None) or password or ""
     doc._pdfapp_pw = pw
     try:
-        if doc.needs_pass:
-            if not doc.authenticate(pw):
-                raise EngineError("암호가 걸린 파일입니다")
+        if doc.needs_pass and not doc.authenticate(pw):
+            raise EngineError("암호가 걸린 파일입니다")
         if op == "convert":
-            target = opts.pop("target", "text")
-            table = {
-                "text": (_cv.to_text, ".txt"), "html": (_cv.to_html, ".html"), "word": (_cv.to_word, ".docx"),
-                "rtf": (_cv.to_rtf, ".rtf"), "excel": (_cv.to_excel, ".xlsx"), "pptx": (_cv.to_pptx, ".pptx"),
-                "epub": (_cv.to_epub, ".epub"), "pdfa": (_cv.to_pdfa, ".pdf"), "hwpx": (_cv.to_hwpx, ".hwpx"),
-            }
-            if target == "images":
-                fmt = opts.pop("fmt", "png")
-                sub = os.path.join(out_dir, os.path.splitext(os.path.basename(inp))[0])
-                os.makedirs(sub, exist_ok=True)
-                files = _cv.to_images(doc, sub, fmt=fmt, stem=os.path.splitext(os.path.basename(inp))[0], **opts)
-                return sub if files else ""
-            if target not in table:
-                raise EngineError(f"모르는 변환 종류입니다: {target}")
-            fn, ext = table[target]
-            out = _out_name(inp, out_dir, "_pdfa" if target == "pdfa" else "", ext)
-            return fn(doc, out, **opts)
-        # 결과에도 원본의 암호·권한을 그대로 둔다(encryption=KEEP)
+            return _convert(doc, inp, out_dir, opts, _cv, _ocr, taken)
+        if op not in BATCH_SUFFIX:
+            raise EngineError(f"모르는 일괄 작업입니다: {op}")
+        out = _out_name(inp, out_dir, BATCH_SUFFIX[op], ".pdf", taken)
         if op == "compress":
-            out = _out_name(inp, out_dir, "_압축")
-            compress(doc, out, level=opts.get("level", "medium"), password=pw)
+            compress(doc, out, level=opts.get("level", "high"), password=pw or None, custom=opts.get("custom"))
             return out
-        if op == "watermark":
-            from .deco_mark import watermark
-            out = _out_name(inp, out_dir, "_워터마크")
-            watermark(doc, **opts)
-            _subset(doc)
-            doc.save(out, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-            return out
+        if op in DECO_OPS:
+            _deco(doc, op, opts, os.path.splitext(os.path.basename(inp))[0])
+            return _save_keep(doc, out)
         if op == "encrypt":
-            out = _out_name(inp, out_dir, "_암호")
             return encrypt(doc, out, **opts)
         if op == "ocr":
-            out = _out_name(inp, out_dir, "_ocr")
             _ocr.ocr_pages(doc, **opts)
-            _subset(doc)
-            doc.save(out, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-            return out
-        raise EngineError(f"모르는 일괄 작업입니다: {op}")
+            return _save_keep(doc, out)
+        # blank
+        if not delete_blank_pages(doc):
+            raise EngineError("공백 페이지가 없습니다")
+        return _save_keep(doc, out)
     finally:
         doc.close()

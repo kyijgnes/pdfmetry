@@ -1321,7 +1321,7 @@ class MainWindow(QMainWindow):
             elif key == "close" and t: self.close_tab(self.tabs.index(t))
             elif key == "quit": self._user_close = True; self.close()
             elif key == "print" and t: self.print_doc(t)
-            elif key == "print_batch": self.batch_dialog()
+            elif key == "print_batch": self.batch_dialog("print")
             elif key == "properties" and t: self.properties(t)
             elif key == "preferences": self.preferences()
             elif key == "help": self.show_help()
@@ -1371,7 +1371,7 @@ class MainWindow(QMainWindow):
                 for x in self.tabs: (x.viewer.set_grid if key == "toggle_grid" else x.viewer.set_ruler)(on)
             elif key in ("tile_h", "tile_v"): self.tile(key == "tile_h")
             elif key == "maximize": self.showNormal() if self.isMaximized() else self.showMaximized()
-            elif key == "batch_convert": self.batch_dialog()
+            elif key == "batch_convert": self.batch_dialog("convert", current=True)
             elif key == "first": v.goto(0)
             elif key == "last": v.goto(d.page_count - 1)
             elif key == "next": v.next_page()
@@ -1438,7 +1438,9 @@ class MainWindow(QMainWindow):
             # 변환
             elif key.startswith("to_"): self.convert(t, key[3:])
             elif key == "convert_settings": self.convert_settings()
-            elif key == "batch": self.batch_dialog()
+            elif key == "batch":   # 변환 탭 「일괄 변환」 은 지금 문서를 넣은 「변환」, 도구 탭 「일괄 편집」 은 지난 작업
+                if self.ribbon.current_tab == "convert": self.batch_dialog("convert", current=True)
+                else: self.batch_dialog()
             # 도구
             elif key == "ocr": self.ocr(t)
             elif key == "merge": self.merge()
@@ -1447,7 +1449,7 @@ class MainWindow(QMainWindow):
             elif key == "flatten": self.flatten(t)
             elif key == "deskew": self.deskew(t)
             elif key == "table": self.table_recognize(t)
-            elif key == "extract_data": self.extract_data()
+            elif key == "extract_data": self.extract_data(t)
             elif key == "search": self.show_search()
             # 양식
             elif key == "recognize":
@@ -2088,7 +2090,7 @@ class MainWindow(QMainWindow):
                            DO.current_langs(self.prefs, avail), self.prefs.get("ocr_range", "all"))
         ok = dlg.exec()
         if dlg.batch:
-            self.batch_dialog(); return
+            self.batch_dialog("ocr", current=True); return
         if not ok:
             return
         vals = dlg.values()
@@ -2229,13 +2231,12 @@ class MainWindow(QMainWindow):
         from . import table_tool as TT
         TT.toggle(self, t)
 
-    def extract_data(self):
-        dlg = D.FileListDialog(self, "데이터 추출(양식 값 모으기)", "추출", PDF_FILTER)
-        if not dlg.exec() or not dlg.paths():
-            return
-        out, _ = QFileDialog.getSaveFileName(self, "엑셀로 저장", "양식 데이터.xlsx", "Excel (*.xlsx)")
-        if out:
-            T = _engine("tools"); T.extract_data(dlg.paths(), out); self._offer_open(out)
+    def extract_data(self, t: DocTab | None):
+        """데이터 추출: 지금 문서의 양식 값을 CSV 로. 열린 문서가 없으면 일괄 편집 「데이터 내보내기」."""
+        if t is None:
+            self.batch_dialog("export_data"); return
+        from . import dlg_data_extract as DX
+        DX.run(self, t)
 
     def form_data(self, t: DocTab, how: str):
         T = _engine("tools")
@@ -2252,23 +2253,14 @@ class MainWindow(QMainWindow):
             if p:
                 t.doc.snapshot(); n = T.import_form_data(t.doc.fitz, p); t.changed(None); self.say(f"{n}칸을 채웠습니다")
 
-    def batch_dialog(self):
-        dlg = D.BatchDialog(self)
-        if not dlg.exec():
-            return
-        job = dlg.values()
-        if job["op"] == "print":  # 윈도우 「인쇄」 동작에 맡기면 PDF 기본 앱에 따라 늘 실패해서 앱이 직접 보낸다
-            if not job["inputs"]:
-                self.say("인쇄할 파일을 고르세요"); return
-            self._batch_print(job["inputs"], job["options"].get("printer") or QPrinterInfo.defaultPrinterName()); return
-        if not job["inputs"] or not job["out_dir"]:
-            self.say("파일과 저장 폴더를 고르세요"); return
-        T = _engine("tools")
-        res = D.ProgressDialog(self, "일괄 작업", T.batch, [job]).run()
-        if res is not None:
-            ok = sum(1 for r in res if r.get("ok")); bad = [r for r in res if not r.get("ok")]
-            msg = f"{ok}개 끝남" + (f", {len(bad)}개 실패:\n" + "\n".join(f"{os.path.basename(r['input'])}: {r.get('error')}" for r in bad[:8]) if bad else "")
-            QMessageBox.information(self, "일괄 작업", msg); self._offer_open(job["out_dir"])
+    def batch_dialog(self, task: str | None = None, current: bool = False):
+        """일괄 편집 창. task 를 주면 그 작업으로 열고(없으면 지난번 작업), current 면 지금 문서(디스크에 있는 PDF)를 넣는다."""
+        from .dlg_batch import BatchDialog
+        paths, pws = [], []
+        t = self.cur() if current else None
+        if t and t.doc.path and os.path.isfile(t.doc.path) and t.doc.path.lower().endswith(".pdf"):
+            paths, pws = [t.doc.path], [t.doc.password]
+        BatchDialog(self, task, paths, pws).exec()
 
     def encrypt(self, t: DocTab):
         T = _engine("tools")
@@ -2453,28 +2445,44 @@ class MainWindow(QMainWindow):
         r = (v._scene_rect_to_page(i, inter) * page.rotation_matrix) & page.rect   # 보기 회전을 풀어 쪽 좌표로
         return None if r.is_empty else (i, r)
 
-    def _batch_print(self, inputs: list[str], printer: str):
-        """일괄 인쇄: 파일마다 열어 인쇄 창과 같은 길(send)로 보낸다. 용지에 맞추기·쪽 모양 따라·컬러."""
+    def _batch_print(self, inputs: list[str], printer: str, passwords: list[str | None] | None = None,
+                     status=None, summary: bool = True) -> tuple[int, list[str]]:
+        """일괄 인쇄: 파일마다 열어 인쇄 창과 같은 길(send)로 보낸다. 용지에 맞추기·쪽 모양 따라·컬러.
+        윈도우 「인쇄」 동작에 맡기면 PDF 기본 앱에 따라 늘 실패해서 앱이 직접 보낸다(그래서 화면 쪽에서 돈다).
+        status(줄, 글, 성공) 를 주면 파일마다 부른다. 「그만둠」 뒤 남은 파일은 「취소됨」."""
         from .printing import PrintOptions, send
+        pws = list(passwords or [])
         ok, bad = 0, []
-        for p in inputs:
+        stopped = False
+        for k, p in enumerate(inputs):
+            if stopped:
+                if status: status(k, "취소됨", False)
+                continue
+            if status: status(k, "처리 중", True)
             try:
                 d = fitz.open(p)
-                if d.needs_pass:
-                    bad.append(f"{os.path.basename(p)}: 암호가 걸린 파일"); continue
-                if not d.is_pdf:
-                    d = fitz.open("pdf", d.convert_to_pdf())
-                err = send(self, d, PrintOptions(printer=printer, pages=list(range(d.page_count))), os.path.basename(p))
+                if d.needs_pass and not d.authenticate((pws[k] if k < len(pws) else None) or ""):
+                    err = "암호가 걸린 파일"
+                else:
+                    if not d.is_pdf:
+                        d = fitz.open("pdf", d.convert_to_pdf())
+                    err = send(self, d, PrintOptions(printer=printer, pages=list(range(d.page_count))), os.path.basename(p))
                 d.close()
             except Exception as e:  # noqa: BLE001
                 err = f"열 수 없는 파일 ({e})"
             if err == "그만둠":
-                break
+                stopped = True
+                if status: status(k, "취소됨", False)
+                continue
             if err:
                 bad.append(f"{os.path.basename(p)}: {err}")
+                if status: status(k, err, False)
             else:
                 ok += 1
-        QMessageBox.information(self, "일괄 인쇄", f"{ok}개 보냄" + (f", {len(bad)}개 못 보냄:\n" + "\n".join(bad[:8]) if bad else ""))
+                if status: status(k, "완료", True)
+        if summary:
+            QMessageBox.information(self, "일괄 인쇄", f"{ok}개 보냄" + (f", {len(bad)}개 못 보냄:\n" + "\n".join(bad[:8]) if bad else ""))
+        return ok, bad
 
     def mail(self, t: DocTab):
         if not t.doc.path or t.doc.modified:

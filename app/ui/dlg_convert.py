@@ -379,16 +379,12 @@ class ConvertDialog(FormDialog):
         hl.addWidget(self.fmt, 1); hl.addWidget(self.settings_btn)
         self.add("추출 형식", row)
         self.name = self.add("파일 이름", QLineEdit())
-        frow = QWidget(); fv = QVBoxLayout(frow); fv.setContentsMargins(0, 0, 0, 0); fv.setSpacing(4)
-        self.where = QComboBox(); self.where.addItems(["원본 파일 위치", "폴더 지정"])
-        prow = QWidget(); fl = QHBoxLayout(prow); fl.setContentsMargins(0, 0, 0, 0)
-        self.folder = QLineEdit(); self.browse = QPushButton("찾기"); self.browse.setAutoDefault(False)
-        self.browse.clicked.connect(self._pick); fl.addWidget(self.folder, 1); fl.addWidget(self.browse)
-        fv.addWidget(self.where); fv.addWidget(prow)
-        self.add("저장 위치", frow)
-        self._custom_folder = self.out_store.get("folder") or default_custom_folder()
-        self.where.setCurrentIndex(1 if self.out_store.get("custom") else 0)
-        self._where_changed()
+        # 저장 위치: 압축·병합·일괄과 같은 OutputPanel(같은 {"custom", "folder"} 꼴로 convert_out 에 기억)
+        from .file_list import OutputPanel
+        self.out = OutputPanel(self, self.out_store, "변환", origin=default_folder(doc_path), vertical=True)
+        self.out.label.hide()
+        self.add("저장 위치", self.out)
+        self.where, self.folder, self.browse = self.out.combo, self.out.path, self.out.browse
         self._name_touched = False
         self.name.textEdited.connect(lambda _t: setattr(self, "_name_touched", True))
         self.name.textChanged.connect(self._sync_ok)
@@ -434,23 +430,10 @@ class ConvertDialog(FormDialog):
         self._default_name()
 
     def _where_changed(self, *_a):
-        custom = self.custom()
-        self.folder.blockSignals(True)
-        self.folder.setText(self._custom_folder if custom else default_folder(self.doc_path))
-        self.folder.blockSignals(False)
-        self.folder.setReadOnly(not custom); self.folder.setEnabled(custom); self.browse.setEnabled(custom)
-        if hasattr(self, "_name_touched"):
-            self._default_name()
+        self._default_name()   # 경로 칸 바꾸기는 OutputPanel 이 먼저 했다
 
-    def _folder_edited(self, text: str):
-        if self.custom():
-            self._custom_folder = text
+    def _folder_edited(self, _text: str):
         self._default_name()
-
-    def _pick(self):
-        d = QFileDialog.getExistingDirectory(self, "저장 위치", self.folder.text())
-        if d:
-            self.folder.setText(os.path.normpath(d))
 
     def open_settings(self):
         key = self.key()
@@ -472,7 +455,7 @@ class ConvertDialog(FormDialog):
         if err:
             QMessageBox.warning(self, "변환", err); self.folder.setFocus(); return
         self.out_store["custom"] = self.custom()
-        if self.custom():
+        if self.custom():   # 지정 폴더는 「폴더 지정」 으로 쓴 때만 기억
             self.out_store["folder"] = folder
         super().accept()
 

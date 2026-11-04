@@ -334,24 +334,46 @@ class OutputPanel(QWidget):
     """저장 위치: 「원본 파일 위치」(기본) · 「폴더 지정」 + 경로 + [찾아보기]. store 는 {"custom": bool, "folder": 글자}."""
     ORIGINAL, CUSTOM = 0, 1
 
-    def __init__(self, parent, store: dict, default_sub: str):
+    def __init__(self, parent, store: dict, default_sub: str, origin: str | None = None, vertical: bool = False):
+        """origin: 「원본 파일 위치」 일 때 경로 칸에 보일 폴더(파일 하나짜리 창). None 이면 지정 폴더를 흐리게 둔다.
+        vertical: 콤보 아래에 경로 줄(좁은 창)."""
         super().__init__(parent)
         self.store = store
         self.default = default_folder(default_sub)
-        hl = QHBoxLayout(self); hl.setContentsMargins(0, 0, 0, 0)
-        hl.addWidget(QLabel("저장 위치"))
+        self.origin = origin
+        self._custom_text = store.get("folder") or self.default
+        lay = QVBoxLayout(self) if vertical else QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.label = QLabel("저장 위치")
+        lay.addWidget(self.label)
         self.combo = QComboBox(); self.combo.addItems(["원본 파일 위치", "폴더 지정"])
-        hl.addWidget(self.combo)
-        self.path = QLineEdit(store.get("folder") or self.default)
-        hl.addWidget(self.path, 1)
-        self.browse = QPushButton("찾아보기"); self.browse.clicked.connect(self._browse)
-        hl.addWidget(self.browse)
+        lay.addWidget(self.combo)
+        row = QHBoxLayout() if vertical else lay
+        self.path = QLineEdit(self._custom_text)
+        row.addWidget(self.path, 1)
+        self.browse = QPushButton("찾아보기"); self.browse.setAutoDefault(False); self.browse.clicked.connect(self._browse)
+        row.addWidget(self.browse)
+        if vertical:
+            lay.addLayout(row)
         self.combo.setCurrentIndex(self.CUSTOM if store.get("custom") else self.ORIGINAL)
         self.combo.currentIndexChanged.connect(self._sync)
+        self.path.textChanged.connect(self._edited)
+        self._sync()
+
+    def _edited(self, text: str):
+        if self.custom() or self.origin is None:   # origin 이 없으면 경로 칸은 늘 지정 폴더
+            self._custom_text = text
+
+    def set_origin(self, origin: str | None):
+        self.origin = origin
         self._sync()
 
     def _sync(self):
         on = self.custom()
+        if self.origin is not None:
+            self.path.blockSignals(True)
+            self.path.setText(self._custom_text if on else self.origin)
+            self.path.blockSignals(False)
         self.path.setEnabled(on); self.browse.setEnabled(on)
 
     def _browse(self):
@@ -385,7 +407,7 @@ class OutputPanel(QWidget):
     def commit(self):
         """고른 값을 store 에 남긴다(설정 파일 쓰기는 부른 쪽)."""
         self.store["custom"] = self.custom()
-        self.store["folder"] = self.folder() or self.default
+        self.store["folder"] = self._custom_text.strip() or self.default
 
     def folder_for(self, input_path: str | None) -> str:
         """그 입력 파일의 결과를 둘 폴더. 원본 파일 위치인데 원본 폴더가 없으면(새 문서) 내 문서."""

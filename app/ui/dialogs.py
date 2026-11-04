@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import traceback
-from html import escape
 from typing import Callable
 
 import fitz
@@ -12,7 +11,7 @@ from PySide6.QtGui import QColor, QRegularExpressionValidator
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QRadioButton, QSpinBox, QTextEdit, QToolButton, QVBoxLayout,
+                               QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout,
                                QWidget)
 
 from ..engine import annots as A
@@ -420,41 +419,6 @@ class HiddenDataDialog(FormDialog):
         return {k: cb.isChecked() for k, cb in self.cbs.items()}
 
 
-# ── 도구 ───────────────────────────────────────────────────────
-COMPRESS_CHOICES = [("high", "높음 · 이미지 72dpi, 용량 우선"), ("medium", "중간 · 이미지 120dpi"), ("low", "낮음 · 이미지 150dpi, 화질 우선")]
-
-
-class CompressDialog(FormDialog):
-    """압축 정도는 마지막에 고른 것으로 연다(처음엔 높음)."""
-    def __init__(self, parent, size_bytes: int, level: str = "high", remove_metadata: bool = True):
-        super().__init__("PDF 압축", parent, "압축")
-        self.form.addRow("지금 크기", QLabel(f"{size_bytes / 1024:.0f} KB"))
-        box = QWidget(); vl = QVBoxLayout(box); vl.setContentsMargins(0, 0, 0, 0)
-        self.levels = {}
-        for key, label in COMPRESS_CHOICES:
-            rb = QRadioButton(label); self.levels[key] = rb; vl.addWidget(rb)
-        self.levels.get(level, self.levels["high"]).setChecked(True)
-        self.add("정도", box)
-        self.meta = self.add("", QCheckBox("문서 정보·메타데이터 삭제")); self.meta.setChecked(remove_metadata)
-
-    def values(self) -> dict:
-        return {"level": next(k for k, rb in self.levels.items() if rb.isChecked()), "remove_metadata": self.meta.isChecked()}
-
-
-class OcrDialog(FormDialog):
-    def __init__(self, parent, total: int, current: int, langs: list[str]):
-        super().__init__("OCR (글자 인식)", parent, "인식")
-        self.form.addRow(QLabel("윈도우에 들어 있는 글자 인식으로 스캔 쪽에 찾기·복사가 되는 글자층을 넣습니다."))
-        self.lang = self.add("언어", QComboBox()); self.lang.addItems(langs or ["ko"])
-        self.dpi = self.add("해상도", QComboBox()); self.dpi.addItems(["200 dpi", "300 dpi", "400 dpi"]); self.dpi.setCurrentIndex(1)
-        self.force = self.add("", QCheckBox("글자가 이미 있는 쪽도 다시 인식"))
-        self.pages = self.add("적용할 쪽", PageRangeEdit(total, current))
-
-    def values(self) -> dict:
-        return {"lang": self.lang.currentText(), "dpi": int(self.dpi.currentText().split()[0]),
-                "force": self.force.isChecked(), "pages": self.pages.pages()}
-
-
 class FileListDialog(QDialog):
     """파일 여러 개 모으기(합치기·일괄·파일에서 생성). 순서 바꾸기 됨."""
     def __init__(self, parent, title: str, ok_text: str, filters: str, extra: QWidget | None = None, paths: list[str] | None = None):
@@ -518,98 +482,6 @@ class FileListDialog(QDialog):
 
     def paths(self) -> list[str]:
         return [self.list.item(k).data(Qt.ItemDataRole.UserRole) for k in range(self.list.count())]
-
-
-BATCH_FORMATS = [("Word (.docx)", "docx"), ("Excel (.xlsx)", "xlsx"), ("PowerPoint (.pptx)", "pptx"), ("이미지 (.png)", "png"),
-                 ("이미지 (.jpg)", "jpg"), ("텍스트 (.txt)", "txt"), ("HTML (.html)", "html"), ("RTF (.rtf)", "rtf"),
-                 ("EPUB (.epub)", "epub"), ("PDF/A (.pdf)", "pdfa"), ("한글 (.hwpx)", "hwpx")]
-
-
-class BatchDialog(QDialog):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("PDF 일괄 작업"); self.setMinimumSize(620, 520)
-        lay = QVBoxLayout(self)
-        self.op = QComboBox()
-        self.op.addItem("변환", "convert"); self.op.addItem("압축", "compress"); self.op.addItem("워터마크", "watermark")
-        self.op.addItem("암호화", "encrypt"); self.op.addItem("OCR", "ocr"); self.op.addItem("PDF 로 만들기(이미지·오피스·한글)", "create"); self.op.addItem("인쇄", "print")
-        f = QFormLayout(); f.addRow("작업", self.op)
-        self.fmt = QComboBox()
-        for label, key in BATCH_FORMATS: self.fmt.addItem(label, key)
-        f.addRow("변환 형식", self.fmt)
-        self.level = QComboBox(); self.level.addItems([label for _, label in COMPRESS_CHOICES]); f.addRow("압축 정도", self.level)
-        self.wm = QLineEdit("대외비"); f.addRow("워터마크 글자", self.wm)
-        self.pw = QLineEdit(); self.pw.setEchoMode(QLineEdit.EchoMode.Password); f.addRow("열기 암호", self.pw)
-        from PySide6.QtPrintSupport import QPrinterInfo
-        self.printer = QComboBox(); self.printer.addItems(QPrinterInfo.availablePrinterNames())
-        self.printer.setCurrentText(QPrinterInfo.defaultPrinterName()); f.addRow("프린터", self.printer)
-        row = QWidget(); hl = QHBoxLayout(row); hl.setContentsMargins(0, 0, 0, 0)
-        self.out = QLineEdit(); b = QPushButton("폴더"); b.clicked.connect(self._pick); hl.addWidget(self.out); hl.addWidget(b)
-        f.addRow("저장 폴더", row)
-        lay.addLayout(f)
-        self.files = FileListDialog(self, "", "", "모든 파일 (*)")
-        self.files.setWindowFlags(Qt.WindowType.Widget)
-        self.files.layout().itemAt(self.files.layout().count() - 1).widget().hide()
-        lay.addWidget(self.files)
-        lay.addWidget(_buttons(self, "시작"))
-        self.op.currentIndexChanged.connect(self._sync); self._sync()
-
-    def _sync(self):
-        k = self.op.currentData()
-        self.fmt.setEnabled(k == "convert"); self.level.setEnabled(k == "compress"); self.wm.setEnabled(k == "watermark"); self.pw.setEnabled(k == "encrypt")
-        self.printer.setEnabled(k == "print"); self.out.setEnabled(k != "print")
-
-    def _pick(self):
-        d = QFileDialog.getExistingDirectory(self, "저장 폴더")
-        if d: self.out.setText(d)
-
-    def values(self) -> dict:
-        k = self.op.currentData()
-        target = {"docx": "word", "xlsx": "excel", "png": "images", "jpg": "images", "txt": "text"}.get(self.fmt.currentData(), self.fmt.currentData())
-        opts = {"convert": {"target": target, **({"fmt": "jpg"} if self.fmt.currentData() == "jpg" else {})}, "compress": {"level": COMPRESS_CHOICES[self.level.currentIndex()][0]},
-                "watermark": {"text": self.wm.text()}, "encrypt": {"user_pw": self.pw.text()}, "ocr": {}, "create": {},
-                "print": {"printer": self.printer.currentText()}}[k]
-        return {"op": k, "inputs": self.files.paths(), "out_dir": self.out.text(), "options": opts}
-
-
-# ── 비교 결과 ──────────────────────────────────────────────────
-class CompareDialog(QDialog):
-    def __init__(self, parent, name_a: str, name_b: str, result: list[dict]):
-        super().__init__(parent)
-        self.setWindowTitle("파일 비교"); self.setMinimumSize(700, 500)
-        lay = QVBoxLayout(self)
-        changed = [r for r in result if r.get("text_diff") or r.get("changed_rects_a") or r.get("changed_rects_b")]
-        lay.addWidget(QLabel(f"「{name_a}」 ↔ 「{name_b}」: 달라진 쪽 {len(changed)} / {len(result)}"))
-        self.text = QTextEdit(); self.text.setReadOnly(True)
-        html = []
-        name_a, name_b = escape(name_a), escape(name_b)
-        for r in result:
-            diffs = r.get("text_diff") or []
-            if not diffs and not (r.get("changed_rects_a") or r.get("changed_rects_b")) and not r.get("only_in"):
-                continue
-            pa, pb = r.get("page_a", r["page"]), r.get("page_b", r["page"])
-            if r.get("only_in") == "a":
-                html.append(f"<h4>{name_a} {pa + 1}쪽 · {name_b} 에 없는 쪽</h4>")
-                continue
-            if r.get("only_in") == "b":
-                html.append(f"<h4>{name_b} {pb + 1}쪽 · {name_a} 에 없는 쪽</h4>")
-                continue
-            html.append(f"<h4>{pa + 1}쪽</h4>" if pa == pb else f"<h4>{name_a} {pa + 1}쪽 ↔ {name_b} {pb + 1}쪽</h4>")
-            if not diffs:
-                html.append("<p>글자는 같고 그림·배치가 다릅니다.</p>")
-            for d in diffs:
-                op, a, b = d[0], escape(d[1]), escape(d[2])
-                if op == "delete":
-                    html.append(f"<p><span style='background:#fdd;text-decoration:line-through'>{a}</span></p>")
-                elif op == "insert":
-                    html.append(f"<p><span style='background:#dfd'>{b}</span></p>")
-                else:
-                    html.append(f"<p><span style='background:#fdd;text-decoration:line-through'>{a}</span> → <span style='background:#dfd'>{b}</span></p>")
-        self.text.setHtml("".join(html) or "<p>두 문서가 같습니다.</p>")
-        lay.addWidget(self.text)
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.button(QDialogButtonBox.StandardButton.Close).setText("닫기")
-        bb.rejected.connect(self.reject); bb.clicked.connect(self.reject); lay.addWidget(bb)
-        self.result = result
 
 
 # ── 진행 표시 + 일꾼 ───────────────────────────────────────────

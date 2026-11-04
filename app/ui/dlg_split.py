@@ -195,24 +195,9 @@ def run_split(win, t):
 
 
 def compress_files(win, files: list[str], folder: str):
-    """넘친 파일들을 일괄 작업 창(압축)에 담아 연다."""
-    dlg = D.BatchDialog(win)
-    dlg.op.setCurrentIndex(dlg.op.findData("compress"))
-    for f in files:
-        dlg.files._add(f)
-    dlg.out.setText(os.path.join(folder, "압축"))
-    if not dlg.exec():
-        return
-    job = dlg.values()
-    if not job["inputs"] or not job["out_dir"]:
-        win.say("파일과 저장 폴더를 고르세요"); return
-    from ..engine import tools as T
-    res = D.ProgressDialog(win, "일괄 작업", T.batch, [job]).run()
-    if res is not None:
-        ok = sum(1 for r in res if r.get("ok")); bad = [r for r in res if not r.get("ok")]
-        msg = f"{ok}개 끝남" + (f", {len(bad)}개 실패:\n" + "\n".join(f"{os.path.basename(r['input'])}: {r.get('error')}" for r in bad[:8]) if bad else "")
-        QMessageBox.information(win, "일괄 작업", msg)
-        open_folder(job["out_dir"])
+    """넘친 파일들을 「PDF 압축」 창에 담아 연다(결과는 「_압축」, 저장 위치는 그 창 기억대로)."""
+    from .dlg_compress import CompressDialog
+    CompressDialog(win, list(files)).exec()
 
 
 # ── 페이지 레이블 ─────────────────────────────────────────────
