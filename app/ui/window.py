@@ -206,6 +206,8 @@ class DocTab(QWidget):
         root.addWidget(SB.build(self), 1)   # 왼쪽 패널 · 보기 · 속성 패널(폭을 끌어 바꿈)
         from . import ocr_area as OA, scan_bar as SCB
         self.scan_bar = SCB.attach(self, root)   # 스캔 문서 안내 막대(보기 위 한 줄)
+        from . import dlg_redact as DR, dlg_security as SEC, redact_panel as RP
+        self.protect_bar, self.redact_bar, self.redact_panel = SEC.attach(self, root), DR.attach(self, root), RP.attach(self)
         self.ocr_area = OA.OcrArea(self)         # 영역 OCR 사각형·오른쪽 패널(도구 「ocrarea」 일 때만)
         self.table_tool = None                   # 표 인식 모드(window.table_recognize 가 만든다)
         self.side_key = ""
@@ -1213,6 +1215,12 @@ class MainWindow(QMainWindow):
         t = self.cur()
         if not t:
             return
+        from . import dlg_security as SEC
+        if SEC.blocks(self, key):
+            self.ribbon.reflect_tool(t.viewer.tool); return
+        if key == "redact":
+            from . import dlg_redact as DR
+            DR.tool_started(self, t)
         if key in ("stamp", "stamp_pick"):   # 스탬프 메뉴에서 고른 뒤 찍는다
             spec = self.pick_stamp()
             if not spec:
@@ -1287,6 +1295,9 @@ class MainWindow(QMainWindow):
             self.set_skin("dark" if on else "light"); return
         if not t:
             return
+        from . import dlg_security as SEC
+        if on and key in ("edit_all", "form_edit") and SEC.blocks(self, key):
+            self.ribbon.set_toggle(key, False); return
         if key == "edit_all":
             self._set_edit(t, on)
         elif key == "form_edit":
@@ -1313,6 +1324,9 @@ class MainWindow(QMainWindow):
         t = self.cur()
         v = t.viewer if t else None
         d = t.doc if t else None
+        from . import dlg_security as SEC
+        if t and SEC.blocks(self, key):   # 권한 암호를 모르는 보호 문서: 쓰기 명령은 띠 문구로 막는다
+            return
         try:
             # 파일
             if key == "open": self.open_dialog()
@@ -1472,20 +1486,17 @@ class MainWindow(QMainWindow):
                 d.snapshot(); _engine("tools").align_widgets(d.fitz, [(pg, x) for x in vals["xrefs"]], vals["how"]); t.changed([pg])
             # 보안
             elif key == "encrypt": self.encrypt(t)
-            elif key == "decrypt": self.decrypt(t)
+            elif key == "decrypt": self.encrypt(t)   # 「암호 풀기」 는 암호화 창에서 두 체크를 끄고 저장
             elif key == "redact_search":
-                dlg = D.RedactSearchDialog(self, d.page_count, v.current)
-                if dlg.exec():
-                    vals = dlg.values(); T = _engine("tools")
-                    d.snapshot(); n = T.redact_search(d.fitz, vals["pattern"], regex=vals["regex"], pages=vals["pages"], fill=vals["fill"])
-                    t.changed(None); self.say(f"{n}곳에 교정 표시를 했습니다. 「교정 적용」 을 누르면 지워집니다.")
+                if not (t.side.isVisible() and t.side_key == "redact"):
+                    t.show_side("redact"); self.toggle_side("")
+                t.redact_panel.focus()
             elif key == "redact_apply":
-                if QMessageBox.question(self, "교정 적용", "교정 표시한 자리의 글자·그림을 영구히 지웁니다. 계속할까요?") == QMessageBox.StandardButton.Yes:
-                    A.apply_redactions(d); t.changed(None)
+                from . import dlg_redact as DR
+                DR.apply(self, t)
             elif key == "hidden":
-                dlg = D.HiddenDataDialog(self)
-                if dlg.exec():
-                    T = _engine("tools"); d.snapshot(); T.remove_hidden_data(d.fitz, **dlg.values()); t.changed(None, structural=True)
+                from . import dlg_redact as DR
+                DR.hidden(self, t)
             elif key == "digital_sign":
                 QMessageBox.information(self, "디지털 서명", "인증서 기반 디지털 서명은 넣지 않았습니다(공인 인증서·시점 확인 서버가 필요합니다).\n"
                                         "손글씨·도장 그림을 넣는 「서명 관리 → 서명 넣기」 를 쓰세요.")
@@ -1513,6 +1524,9 @@ class MainWindow(QMainWindow):
         if not t:
             return
         d, v = t.doc, t.viewer
+        from . import dlg_security as SEC
+        if key not in ("extract", "print", "export_images", "copy", "split") and SEC.blocks(self, "delete_pages"):
+            return
         pages = sorted(set(pages)) or [v.current]
         cur = pages[0]
         try:
@@ -2264,42 +2278,45 @@ class MainWindow(QMainWindow):
 
     def encrypt(self, t: DocTab):
         T = _engine("tools")
-        dlg = D.EncryptDialog(self, T.encryption_method(t.doc.fitz))
+        from . import dlg_security as SEC
+        if not SEC.unlock(self, t):   # 권한이 모자란 문서는 권한 암호부터
+            return
+        dlg = SEC.EncryptDialog(self, T.encryption_method(t.doc.fitz), SEC.current(t.doc))
         if not dlg.exec():
             return
-        vals = dlg.values()
+        removes = dlg.removes()
+        vals = {} if removes else dlg.values()
         if not dlg.to_new_file():
-            # 일반적인 PDF 편집기처럼 열린 문서에 걸어 두고 다음 저장 때 파일에 건다(Document.save 가 security 를 본다)
+            # 열린 문서에 걸어 두고 다음 저장 때 파일에 건다(Document.save 가 security 를 본다). 빈 dict 면 암호 빼기
+            if removes and not (t.doc.fitz.metadata or {}).get("encryption") and not getattr(t.doc, "security", None):
+                self.say("이 문서에는 암호가 없습니다"); return
             t.doc.security = vals; t.doc.modified = True; t.changed(None)
-            self.say(f"저장하면 암호가 걸립니다 · {dict(D.EncryptDialog.METHODS)[vals['method']].split(' · ')[0]}")
+            self.say("저장하면 암호가 빠집니다" if removes else
+                     f"저장하면 암호가 걸립니다 · {dict(SEC.EncryptDialog.METHODS)[vals['method']].split(' · ')[0]}")
             return
-        out, _ = QFileDialog.getSaveFileName(self, "암호 건 PDF 저장", self._suggest(t, "_암호.pdf"), PDF_FILTER)
+        out, _ = QFileDialog.getSaveFileName(self, "암호 뺀 PDF 저장" if removes else "암호 건 PDF 저장",
+                                             self._suggest(t, "_암호해제.pdf" if removes else "_암호.pdf"), PDF_FILTER)
         if not out:
             return
-        T.encrypt(t.doc.fitz, out, **vals)
-        self.say(f"암호를 걸어 저장했습니다: {out}")
-
-    def decrypt(self, t: DocTab):
-        # 권한 암호만 걸린 문서는 is_encrypted 가 False 다. 암호화 정보로 본다.
-        if not (t.doc.fitz.metadata or {}).get("encryption") and not t.doc.password:
-            self.say("이 문서에는 암호가 없습니다"); return
-        box = QMessageBox(QMessageBox.Icon.Question, "암호 풀기", "이 문서의 암호를 뺍니다.", parent=self)
-        here = box.addButton("이 문서에서 빼기 · 저장할 때 적용", QMessageBox.ButtonRole.AcceptRole)
-        new = box.addButton("암호 뺀 사본을 새 파일로", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is here:
-            t.doc.security = {}; t.doc.modified = True; t.changed(None); self.say("저장하면 암호가 빠집니다"); return
-        if box.clickedButton() is not new:
-            return
-        out, _ = QFileDialog.getSaveFileName(self, "암호 푼 PDF 저장", self._suggest(t, "_암호해제.pdf"), PDF_FILTER)
-        if out:
+        if removes:
             c = t.doc.copy()  # 열린 문서를 encryption 없이 저장하면 그 뒤 저장이 깨진다. 사본에서 푼다
             try:
                 c.save(out, encryption=fitz.PDF_ENCRYPT_NONE, garbage=3, deflate=True)
             finally:
                 c.close()
             self.say(f"암호를 풀어 저장했습니다: {out}")
+            return
+        T.encrypt(t.doc.fitz, out, **vals)
+        self.say(f"암호를 걸어 저장했습니다: {out}")
+
+    def decrypt(self, t: DocTab):
+        """속성 창 「보안 정책: 없음」: 저장할 때 암호를 뺀다."""
+        if not (t.doc.fitz.metadata or {}).get("encryption") and not t.doc.password:
+            self.say("이 문서에는 암호가 없습니다"); return
+        from . import dlg_security as SEC
+        if not SEC.unlock(self, t):
+            return
+        t.doc.security = {}; t.doc.modified = True; t.changed(None); self.say("저장하면 암호가 빠집니다")
 
     def auto_bookmark(self, t: DocTab):
         """글자 크기가 큰 줄을 제목으로 보고 북마크를 만든다."""

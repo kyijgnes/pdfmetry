@@ -137,7 +137,7 @@ TABS: list[tuple[str, str, list]] = [
                                                  ("align_page_both", "페이지 가운데")]),
     ]),
     ("protect", "보안", [
-        ("encrypt", "lock", "암호화", "action", None), ("decrypt", "unlock", "암호 풀기", "action", None), SEP,
+        ("encrypt", "lock", "암호화", "action", None), SEP,
         ("redact", "redact", "교정 표시", "tool", None), ("redact_search", "redactsearch", "검색·교정", "action", None),
         ("redact_apply", "redactapply", "교정 적용", "action", None), ("hidden", "hidden", "숨겨진 데이터 삭제", "action", None), SEP,
         ("digital_sign", "cert", "디지털 서명", "action", None),

@@ -622,55 +622,473 @@ def decrypt(path: str, password: str, out_path: str) -> str:
     return out_path
 
 
+# ── 권한 단계(암호화 창) ───────────────────────────────────────────────
+PERM_ALL = (fitz.PDF_PERM_PRINT | fitz.PDF_PERM_PRINT_HQ | fitz.PDF_PERM_COPY | fitz.PDF_PERM_MODIFY | fitz.PDF_PERM_ANNOTATE
+            | fitz.PDF_PERM_FORM | fitz.PDF_PERM_ACCESSIBILITY | fitz.PDF_PERM_ASSEMBLE)
+PERM_WRITE = fitz.PDF_PERM_MODIFY | fitz.PDF_PERM_ANNOTATE | fitz.PDF_PERM_FORM | fitz.PDF_PERM_ASSEMBLE
+# 변경 단계마다 허용하는 것(0 불가 · 1 쪽 넣기·지우기·돌리기 · 2 양식 채우기·서명 · 3 주석·양식·서명 · 4 쪽 추출 빼고 모두)
+_CHANGE_FLAGS = ((), ("allow_assemble",), ("allow_forms",), ("allow_annotate", "allow_forms"),
+                 ("allow_modify", "allow_annotate", "allow_forms", "allow_assemble"))
+
+
+def perm_flags(print_level: int, change_level: int, copy: bool) -> dict:
+    """인쇄 3단계·변경 5단계·복사 → encrypt_bytes 의 allow_* 여덟. 접근성 읽기는 늘 켠다."""
+    d = {"allow_print": print_level >= 1, "allow_print_hq": print_level >= 2, "allow_copy": bool(copy),
+         "allow_accessibility": True}
+    on = _CHANGE_FLAGS[max(0, min(4, change_level))]
+    for k in ("allow_modify", "allow_annotate", "allow_forms", "allow_assemble"):
+        d[k] = k in on
+    return d
+
+
+def perm_levels(p: int) -> tuple[int, int, bool]:
+    """권한 값(/P) → (인쇄 단계, 변경 단계, 복사)."""
+    pr = 2 if p & fitz.PDF_PERM_PRINT and p & fitz.PDF_PERM_PRINT_HQ else 1 if p & fitz.PDF_PERM_PRINT else 0
+    if p & fitz.PDF_PERM_MODIFY:
+        ch = 4
+    elif p & fitz.PDF_PERM_ANNOTATE:
+        ch = 3
+    elif p & fitz.PDF_PERM_FORM:
+        ch = 2
+    elif p & fitz.PDF_PERM_ASSEMBLE:
+        ch = 1
+    else:
+        ch = 0
+    return pr, ch, bool(p & fitz.PDF_PERM_COPY)
+
+
+def file_permissions(doc: fitz.Document) -> int | None:
+    """파일에 적힌 권한 값(/P). 권한 암호로 풀어 연 뒤에도 원래 제한을 읽는다. 암호가 없으면 None."""
+    try:
+        kind, val = doc.xref_get_key(-1, "Encrypt")
+        if kind == "xref":
+            kind, val = "dict", doc.xref_object(int(val.split()[0]), compressed=True)
+        m = re.search(r"/P\s*(-?\d+)", val) if kind == "dict" else None
+    except Exception:  # noqa: BLE001
+        return None
+    return int(m.group(1)) if m else None
+
+
+def is_restricted(doc: fitz.Document) -> bool:
+    """권한 암호를 몰라 쓰기 권한이 모자란 채 열린 문서(MuPDF permissions 로 판정)."""
+    if not (doc.metadata or {}).get("encryption"):
+        return False
+    return (doc.permissions & PERM_WRITE) != PERM_WRITE
+
+
+def unlock_owner(doc: fitz.Document, password: str) -> bool:
+    """권한 암호를 넣어 제한을 푼다. 권한 암호가 맞으면 True(열기 암호는 False)."""
+    try:
+        return bool(doc.authenticate(password or "") & 4)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ── 가리기(리댁션) · 숨은 정보 ───────────────────────────────────────────
+def redact_find(doc: fitz.Document, text: str, whole_word: bool = False, case: bool = False, regex: bool = False,
+                pages=None) -> list[dict]:
+    """찾은 곳 목록(검색 & 교정 패널). 한 건 = {"page", "rects", "text", "ctx"}. 표시는 안 단다."""
+    if not text:
+        raise EngineError("검색 텍스트는 비워둘 수 없습니다.")
+    from .document import find_text_ctx, search_pattern
+    try:
+        rx = search_pattern(text, regex=regex, case=case, whole_word=whole_word)
+    except re.error as e:
+        raise EngineError(f"정규식이 맞지 않습니다 ({e})") from e
+    hits = []
+    for pno in _pages(doc, pages):
+        for t, rects, ctx in find_text_ctx(doc[pno], rx):
+            hits.append({"page": pno, "rects": [fitz.Rect(r) for r in rects], "text": t, "ctx": ctx})
+    return hits
+
+
+def mark_hits(doc: fitz.Document, hits: Sequence[dict], fill=(0, 0, 0), style: dict | None = None) -> int:
+    """찾은 곳에 교정 표시를 단다(아직 적용은 안 함). 단 건수."""
+    col = _color(fill)
+    n = 0
+    for h in hits:
+        page = doc[h["page"]]
+        for r in h["rects"]:
+            a = page.add_redact_annot(r, fill=col)
+            if style:
+                set_redact_style(doc, h["page"], a.xref, **style)
+        n += 1
+    return n
+
+
 def redact_search(doc: fitz.Document, pattern: str, regex: bool = False, pages=None,
                   fill=(0, 0, 0)) -> int:
     """찾은 글자마다 가리기 주석을 붙인다(아직 적용은 안 함). 붙인 수."""
     if not pattern:
         raise EngineError("찾을 글자를 넣어 주세요")
-    from .document import find_text, search_pattern
-    col = _color(fill)
-    count = 0
+    # 정규식은 낱말 하나가 아니라 줄 글자 전체에 건다(띄어 쓴 전화번호 「010 1234 5678」 도 잡게)
+    return mark_hits(doc, redact_find(doc, pattern, regex=regex, case=regex, pages=pages), fill)
+
+
+REDACT_ALIGN = ("왼쪽", "가운데", "오른쪽")
+
+
+def redact_style(doc: fitz.Document, xref: int) -> dict:
+    """교정 표시의 채우기 색·오버레이 글·글자 크기(0 = 자동)·글자 색·맞춤."""
+    def key(k):
+        try:
+            return doc.xref_get_key(xref, k)
+        except Exception:  # noqa: BLE001
+            return ("null", "null")
+    fill = None
+    t, v = key("IC")
+    if t == "array":
+        nums = [float(x) for x in v.strip("[] ").split()]
+        fill = tuple(nums[:3]) if len(nums) >= 3 else None
+    t, v = key("OverlayText")
+    text = _pdf_text_value(t, v)
+    t, v = key("DA")
+    size, color = 0.0, (0.0, 0.0, 0.0)
+    if t == "string":
+        m = re.search(r"(-?[\d.]+)\s+Tf", v)
+        size = float(m.group(1)) if m else 0.0
+        m = re.search(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg", v)
+        color = tuple(float(x) for x in m.groups()) if m else color
+    t, v = key("Q")
+    align = int(v) if t == "int" else 0
+    return {"fill": fill, "text": text, "fontsize": size, "text_color": color, "align": align}
+
+
+def _pdf_text_value(t: str, v: str) -> str:
+    if t == "string":
+        return v
+    if t == "unknown" or v.startswith("<"):
+        try:
+            raw = bytes.fromhex(v.strip("<>"))
+            return raw[2:].decode("utf-16-be") if raw[:2] == b"\xfe\xff" else raw.decode("latin-1")
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
+
+
+def _pdf_string(s: str) -> str:
+    return "<FEFF" + s.encode("utf-16-be").hex().upper() + ">"
+
+
+def set_redact_style(doc: fitz.Document, page: int, xref: int, fill=None, text: str | None = None,
+                     fontsize: float | None = None, text_color=None, align: int | None = None) -> None:
+    """교정 표시의 속성을 바꾼다(None 은 그대로). 적용할 때 apply_redactions 가 이 값으로 글을 얹는다."""
+    cur = redact_style(doc, xref)
+    if fill is not None:
+        c = _color(fill) or (0, 0, 0)
+        doc.xref_set_key(xref, "IC", "[%g %g %g]" % c)
+    if text is not None:
+        doc.xref_set_key(xref, "OverlayText", _pdf_string(text) if text else "null")
+    size = cur["fontsize"] if fontsize is None else float(fontsize)
+    col = cur["text_color"] if text_color is None else (_color(text_color) or (0, 0, 0))
+    doc.xref_set_key(xref, "DA", "(%g %g %g rg /Helv %g Tf)" % (*col, size))
+    if align is not None:
+        doc.xref_set_key(xref, "Q", str(max(0, min(2, int(align)))))
     try:
-        # 정규식은 낱말 하나가 아니라 줄 글자 전체에 건다(띄어 쓴 전화번호 「010 1234 5678」 도 잡게)
-        rx = search_pattern(pattern, regex=regex, case=regex)
-    except re.error as e:
-        raise EngineError(f"정규식이 맞지 않습니다 ({e})") from e
+        a = doc[page].load_annot(xref)
+        if a is not None:
+            a.update()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _overlay(page: fitz.Page, r: fitz.Rect, text: str, size: float, color, align: int) -> None:
+    """교정한 자리에 글을 얹는다. 크기 0(자동)이면 칸에 맞는 가장 큰 크기."""
+    font = korean_font_path()
+    sizes = [size] if size > 0 else [max(4.0, min(r.height * 0.75, 72.0) - k) for k in range(0, 72)]
+    for s in sizes:
+        if s < 4:
+            break
+        rc = page.insert_textbox(r, text, fontname="malgunrd", fontfile=font, fontsize=s, color=color, align=align)
+        if rc >= 0:
+            return
+    page.insert_textbox(r, text, fontname="malgunrd", fontfile=font, fontsize=4, color=color, align=align)
+
+
+def apply_redactions(doc: fitz.Document, pages=None, images: int = fitz.PDF_REDACT_IMAGE_PIXELS,
+                     metadata: bool = False) -> int:
+    """붙여 둔 가리기 주석을 실제로 적용. in place. 오버레이 글은 한글 글꼴로 다시 얹는다
+    (MuPDF 에 맡기면 한글 오버레이가 깨진다). metadata 면 문서 정보·XMP 도 지운다. 적용한 교정 표시 수."""
+    n = 0
     for pno in _pages(doc, pages):
         page = doc[pno]
-        for _text, rects in find_text(page, rx):
-            for r in rects:
-                page.add_redact_annot(r, fill=col)
-            count += 1
-    return count
+        over = []
+        for a in page.annots(types=[fitz.PDF_ANNOT_REDACT]):
+            n += 1
+            st = redact_style(doc, a.xref)
+            if st["text"]:
+                over.append((fitz.Rect(a.rect), st))
+                doc.xref_set_key(a.xref, "OverlayText", "null")
+        if not over and not page.first_annot:
+            continue
+        page.apply_redactions(images=images)
+        for r, st in over:
+            _overlay(page, r, st["text"], st["fontsize"], st["text_color"], st["align"])
+    if metadata:
+        clear_metadata(doc)
+    return n
 
 
-def apply_redactions(doc: fitz.Document, pages=None, images: int = fitz.PDF_REDACT_IMAGE_PIXELS) -> None:
-    """붙여 둔 가리기 주석을 실제로 적용. in place."""
-    for pno in _pages(doc, pages):
-        doc[pno].apply_redactions(images=images)
+def clear_metadata(doc: fitz.Document) -> None:
+    doc.set_metadata({})
+    try:
+        doc.del_xml_metadata()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+HIDDEN_KEYS = ("metadata", "attachments", "bookmarks", "annotations", "form_fields", "hidden_text", "hidden_layers",
+               "search_index", "cropped", "links_js")
 
 
 def remove_hidden_data(doc: fitz.Document, metadata: bool = True, attachments: bool = True,
-                       javascript: bool = True, annotations: bool = False, bookmarks: bool = False,
-                       form_fields: bool = False) -> None:
-    """숨은 정보(메타데이터·첨부·스크립트 등)를 걷어낸다. in place."""
-    doc.scrub(attached_files=attachments, embedded_files=attachments, javascript=javascript,
-              metadata=metadata, xml_metadata=metadata, reset_fields=False, reset_responses=False,
-              remove_links=False, redactions=False, hidden_text=False, clean_pages=False, thumbnails=True)
-    if annotations:
+                       javascript: bool | None = None, annotations: bool = False, bookmarks: bool = False,
+                       form_fields: bool = False, hidden_text: bool = False, hidden_layers: bool = False,
+                       search_index: bool = False, cropped: bool = False, links_js: bool | None = None,
+                       progress: Progress = None) -> list[str]:
+    """숨은 정보를 걷어낸다. in place. 지운 것 열쇠 목록. javascript 는 옛 이름(links_js 와 같음)."""
+    if links_js is None:
+        links_js = True if javascript is None else javascript
+    # MuPDF scrub 을 쓰는 것을 먼저(주석·칸을 지운 뒤 scrub 하면 끊긴 참조를 만나 멈춘다)
+    steps = [(k, on) for k, on in (("metadata", metadata), ("attachments", attachments), ("hidden_text", hidden_text),
+                                   ("links_js", links_js), ("search_index", search_index), ("hidden_layers", hidden_layers),
+                                   ("cropped", cropped), ("bookmarks", bookmarks), ("form_fields", form_fields),
+                                   ("annotations", annotations)) if on]
+    done = []
+    for i, (k, _) in enumerate(steps):
+        _say(progress, i, len(steps), "숨겨진 데이터 삭제...")
+        _HIDDEN[k](doc)
+        done.append(k)
+    _say(progress, len(steps), len(steps), "숨겨진 데이터 삭제...")
+    return done
+
+
+def _scrub(doc: fitz.Document, **on) -> None:
+    kw = dict(attached_files=False, clean_pages=False, embedded_files=False, hidden_text=False, javascript=False,
+              metadata=False, redactions=False, remove_links=False, reset_fields=False, reset_responses=False,
+              thumbnails=False, xml_metadata=False)
+    kw.update(on)
+    doc.scrub(**kw)
+
+
+def _rm_annotations(doc: fitz.Document) -> None:
+    for page in doc:
+        for a in list(page.annots()):
+            page.delete_annot(a)
+
+
+def _rm_fields(doc: fitz.Document) -> None:
+    for page in doc:
+        for w in list(page.widgets()):
+            page.delete_widget(w)
+    cat = doc.pdf_catalog()
+    doc.xref_set_key(cat, "AcroForm", "null")
+
+
+def _rm_search_index(doc: fitz.Document) -> None:
+    cat = doc.pdf_catalog()
+    for k in ("PieceInfo", "SearchIndex"):
+        doc.xref_set_key(cat, k, "null")
+    for page in doc:
+        doc.xref_set_key(page.xref, "PieceInfo", "null")
+
+
+def _rm_cropped(doc: fitz.Document) -> None:
+    """자르기 상자 밖 내용을 지운다(상자는 그대로)."""
+    for page in doc:
+        c, m, rot = fitz.Rect(page.cropbox), fitz.Rect(page.mediabox), page.rotation
+        if abs(c.x0 - m.x0) < 0.5 and abs(c.y0 - m.y0) < 0.5 and abs(c.x1 - m.x1) < 0.5 and abs(c.y1 - m.y1) < 0.5:
+            continue
+        page.set_rotation(0); page.set_cropbox(m)
+        bands = [fitz.Rect(m.x0, m.y0, m.x1, c.y0), fitz.Rect(m.x0, c.y1, m.x1, m.y1),
+                 fitz.Rect(m.x0, c.y0, c.x0, c.y1), fitz.Rect(c.x1, c.y0, m.x1, c.y1)]
+        from .document import redact_only
+        redact_only(page, [b for b in bands if b.width > 0.1 and b.height > 0.1], fill=None,
+                    images=fitz.PDF_REDACT_IMAGE_PIXELS, graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
+        page.set_cropbox(c); page.set_rotation(rot)
+
+
+def _rm_links_js(doc: fitz.Document) -> None:
+    for page in doc:
+        for ln in list(page.get_links()):
+            page.delete_link(ln)
+        doc.xref_set_key(page.xref, "AA", "null")
+    cat = doc.pdf_catalog()
+    for k in ("OpenAction", "AA"):
+        doc.xref_set_key(cat, k, "null")
+    _scrub(doc, javascript=True)
+
+
+def _rm_hidden_layers(doc: fitz.Document) -> None:
+    """꺼진 레이어의 내용을 지우고 레이어(OCG)를 없앤다."""
+    try:
+        off = set((doc.get_layer() or {}).get("off") or [])
+    except Exception:  # noqa: BLE001
+        off = set()
+    if off:
         for page in doc:
+            _strip_page_oc(doc, page, off)
             for a in list(page.annots()):
-                page.delete_annot(a)
-    if bookmarks:
-        doc.set_toc([])
-    if form_fields:
-        for page in doc:
-            for w in list(page.widgets()):
-                page.delete_widget(w)
+                if _oc_hidden(doc, a.xref, off):
+                    page.delete_annot(a)
+    doc.xref_set_key(doc.pdf_catalog(), "OCProperties", "null")
 
 
-# ── 비교 ────────────────────────────────────────────────────────────────
+def _oc_hidden(doc: fitz.Document, xref: int, off: set) -> bool:
+    try:
+        t, v = doc.xref_get_key(xref, "OC")
+    except Exception:  # noqa: BLE001
+        return False
+    if t != "xref":
+        return False
+    return _ref_hidden(doc, int(v.split()[0]), off)
+
+
+def _ref_hidden(doc: fitz.Document, ref: int, off: set) -> bool:
+    if ref in off:
+        return True
+    try:   # 여러 레이어를 묶은 OCMD: 든 레이어가 다 꺼졌으면 숨은 것
+        t, v = doc.xref_get_key(ref, "OCGs")
+    except Exception:  # noqa: BLE001
+        return False
+    refs = [int(x) for x in re.findall(r"(\d+)\s+0\s+R", v)] if t in ("array", "xref") else []
+    if t == "xref":
+        refs = [int(v.split()[0])]
+    return bool(refs) and all(r in off for r in refs)
+
+
+def _res_names(doc: fitz.Document, page: fitz.Page, sub: str) -> dict[str, int]:
+    """쪽 자원의 Properties·XObject 이름 → xref."""
+    try:
+        t, v = doc.xref_get_key(page.xref, "Resources/" + sub)
+        if t == "xref":
+            v = doc.xref_object(int(v.split()[0]), compressed=True)
+        elif t != "dict":
+            return {}
+    except Exception:  # noqa: BLE001
+        return {}
+    return {m.group(1): int(m.group(2)) for m in re.finditer(r"/([^\s/<>\[\]()]+)\s*(\d+)\s+0\s+R", v)}
+
+
+_TOK = re.compile(rb"\s+|%[^\r\n]*|/[^\s/<>\[\]()%{}]*|<<|>>|<[0-9A-Fa-f\s]*>|\[|\]|\(|[^\s/<>\[\]()%{}]+")
+
+
+def _content_ops(data: bytes):
+    """내용 흐름을 (연산자, 피연산자 [(시작, 끝, 글자)], 연산 끝) 으로 쪼갠다. 글자열·인라인 그림을 건너뛴다."""
+    i, n, ops = 0, len(data), []
+    while i < n:
+        m = _TOK.match(data, i)
+        if not m:
+            i += 1; continue
+        tok = m.group()
+        if tok[:1].isspace() or tok[:1] == b"%":
+            i = m.end(); continue
+        if tok == b"(":
+            depth, j = 1, i + 1
+            while j < n and depth:
+                c = data[j:j + 1]
+                if c == b"\\":
+                    j += 2; continue
+                depth += 1 if c == b"(" else -1 if c == b")" else 0
+                j += 1
+            ops.append((None, i, j, data[i:j])); i = j; continue
+        if tok in (b"<<", b">>", b"[", b"]") or tok[:1] in (b"/", b"<") or re.fullmatch(rb"[-+.\d]+|true|false|null", tok):
+            ops.append((None, i, m.end(), tok)); i = m.end(); continue
+        if tok == b"BI":   # 인라인 그림: ID 뒤 날 바이트 … EI
+            j = data.find(b"ID", m.end())
+            k = j + 3 if j >= 0 else n
+            e = re.compile(rb"\sEI(?=\s|$)").search(data, k)
+            end = e.end() if e else n
+            ops.append((b"BI", i, end, data[i:end])); i = end; continue
+        ops.append((tok, i, m.end(), tok)); i = m.end()
+    return ops
+
+
+def _strip_page_oc(doc: fitz.Document, page: fitz.Page, off: set) -> None:
+    props = {k: v for k, v in _res_names(doc, page, "Properties").items() if _ref_hidden(doc, v, off)}
+    xobjs = {k for k, v in _res_names(doc, page, "XObject").items() if _oc_hidden(doc, v, off)}
+    if not props and not xobjs:
+        return
+    page.clean_contents(sanitize=False)
+    xs = page.get_contents()
+    if not xs:
+        return
+    data = doc.xref_stream(xs[0])
+    cuts, stack, operands = [], [], []
+    for op, s, e, tok in _content_ops(data):
+        if op is None:
+            operands.append((s, tok)); continue
+        start = operands[0][0] if operands else s
+        if op in (b"BDC", b"BMC"):
+            hide = op == b"BDC" and len(operands) >= 2 and operands[0][1] == b"/OC" and operands[1][1][1:].decode("latin-1") in props
+            stack.append((start, hide))
+        elif op == b"EMC" and stack:
+            st, hide = stack.pop()
+            if hide and not any(h for _, h in stack):
+                cuts.append((st, e))
+        elif op == b"Do" and operands and operands[-1][1][1:].decode("latin-1") in xobjs and not any(h for _, h in stack):
+            cuts.append((start, e))
+        operands = []
+    if not cuts:
+        return
+    out, last = [], 0
+    for s, e in sorted(cuts):
+        if s >= last:
+            out.append(data[last:s]); last = e
+    out.append(data[last:])
+    doc.update_stream(xs[0], b"\n".join(out))
+
+
+def _rm_hidden_text(doc: fitz.Document) -> None:
+    """보이지 않게 쓴 글자(글자 그리기 모드 3, OCR 글자층 등)를 지운다."""
+    for page in doc:
+        page.clean_contents(sanitize=False)
+        xs = page.get_contents()
+        if not xs:
+            continue
+        data = doc.xref_stream(xs[0])
+        if b"Tr" not in data:
+            continue
+        cuts, operands, tr, stack = [], [], 0, []
+        for op, s_, e, tok in _content_ops(data):
+            if op is None:
+                operands.append((s_, tok)); continue
+            start = operands[0][0] if operands else s_
+            if op == b"q":
+                stack.append(tr)
+            elif op == b"Q" and stack:
+                tr = stack.pop()
+            elif op == b"Tr" and operands:
+                try:
+                    tr = int(float(operands[-1][1]))
+                except ValueError:
+                    pass
+            elif op in (b"Tj", b"TJ", b"'", b'"') and tr == 3:
+                cuts.append((start, e))
+            operands = []
+        if cuts:
+            out, last = [], 0
+            for a, b in cuts:
+                out.append(data[last:a]); last = b
+            out.append(data[last:])
+            doc.update_stream(xs[0], b" ".join(out))
+    _scrub(doc, hidden_text=True)
+
+
+_HIDDEN = {
+    "metadata": lambda d: (clear_metadata(d), _scrub(d, metadata=True, xml_metadata=True, thumbnails=True)),
+    "attachments": lambda d: _scrub(d, attached_files=True, embedded_files=True),
+    "bookmarks": lambda d: d.set_toc([]),
+    "annotations": _rm_annotations,
+    "form_fields": _rm_fields,
+    "hidden_text": lambda d: _rm_hidden_text(d),
+    "hidden_layers": _rm_hidden_layers,
+    "search_index": _rm_search_index,
+    "cropped": _rm_cropped,
+    "links_js": _rm_links_js,
+}
+
+
 def _words(page: fitz.Page) -> list[tuple]:
     return page.get_text("words", sort=True)
 
