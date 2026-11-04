@@ -261,40 +261,24 @@ class PreferencesDialog(QDialog):
 
     # ── OCR ──────────────────────────────────────────────────────
     def _build_ocr(self) -> QWidget:
+        from . import dlg_ocr as DO
         w = QWidget(); v = QVBoxLayout(w)
         v.addWidget(QLabel("언어 인식"))
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            from ..engine import ocr
-            langs = ocr.available_languages()
-        except Exception:  # noqa: BLE001
-            langs = []
-        finally:
-            QApplication.restoreOverrideCursor()
-        cur = self.prefs.get("ocr_lang", "ko")
-        if cur and not any(t == cur or t.split("-")[0] == cur for t in langs):
-            langs = [cur, *langs]
-        self.ocr_group = QButtonGroup(self)
-        for n, tag in enumerate(langs):
-            r = QRadioButton(lang_name(tag)); r.setProperty("tag", tag); self.ocr_group.addButton(r, n); v.addWidget(r)
-            if tag == cur or (tag.split("-")[0] == cur and self.ocr_group.checkedButton() is None):
-                r.setChecked(True)
-        if not langs:
-            v.addWidget(QLabel("이 PC 에 깔린 인식 언어 없음"))
-        v.addStretch(1)
+        avail = DO.languages()
+        self._ocr_chosen = DO.current_langs(self.prefs, avail)   # 옛 ocr_lang 은 여기서 ocr_langs 로 옮겨진다
+        self.ocr_langs = DO.LangList(avail, self._ocr_chosen)
+        v.addWidget(self.ocr_langs, 1)
         return self._scroll(w)
 
     def _check_ocr(self) -> bool:
-        if self.ocr_group.checkedButton() is None:
+        if not self.ocr_langs.checked():
             QMessageBox.warning(self, "환경 설정", "OCR을 수행할 언어를 선택하십시오.")
             return False
         return True
 
     def _save_ocr(self):
-        tag = self.ocr_group.checkedButton().property("tag")
-        cur = self.prefs.get("ocr_lang", "ko")
-        if tag.split("-")[0] != cur.split("-")[0] or "-" in cur:   # 「ko」 처럼 짧게 적은 옛 값은 같은 언어면 그대로
-            self.prefs["ocr_lang"] = tag
+        self.prefs.pop("ocr_lang", None)
+        self.prefs["ocr_langs"] = self.ocr_langs.checked()
 
     # ── 단위 · 격자 ──────────────────────────────────────────────
     def _build_unit(self) -> QWidget:

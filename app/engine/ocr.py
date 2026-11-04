@@ -22,6 +22,10 @@ Progress = Callable[[int, int, str], None] | None
 TIMEOUT = 600
 NO_LANG_MSG = "이 PC 에 윈도우 한국어 문자 인식이 없습니다"
 
+
+class NoLanguage(EngineError):
+    """고른 인식 언어가 이 PC 윈도우에 없다."""
+
 _PS_COMMON = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -125,10 +129,24 @@ def _normalize(lines_json) -> list[dict]:
     return words
 
 
-def ocr_images(png_paths: list[str], lang: str = "ko") -> list[list[dict]]:
-    """PNG 여러 장을 한 번에 인식. 그림마다 낱말 목록."""
-    if not png_paths:
-        return []
+def langs_of(lang) -> list[str]:
+    """`lang` 을 언어 태그 목록으로: 글자 하나("ko")·쉼표로 이은 글자("en-US,ko")·목록 모두 받는다. 겹친 것은 뺀다."""
+    if lang is None:
+        items: list = []
+    elif isinstance(lang, str):
+        items = lang.split(",")
+    else:
+        items = list(lang)
+    out: list[str] = []
+    for x in items:
+        t = str(x).strip()
+        if t and t not in out:
+            out.append(t)
+    return out or ["ko"]
+
+
+def _ocr_images_one(png_paths: list[str], lang: str) -> list[list[dict]]:
+    """언어 하나로 PNG 여러 장을 한 번에 인식(윈도우 OCR 엔진은 언어 하나로만 만들어진다)."""
     tmp = tempfile.mkdtemp(prefix="pdfapp_ocr_")
     try:
         lst = os.path.join(tmp, "list.txt")
@@ -136,8 +154,8 @@ def ocr_images(png_paths: list[str], lang: str = "ko") -> list[list[dict]]:
             f.write("\n".join(os.path.abspath(p) for p in png_paths))
         r = _run_ps(_PS_OCR, ["-ListFile", lst, "-Lang", lang], tmp)
         if r.returncode == 3 or b"NO_OCR_LANG" in r.stdout:
-            raise EngineError(NO_LANG_MSG if lang.lower().startswith("ko")
-                              else f"이 PC 에 윈도우 문자 인식 언어({lang})가 없습니다")
+            raise NoLanguage(NO_LANG_MSG if lang.lower().startswith("ko")
+                             else f"이 PC 에 윈도우 문자 인식 언어({lang})가 없습니다")
         if r.returncode != 0:
             err = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
             raise EngineError(f"윈도우 문자 인식 실패 ({err[-1] if err else r.returncode})")
@@ -160,7 +178,37 @@ def ocr_images(png_paths: list[str], lang: str = "ko") -> list[list[dict]]:
     return out
 
 
-def ocr_image(png_path: str, lang: str = "ko") -> list[dict]:
+def _score(words: list[dict]) -> tuple[int, int]:
+    """언어별 결과 고르기 잣대: 낱말 수, 같으면 글자 수."""
+    return len(words), sum(len(w["text"]) for w in words)
+
+
+def ocr_images(png_paths: list[str], lang="ko") -> list[list[dict]]:
+    """PNG 여러 장을 인식. 그림마다 낱말 목록.
+
+    언어를 여러 개 주면 언어마다 한 번씩 돌려 그림마다 낱말이 가장 많은 결과를 고른다(윈도우 OCR 은 한 번에 한 언어).
+    이 PC 에 없는 언어는 건너뛰고, 고른 언어가 하나도 없을 때만 오류."""
+    if not png_paths:
+        return []
+    langs = langs_of(lang)
+    best: list[list[dict]] | None = None
+    missing: NoLanguage | None = None
+    for lg in langs:
+        try:
+            got = _ocr_images_one(png_paths, lg)
+        except NoLanguage as e:
+            missing = e
+            continue
+        if best is None:
+            best = got
+        else:
+            best = [g if _score(g) > _score(b) else b for b, g in zip(best, got)]
+    if best is None:
+        raise missing or EngineError(NO_LANG_MSG)
+    return best
+
+
+def ocr_image(png_path: str, lang="ko") -> list[dict]:
     """그림 한 장의 낱말 [{text, x, y, w, h, line}] (픽셀)."""
     if not os.path.exists(png_path):
         raise EngineError(f"그림 파일이 없습니다: {png_path}")
@@ -218,9 +266,10 @@ def _drop_invisible_text(page: fitz.Page) -> None:
                 graphics=fitz.PDF_REDACT_LINE_ART_NONE, text=fitz.PDF_REDACT_TEXT_REMOVE_INVISIBLE)
 
 
-def ocr_pages(doc: fitz.Document, pages=None, lang: str = "ko", dpi: int = 300,
+def ocr_pages(doc: fitz.Document, pages=None, lang: str | list[str] = "ko", dpi: int = 300,
               progress: Progress = None, force: bool = False) -> int:
-    """글자층이 없는 쪽을 인식해 보이지 않는 글자층을 넣는다. 넣은 낱말 수. in place."""
+    """글자층이 없는 쪽을 인식해 보이지 않는 글자층을 넣는다. 넣은 낱말 수. in place.
+    lang 은 글자 하나("ko")도, 목록(["en-US", "ko"])도 받는다(목록이면 쪽마다 낱말이 많은 언어 결과)."""
     targets = [p for p in _pages(doc, pages) if force or not doc[p].get_text("text").strip()]
     if not targets:
         return 0
@@ -245,12 +294,12 @@ def ocr_pages(doc: fitz.Document, pages=None, lang: str = "ko", dpi: int = 300,
     return total
 
 
-def ocr_area(doc: fitz.Document, page_index: int, rect_points, lang: str = "ko", dpi: int = 300) -> str:
+def ocr_area(doc: fitz.Document, page_index: int, rect_points, lang="ko", dpi: int = 300) -> str:
     """쪽의 네모 안 글자를 읽어 돌려준다(줄바꿈은 인식한 줄 단위)."""
     if not 0 <= page_index < doc.page_count:
         raise EngineError("쪽 번호가 범위를 벗어났습니다")
     page = doc[page_index]
-    clip = fitz.Rect(rect_points) & page.rect
+    clip = visible_rect(page, rect_points)
     if clip.is_empty:
         raise EngineError("읽을 영역이 비어 있습니다")
     tmp = tempfile.mkdtemp(prefix="pdfapp_ocr_")
@@ -306,7 +355,7 @@ def _column_edges(rows: list[list[dict]]) -> list[float]:
     return edges
 
 
-def recognize_table(doc: fitz.Document, page_index: int, rect_points=None, lang: str = "ko",
+def recognize_table(doc: fitz.Document, page_index: int, rect_points=None, lang="ko",
                     dpi: int = 300) -> list[list[str]]:
     """표를 2차원 글자 목록으로. 글자층이 있으면 find_tables, 없으면 OCR 낱말을 줄·열로 묶는다."""
     if not 0 <= page_index < doc.page_count:
@@ -349,3 +398,184 @@ def recognize_table(doc: fitz.Document, page_index: int, rect_points=None, lang:
             cells[ci] = (cells[ci] + " " + w["text"]).strip()
         out.append(cells)
     return out
+
+
+# ── 영역 OCR: 그린 사각형들을 읽어 그 쪽 글자층으로 ─────────────────────
+def visible_rect(page: fitz.Page, rect) -> fitz.Rect:
+    """회전 전 쪽 좌표(보기가 넘기는 꼴) → 보이는 쪽(회전 적용) 좌표. 그림 뜨기 clip 은 보이는 쪽 좌표다."""
+    r = fitz.Rect(rect)
+    if page.rotation:
+        r = r * page.rotation_matrix
+    return r.normalize() & page.rect
+
+
+def ocr_area_into(doc: fitz.Document, areas, lang="ko", dpi: int = 300, progress: Progress = None) -> int:
+    """(쪽, 사각형) 여러 개를 읽어 그 자리에 보이지 않는 글자층을 넣는다. 넣은 낱말 수. in place.
+
+    사각형은 회전 전 쪽 좌표. 같은 자리를 다시 읽으면 그 사각형 안의 옛 보이지 않는 글자는 걷고 넣는다(두 벌 방지).
+    그림·보이는 글자는 그대로 둔다."""
+    jobs = []
+    for pno, rect in areas:
+        if not 0 <= pno < doc.page_count:
+            raise EngineError("쪽 번호가 범위를 벗어났습니다")
+        clip = visible_rect(doc[pno], rect)
+        if clip.is_empty or clip.width < 2 or clip.height < 2:
+            continue
+        jobs.append((pno, clip))
+    if not jobs:
+        raise EngineError("읽을 영역이 비어 있습니다")
+    tmp = tempfile.mkdtemp(prefix="pdfapp_ocr_")
+    total = 0
+    n = len(jobs)
+    try:
+        pngs = []
+        for k, (pno, clip) in enumerate(jobs):
+            _say(progress, k, n * 2, f"그림 뜨는 중 {pno + 1}쪽")
+            pngs.append(_render(doc[pno], tmp, f"a{k:04d}.png", dpi, clip)[0])
+        _say(progress, n, n * 2, f"글자 읽는 중 (영역 {n}개)")
+        results = ocr_images(pngs, lang)
+        for k, ((pno, clip), words) in enumerate(zip(jobs, results)):
+            _say(progress, n + k, n * 2, f"글자층 넣는 중 {pno + 1}쪽")
+            page = doc[pno]
+            _drop_invisible_in(page, clip)
+            total += _write_layer(page, words, 72.0 / dpi, origin=clip.tl)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    _say(progress, n * 2, n * 2, "영역 문자 인식 끝")
+    return total
+
+
+def _drop_invisible_in(page: fitz.Page, clip: fitz.Rect) -> None:
+    """보이는 쪽 좌표 clip 안의 보이지 않는 글자만 걷는다."""
+    if not any(s.get("type") == 3 for s in page.get_texttrace()):
+        return
+    redact_only(page, [clip * page.derotation_matrix], fill=False, images=fitz.PDF_REDACT_IMAGE_NONE,
+                graphics=fitz.PDF_REDACT_LINE_ART_NONE, text=fitz.PDF_REDACT_TEXT_REMOVE_INVISIBLE)
+
+
+# ── 표 인식: 문서 전체에서 표 찾기 ─────────────────────────────────────
+def _row_segments(row: list[dict], gap_min: float) -> list[list[dict]]:
+    """한 줄의 낱말을 큰 틈(gap_min 이상)마다 끊는다."""
+    segs = [[row[0]]]
+    for w in row[1:]:
+        prev = segs[-1][-1]
+        if w["x"] - (prev["x"] + prev["w"]) >= gap_min:
+            segs.append([w])
+        else:
+            segs[-1].append(w)
+    return segs
+
+
+def _grid(rows: list[list[dict]]) -> list[list[str]]:
+    edges = _column_edges(rows)
+    ncol = len(edges) + 1
+    out = []
+    for row in rows:
+        cells = [""] * ncol
+        for w in row:
+            cx = w["x"] + w["w"] / 2
+            ci = sum(1 for e in edges if cx > e)
+            cells[ci] = (cells[ci] + " " + w["text"]).strip()
+        out.append(cells)
+    return out
+
+
+def tables_from_words(words: list[dict]) -> list[dict]:
+    """틀(선) 없이 낱말 자리만으로 표를 찾는다(스캔 쪽 OCR 결과용).
+
+    한 줄 안에 글자 높이보다 넓은 틈으로 갈린 덩어리가 둘 이상인 줄을 「표 줄」로 보고, 표 줄이 둘 이상 잇달아
+    나오면 표 하나. 돌려주는 것: [{"bbox": (x0, y0, x1, y1), "rows": [[글자]]}] (낱말과 같은 좌표)."""
+    if not words:
+        return []
+    avg_h = sum(w["h"] for w in words) / len(words)
+    gap_min = avg_h * 1.2
+    rows = _cluster_rows(words)
+    rows.sort(key=lambda r: min(w["y"] for w in r))
+    out: list[dict] = []
+    run: list[list[dict]] = []
+
+    def flush():
+        if len(run) >= 2:
+            ws = [w for r in run for w in r]
+            x0 = min(w["x"] for w in ws); y0 = min(w["y"] for w in ws)
+            x1 = max(w["x"] + w["w"] for w in ws); y1 = max(w["y"] + w["h"] for w in ws)
+            grid = _grid(run)
+            if grid and len(grid[0]) >= 2:
+                out.append({"bbox": (x0, y0, x1, y1), "rows": grid})
+        run.clear()
+
+    for row in rows:
+        if run and min(w["y"] for w in row) - max(w["y"] + w["h"] for w in run[-1]) > avg_h * 3:
+            flush()   # 줄 사이가 크게 비면 다른 표
+        if len(_row_segments(row, gap_min)) >= 2:
+            run.append(row)
+        else:
+            flush()
+    flush()
+    return out
+
+
+def _cells(rows) -> list[list[str]]:
+    return [[("" if c is None else " ".join(str(c).split())) for c in row] for row in rows]
+
+
+def find_tables(doc: fitz.Document, pages=None, lang="ko", dpi: int = 300, progress: Progress = None) -> list[dict]:
+    """문서(또는 고른 쪽)의 표를 모두 찾는다. [{"page": 쪽, "bbox": (x0, y0, x1, y1) 회전 전 쪽 좌표, "rows": [[글자]]}].
+
+    글자층이 있는 쪽은 PyMuPDF find_tables(선으로 그린 표), 글자층이 없는 쪽(스캔)은 OCR 낱말 자리로 묶는다.
+    인식 언어가 없어 스캔 쪽을 못 읽으면 그 쪽은 건너뛴다."""
+    targets = _pages(doc, pages)
+    found: list[dict] = []
+    scanned: list[int] = []
+    n = len(targets)
+    for k, pno in enumerate(targets):
+        _say(progress, k, n + 1, f"표 찾는 중 {pno + 1}쪽")
+        page = doc[pno]
+        if not page.get_text("text").strip():
+            if page.get_images(full=False):
+                scanned.append(pno)
+            continue
+        try:
+            tabs = page.find_tables()
+        except Exception:  # noqa: BLE001
+            continue
+        for t in tabs.tables:
+            rows = _cells(t.extract())
+            if not rows or (len(rows) < 2 and len(rows[0]) < 2):
+                continue
+            found.append({"page": pno, "bbox": tuple(fitz.Rect(t.bbox) * page.derotation_matrix), "rows": rows})
+    if scanned:
+        _say(progress, n, n + 1, f"스캔 쪽 글자 읽는 중 ({len(scanned)}쪽)")
+        tmp = tempfile.mkdtemp(prefix="pdfapp_ocr_")
+        try:
+            pngs = [_render(doc[p], tmp, f"t{p + 1:04d}.png", dpi)[0] for p in scanned]
+            try:
+                results = ocr_images(pngs, lang)
+            except NoLanguage:
+                results = [[] for _ in scanned]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        scale = 72.0 / dpi
+        for pno, words in zip(scanned, results):
+            for w in words:
+                for key in ("x", "y", "w", "h"):
+                    w[key] *= scale
+            page = doc[pno]
+            for t in tables_from_words(words):
+                found.append({"page": pno, "bbox": tuple(fitz.Rect(t["bbox"]) * page.derotation_matrix), "rows": t["rows"]})
+    found.sort(key=lambda t: (t["page"], t["bbox"][1], t["bbox"][0]))
+    _say(progress, n + 1, n + 1, "표 찾기 끝")
+    return found
+
+
+def table_html(rows: list[list[str]]) -> str:
+    """워드·엑셀에 붙여 넣을 HTML 표."""
+    import html as _h
+    body = "".join("<tr>" + "".join(f"<td>{_h.escape(c)}</td>" for c in row) + "</tr>" for row in rows)
+    return ("<html><head><meta charset=\"utf-8\"></head><body>"
+            f"<table border=\"1\" cellspacing=\"0\" cellpadding=\"2\">{body}</table></body></html>")
+
+
+def table_tsv(rows: list[list[str]]) -> str:
+    """탭 구분 글자(칸 안 줄바꿈·탭은 띄어쓰기로)."""
+    return "\n".join("\t".join(" ".join(c.split()) for c in row) for row in rows)

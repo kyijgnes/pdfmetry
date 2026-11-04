@@ -204,6 +204,10 @@ class DocTab(QWidget):
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
         root.addWidget(self.warn)
         root.addWidget(SB.build(self), 1)   # 왼쪽 패널 · 보기 · 속성 패널(폭을 끌어 바꿈)
+        from . import ocr_area as OA, scan_bar as SCB
+        self.scan_bar = SCB.attach(self, root)   # 스캔 문서 안내 막대(보기 위 한 줄)
+        self.ocr_area = OA.OcrArea(self)         # 영역 OCR 사각형·오른쪽 패널(도구 「ocrarea」 일 때만)
+        self.table_tool = None                   # 표 인식 모드(window.table_recognize 가 만든다)
         self.side_key = ""
         # 신호
         self.thumbs.pageClicked.connect(self.viewer.goto)
@@ -340,6 +344,8 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else load_settings()
         self.settings.setdefault("recent", []); self.settings.setdefault("favorites", []); self.settings.setdefault("prefs", {})
         self.prefs = self.settings["prefs"]
+        from .dlg_ocr import migrate_langs
+        migrate_langs(self.prefs)   # 옛 ocr_lang(글자 하나) → ocr_langs(목록)
         self.setWindowTitle(APP_NAME)
         self.resize(1360, 820)
         self.setWindowIcon(QIcon(ICON) if os.path.isfile(ICON) else icons.icon("thumbs", 32, theme.ACCENT))
@@ -1571,7 +1577,7 @@ class MainWindow(QMainWindow):
                 if not page_clip["data"]: self.say("복사한 페이지가 없습니다"); return
                 at = (max(pages) + 1) if pages else d.page_count
                 self._insert_pages(t, at, page_clip["data"])
-            elif key == "ocr": self.ocr(t)
+            elif key == "ocr": self.ocr(t, pages)   # 고른 쪽은 OCR 창 「선택된 페이지」 로
             elif key == "print": self.print_doc(t)
             elif key == "export_images": self.convert(t, "png")
         except ValueError as e:
@@ -1732,18 +1738,15 @@ class MainWindow(QMainWindow):
             if dlg.exec():
                 vals = dlg.values(); P.crop(d, vals["pages"], vals["rect"]); t.changed(None, structural=True)
             self.on_tool("select")
-        elif kind == "ocrarea":
-            try:
-                O = _engine("ocr")
-                text = O.ocr_area(d.fitz, data["page"], data["rect"], lang=self.prefs.get("ocr_lang", "ko"))
-            except Exception as e:  # noqa: BLE001
-                QMessageBox.warning(self, "영역 OCR", str(e)); return
-            dlg = D.FormDialog("영역 OCR 결과", self, "복사")
-            from PySide6.QtWidgets import QPlainTextEdit
-            te = QPlainTextEdit(text); te.setMinimumSize(420, 200); dlg.form.addRow(te)
+        elif kind == "ocrarea":   # 그린 사각형은 모아 두었다가 오른쪽 패널 [인식] 으로 그 쪽에 글자층을 넣는다
+            t.ocr_area.add(data["page"], data["rect"])
+        elif kind == "ocr_words":   # 글자 고름 오른쪽 클릭 「영역 OCR」: 언어를 묻고 그 사각형 하나를
+            from . import dlg_ocr as DO, ocr_area as OA
+            avail = DO.languages()
+            dlg = DO.LangDialog(self, avail, DO.current_langs(self.prefs, avail))
             if dlg.exec():
-                QApplication.clipboard().setText(te.toPlainText()); self.say("복사했습니다")
-            self.on_tool("select")
+                t.viewer.clear_selection()
+                OA.run_areas(t, [(data["page"], data["rect"])], dlg.langs.checked())
         elif kind == "annot_props":
             s = data
             dlg = D.AnnotPropsDialog(self, s)
@@ -2074,24 +2077,44 @@ class MainWindow(QMainWindow):
         getattr(T, fn_name)(t.doc.fitz, **vals)
         t.changed(None)
 
-    def ocr(self, t: DocTab):
+    def ocr(self, t: DocTab, picked: list[int] | None = None):
+        """OCR PDF: 원본 탭은 그대로 두고 결과를 저장 안 된 새 탭 「이름_OCR」 로 연다(범위 첫 쪽으로)."""
+        from . import dlg_ocr as DO
         O = _engine("ocr")
-        try:
-            langs = O.available_languages()
-        except Exception:  # noqa: BLE001
-            langs = ["ko", "en"]
-        dlg = D.OcrDialog(self, t.doc.page_count, t.viewer.current, langs)
-        if not dlg.exec():
+        avail = DO.languages()
+        if picked is None:
+            picked = [i for i in t.thumbs.selected_pages() if 0 <= i < t.doc.page_count] if t.thumbs.isVisible() else []
+        dlg = DO.OcrDialog(self, t.doc.page_count, t.viewer.current, picked or [t.viewer.current], avail,
+                           DO.current_langs(self.prefs, avail), self.prefs.get("ocr_range", "all"))
+        ok = dlg.exec()
+        if dlg.batch:
+            self.batch_dialog(); return
+        if not ok:
             return
         vals = dlg.values()
+        self.prefs["ocr_langs"] = vals["langs"]; self.prefs["ocr_range"] = vals["range"]; save_settings(self.settings)
         # 일꾼에는 사본을 준다. 보는 문서를 그대로 주면 그리는 일꾼과 같은 문서를 동시에 만져 튕길 수 있다
         work = t.doc.copy()
-        n = D.ProgressDialog(self, "OCR", O.ocr_pages, work, pages=vals["pages"], lang=vals["lang"], dpi=vals["dpi"], force=vals["force"]).run()
-        if n is not None:
-            t.doc.adopt(work)   # 되돌리기 사본을 뜬 뒤 바꿔 끼운다
-            t.changed(None); self.say(f"글자 {n}개를 인식해 넣었습니다. 이제 찾기·복사가 됩니다.")
-        else:
+        n = D.ProgressDialog(self, "OCR", O.ocr_pages, work, pages=vals["pages"], lang=vals["langs"], dpi=vals["dpi"],
+                             force=vals["force"]).run()
+        if n is None:
+            work.close(); return
+        d = t.doc
+        stem = os.path.splitext(d.name)[0]
+        out = F.temp_out(f"{stem}_OCR.pdf")
+        try:
+            work.save(out, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        finally:
             work.close()
+        try:
+            new = Document(out, d.password)
+        except DocumentError as e:
+            QMessageBox.critical(self, "OCR 실패", f"오류! OCR을 완료하지 못했습니다.\n{e}"); return
+        new.ask_save = True
+        new.save_hint = os.path.join(os.path.dirname(d.path), os.path.basename(out)) if d.path else None
+        new.modified = True
+        self.add_doc(new, view={"page": vals["pages"][0] if vals["pages"] else 0, "y": 0, "x": 0})   # 범위 첫 쪽으로
+        self.say(f"글자 {n}개를 인식해 넣었습니다. 이제 찾기·복사가 됩니다.")
 
     def merge(self):
         t = self.cur()
@@ -2178,16 +2201,9 @@ class MainWindow(QMainWindow):
             t.changed(None, structural=True); self.say(f"{sum(1 for a in angles if abs(a) > 0.1)}쪽을 바로잡았습니다")
 
     def table_recognize(self, t: DocTab):
-        O = _engine("ocr")
-        rows = O.recognize_table(t.doc.fitz, t.viewer.current)
-        if not rows:
-            self.say("표를 찾지 못했습니다"); return
-        out, _ = QFileDialog.getSaveFileName(self, "표 저장", self._suggest(t, f"_{t.viewer.current + 1}쪽_표.xlsx"), "Excel (*.xlsx)")
-        if out:
-            import openpyxl
-            wb = openpyxl.Workbook(); ws = wb.active
-            for r in rows: ws.append(r)
-            wb.save(out); self._offer_open(out)
+        """표 인식 모드 켜고 끄기: 문서 전체 표를 찾아 테두리, 고른 표 위 [표 복사](▾ 「Excel로 저장」)."""
+        from . import table_tool as TT
+        TT.toggle(self, t)
 
     def extract_data(self):
         dlg = D.FileListDialog(self, "데이터 추출(양식 값 모으기)", "추출", PDF_FILTER)
@@ -2520,13 +2536,15 @@ class MainWindow(QMainWindow):
 
     def start_tool(self, key: str):
         """시작 화면 빠른 도구."""
-        if key in ("edit", "ocr", "compress", "protect", "convert"):
+        if key in ("edit", "ocr", "ocrarea", "table", "compress", "protect", "convert"):
             self.open_dialog()
             t = self.cur()
             if not t:
                 return
             if key == "edit": self.ribbon.set_tab("edit"); self.on_toggle("edit_all", True); self.ribbon.set_toggle("edit_all", True)
             elif key == "ocr": self.ocr(t)
+            elif key == "ocrarea": self.ribbon.set_tab("tools"); self.on_tool("ocrarea")
+            elif key == "table": self.ribbon.set_tab("tools"); self.table_recognize(t)
             elif key == "compress": self.compress(t)
             elif key == "protect": self.encrypt(t)
             elif key == "convert": self.ribbon.set_tab("convert"); self.convert(t, "docx")

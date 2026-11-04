@@ -336,6 +336,9 @@ class PageView(QGraphicsView):
     def __init__(self, doc: Document, parent=None):
         super().__init__(parent)
         self.doc = doc
+        # 보기 위에 얹는 도우미(영역 OCR 사각형·표 인식 테두리). 저마다 paint(p, i) · press(e, i, sp) -> bool ·
+        # key(e) -> bool · tool_changed(tool) 를 갖고, 누르기·키는 먼저 받아 참이면 보기가 더 하지 않는다
+        self.hooks: list = []
         self.scene_ = QGraphicsScene(self)
         self.setScene(self.scene_)
         self.setBackgroundBrush(QBrush(QColor(theme.CANVAS)))
@@ -1070,6 +1073,8 @@ class PageView(QGraphicsView):
         self._drag_rect = None
         self._space_tool = ""
         self._apply_cursor()
+        for h in list(self.hooks):
+            h.tool_changed(tool)
         self.viewport().update()
 
     def _apply_cursor(self):
@@ -1206,6 +1211,9 @@ class PageView(QGraphicsView):
             if self.tool == "hand" and i >= 0:
                 self._try_select_annot(i, sp, e)
             return
+        for h in list(self.hooks):
+            if h.press(e, i, sp):
+                return
         if e.button() == Qt.MouseButton.RightButton:
             self._context_menu(e, i, sp)
             return
@@ -1473,6 +1481,9 @@ class PageView(QGraphicsView):
 
     def keyPressEvent(self, e: QKeyEvent):
         k = e.key()
+        for h in list(self.hooks):
+            if h.key(e):
+                return
         if k == Qt.Key.Key_Escape:
             self._poly.clear(); self._drag_rect = None; self.clear_selection(); self.viewport().update()
             if self.tool not in ("hand", "select", "edit", "form"):
@@ -2097,6 +2108,8 @@ class PageView(QGraphicsView):
         if self._snap_mark is not None and self.tool in MEASURE_TOOLS and self.page_at(self._snap_mark) == i:
             p.setPen(QPen(QColor(0, 120, 215), 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(QRectF(self._snap_mark.x() - 4, self._snap_mark.y() - 4, 8, 8))
+        for h in self.hooks:   # 영역 OCR 사각형 · 표 인식 테두리와 [표 복사]
+            h.paint(p, i)
         p.restore()
 
     def image_pixmap(self) -> QPixmap | None:
