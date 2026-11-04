@@ -68,6 +68,8 @@ def _words(v, m: QMenu, s):
             "link_text", {"page": s.page, "rect": _union([w[:4] for w in s.words])}))
     m.addAction("북마크 추가", lambda: v.requestDialog.emit("bookmark_text", {"page": s.page, "text": s.text}))
     m.addAction("이 글자 검색", lambda: v.requestDialog.emit("search_text", " ".join(s.text.split())[:200]))
+    if s.words:
+        m.addAction("영역 OCR", lambda: v.requestDialog.emit("ocr_words", {"page": s.page, "rect": _union([w[:4] for w in s.words])}))
     m.addSeparator()
     m.addAction("편집", lambda: _act(v, "edit_all_toggle")).setEnabled(not v.edit_mode)
     m.addAction("교정 표시", v._redact_sel)
