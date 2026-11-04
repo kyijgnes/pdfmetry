@@ -555,17 +555,27 @@ def split(doc: Document, out_dir: str, mode: str = "count", value=1, ranges: lis
     return outs
 
 
-def merge(paths: list[str], out_path: str, progress=None) -> str:
-    """파일 여러 개를 차례대로 하나로. 이미지·텍스트 파일도 쪽으로 끼운다."""
+def merge(paths: list[str], out_path: str, progress=None, passwords: list[str | None] | None = None,
+          toc_page: bool = False) -> str:
+    """파일 여러 개를 차례대로 하나로. 이미지·텍스트 파일도 쪽으로 끼운다.
+    passwords: paths 와 같은 차례의 암호(없으면 None). 암호가 없거나 틀리면 ValueError.
+    toc_page: 맨 앞에 목차 쪽을 끼우고 줄마다 그 쪽으로 가는 링크를 단다. 북마크가 있으면 북마크로,
+    하나도 없으면 파일 이름으로 줄을 짓는다."""
     from .document import toc_entries
     out = fitz.open()
     toc: list[list] = []
+    starts: list[tuple[str, int]] = []   # (파일 이름, 첫 쪽 1부터)
+    pws = list(passwords or [])
     for n, p in enumerate(paths):
         src = fitz.open(p)
         if src.needs_pass:
-            raise ValueError(f"암호가 걸린 파일입니다: {os.path.basename(p)}")
+            pw = pws[n] if n < len(pws) else None
+            if not pw or not src.authenticate(pw):
+                src.close()
+                raise ValueError(f"암호가 걸린 파일입니다: {os.path.basename(p)}")
         if not src.is_pdf:
             src = fitz.open("pdf", src.convert_to_pdf())
+        starts.append((os.path.splitext(os.path.basename(p))[0], out.page_count + 1))
         toc += toc_entries(src, page_offset=out.page_count)  # insert_pdf 는 북마크를 안 가져온다
         out.insert_pdf(src)
         src.close()
@@ -573,6 +583,14 @@ def merge(paths: list[str], out_path: str, progress=None) -> str:
             progress(n + 1, len(paths), os.path.basename(p))
     if toc:
         out.set_toc(toc)
+    if toc_page and out.page_count:
+        from . import outline
+        from .document import Document
+        rows = [list(e[:3]) for e in toc] or [[1, name, pg] for name, pg in starts]
+        work = Document.from_bytes(out.tobytes(garbage=3, deflate=True))
+        out.close()
+        outline.make_toc_pages(work, rows)
+        out = work.fitz
     out.save(out_path, garbage=3, deflate=True)
     out.close()
     return out_path
