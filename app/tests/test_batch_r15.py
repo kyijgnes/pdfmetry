@@ -57,6 +57,13 @@ def folder():
     return tempfile.mkdtemp(prefix="batch_r15_")
 
 
+@pytest.fixture(autouse=True)
+def _no_settings_file(monkeypatch):
+    """창 시험이 저장 위치 값을 설정 파일에 남겨 다른 시험 파일(변환 창 기억)을 흔들지 않게."""
+    from app.ui import window as W
+    monkeypatch.setattr(W, "save_settings", lambda *_a, **_k: None)
+
+
 @pytest.fixture()
 def win():
     w = MainWindow(); w.show(); w.resize(1200, 800); pump(0.05)
