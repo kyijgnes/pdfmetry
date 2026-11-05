@@ -309,10 +309,15 @@ def poster_overview(doc: fitz.Document, i: int, opts: PrintOptions, paper, margi
 
 def content_doc(doc: fitz.Document, content: bool, annots: bool, forms: bool, pages, lock=None) -> fitz.Document:
     """내용 인쇄에서 뺀 것(문서·주석·양식)을 지운 사본. 다 켜져 있으면 원본 그대로."""
-    if (content and annots and forms) or not doc.is_pdf:
+    from ..engine import form_props
+    with lock if lock is not None else nullcontext():
+        flags = forms and doc.is_pdf and form_props.hidden_from_print(doc)   # 출력하지 않는 칸·출력만 하는 칸
+    if ((content and annots and forms) and not flags) or not doc.is_pdf:
         return doc
     with lock if lock is not None else nullcontext():
         c = fitz.open("pdf", doc.tobytes())
+    if flags:
+        form_props.prepare_print(c, pages)
     for i in sorted(set(pages)):
         if not 0 <= i < len(c):
             continue

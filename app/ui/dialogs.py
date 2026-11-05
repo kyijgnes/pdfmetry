@@ -231,21 +231,6 @@ class AnnotPropsDialog(FormDialog):
 
 
 # ── 양식 칸 ────────────────────────────────────────────────────
-class FieldPropsDialog(FormDialog):
-    def __init__(self, parent, name: str, ftype: str, value, options: list[str], radio: bool = False):
-        super().__init__("양식 칸 속성", parent)
-        self.name = self.add("묶음 이름" if radio else "이름", QLineEdit(name))
-        self.form.addRow("종류", QLabel(ftype))
-        self.value = self.add("값", QLineEdit(str(value or "")))
-        self.options = QPlainTextEdit("\n".join(options)); self.options.setPlaceholderText("한 줄에 하나(콤보·목록 박스)")
-        self.options.setMaximumHeight(90)
-        self.form.addRow("항목", self.options)
-
-    def values(self) -> dict:
-        return {"name": self.name.text(), "value": self.value.text(),
-                "options": [l for l in self.options.toPlainText().splitlines() if l.strip()]}
-
-
 class FieldAlignDialog(FormDialog):
     """한 쪽의 양식 칸을 여럿 골라 맞춘다. 뷰어에서 고른 칸은 미리 체크해 둔다."""
     HOWS = [("left", "왼쪽 맞춤"), ("right", "오른쪽 맞춤"), ("top", "위쪽 맞춤"), ("bottom", "아래쪽 맞춤"),
@@ -273,21 +258,46 @@ class FieldAlignDialog(FormDialog):
 
 
 def fill_field(parent, widget: fitz.Widget):
-    """읽기 모드에서 칸 값 넣기."""
+    """읽기 모드에서 칸 값 넣기. 숨긴 칸·읽기 전용 칸은 넣지 않고, 서식·범위에 안 맞으면 알림만 띄운다."""
+    from ..engine import form_calc as FC
+    from ..engine import form_props as FP
     t = widget.field_type
+    f = widget.parent.parent
+    fl = FP._int(f, widget.xref, "F", FP.F_PRINT)
+    if fl & (FP.F_HIDDEN | FP.F_NOVIEW) or FP._int(f, FP._holder(f, widget.xref), "Ff") & FP.FF_READONLY:
+        return None
     if t == fitz.PDF_WIDGET_TYPE_CHECKBOX:
         return widget.field_value in (False, "", "Off", None)
     if t == fitz.PDF_WIDGET_TYPE_RADIOBUTTON:
         return True  # 누른 동그라미를 켠다(같은 묶음 나머지는 꺼진다)
+    name = widget.field_name or ""
+    fmt = FC.parse_format(FC.js_text(widget.script_format), FC.js_text(widget.script_stroke))
+    val = FC.parse_validate(FC.js_text(widget.script_change))
     if t in (fitz.PDF_WIDGET_TYPE_COMBOBOX, fitz.PDF_WIDGET_TYPE_LISTBOX):
-        d = FormDialog(widget.field_name or "항목 고르기", parent)
-        cb = d.add("값", QComboBox()); cb.addItems([str(v) for v in (widget.choice_values or [])]); cb.setEditable(t == fitz.PDF_WIDGET_TYPE_COMBOBOX)
-        cb.setCurrentText(str(widget.field_value or ""))
-        return cb.currentText() if d.exec() else None
+        opts = [(str(v[0]), str(v[1])) if isinstance(v, (tuple, list)) else (str(v), str(v))
+                for v in (widget.choice_values or [])]
+        d = FormDialog(name or "항목 고르기", parent)
+        cb = d.add("값", QComboBox()); cb.addItems([n for _, n in opts])
+        cb.setEditable(t == fitz.PDF_WIDGET_TYPE_COMBOBOX)
+        cur = str(widget.field_value or "")
+        cb.setCurrentText(next((n for e, n in opts if e == cur), cur))
+        while d.exec():
+            txt = cb.currentText()
+            out = next((e for e, n in opts if n == txt), txt)   # 보이는 이름 → 내보낼 값
+            msg = FC.check_input(fmt, out, name) or FC.check_range(val, out, fmt.get("sep", 0))
+            if not msg:
+                return out
+            QMessageBox.warning(parent, name or "값", msg)
+        return None
     if t == fitz.PDF_WIDGET_TYPE_TEXT:
-        d = FormDialog(widget.field_name or "값 넣기", parent)
+        d = FormDialog(name or "값 넣기", parent)
         e = d.add("값", QLineEdit(str(widget.field_value or "")))
-        return e.text() if d.exec() else None
+        while d.exec():
+            msg = FC.check_input(fmt, e.text(), name) or FC.check_range(val, e.text(), fmt.get("sep", 0))
+            if not msg:
+                return e.text()
+            QMessageBox.warning(parent, name or "값", msg)
+        return None
     return None
 
 
