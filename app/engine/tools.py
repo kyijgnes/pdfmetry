@@ -2047,7 +2047,7 @@ def _convert(doc: fitz.Document, inp: str, out_dir: str, opts: dict, _cv, _ocr, 
     if fmt == "xlsx":
         return _cv.to_excel(doc, out, one_sheet=bool(opts.get("one_sheet")))
     if fmt == "pptx":
-        return _cv.to_pptx(doc, out, dpi=int(opts.get("pptx_dpi", 150)))
+        return _cv.to_pptx(doc, out, dpi=int(opts.get("pptx_dpi", 150)), mode=opts.get("pptx_mode", "text"))
     if fmt == "txt":
         return _cv.to_text(doc, out)
     if fmt == "html":

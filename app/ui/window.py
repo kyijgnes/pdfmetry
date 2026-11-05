@@ -2059,7 +2059,7 @@ class MainWindow(QMainWindow):
                     self._ocr_before_convert(src, None if fmt == "rtf" else pages, vals["ocr"] == "all", progress)
                 if fmt == "docx": return C.to_word(src, out, pages=pages, progress=progress)
                 if fmt == "xlsx": return C.to_excel(src, out, pages=pages, progress=progress, one_sheet=vals["one_sheet"])
-                if fmt == "pptx": return C.to_pptx(src, out, pages=pages, dpi=vals["pptx_dpi"], progress=progress)
+                if fmt == "pptx": return C.to_pptx(src, out, pages=pages, dpi=vals["pptx_dpi"], progress=progress, mode=vals.get("pptx_mode", "text"))
                 if fmt == "txt": return C.to_text(src, out, pages=pages)
                 if fmt == "html": return C.to_html(src, out, pages=pages)
                 if fmt == "xml": return C.to_xml(src, out)

@@ -668,37 +668,13 @@ def to_excel(doc: fitz.Document, out_path: str, pages=None, progress: Progress =
 
 
 # ── PDF → PPT ──────────────────────────────────────────────────────────
-def to_pptx(doc: fitz.Document, out_path: str, pages=None, dpi: int = 150, progress: Progress = None) -> str:
-    """쪽마다 슬라이드 하나(쪽 전체 그림), 글자는 슬라이드 노트에."""
-    from pptx import Presentation
-    from pptx.util import Emu
+def to_pptx(doc: fitz.Document, out_path: str, pages=None, dpi: int = 150, progress: Progress = None,
+            mode: str = "text") -> str:
+    """쪽마다 슬라이드 하나. mode="text" 면 글자 뺀 쪽 그림 위에 고칠 수 있는 글 상자, "image" 면 쪽 통그림.
+    글자는 슬라이드 노트에도. 본체는 convert_pptx."""
+    from . import convert_pptx as _P
 
-    _ensure_dir(out_path)
-    targets = _pages(doc, pages)
-    prs = Presentation()
-    pt = 12700
-    if targets:
-        r = doc[targets[0]].rect
-        prs.slide_width = Emu(int(r.width * pt))
-        prs.slide_height = Emu(int(r.height * pt))
-    blank = prs.slide_layouts[6]
-    for k, pno in enumerate(targets):
-        _say(progress, k, len(targets), f"슬라이드 만드는 중 {pno + 1}쪽")
-        page = doc[pno]
-        pix = page.get_pixmap(dpi=dpi, alpha=False)
-        buf = io.BytesIO(pix.tobytes("png"))
-        slide = prs.slides.add_slide(blank)
-        # 슬라이드 크기는 하나뿐이라 판형이 다른 쪽은 비율을 지켜 가운데에 둔다(늘이면 찌그러진다)
-        sw, sh = int(prs.slide_width), int(prs.slide_height)
-        k_ = min(sw / (page.rect.width * pt), sh / (page.rect.height * pt))
-        w_, h_ = int(page.rect.width * pt * k_), int(page.rect.height * pt * k_)
-        slide.shapes.add_picture(buf, (sw - w_) // 2, (sh - h_) // 2, width=w_, height=h_)
-        text = page.get_text("text").strip()
-        if text:
-            slide.notes_slide.notes_text_frame.text = text[:30000]
-    prs.save(out_path)
-    _say(progress, len(targets), len(targets), "PPT 변환 끝")
-    return out_path
+    return _P.to_pptx(doc, out_path, pages=pages, dpi=dpi, progress=progress, mode=mode)
 
 
 # ── PDF → EPUB ─────────────────────────────────────────────────────────
