@@ -40,6 +40,8 @@ from . import dlg_split as DS
 from . import dlg_stamp as DST
 from . import dlg_password as PW
 from . import fileops as F
+from . import clipboard as CB
+from . import edit_tools as ET
 from . import form_tools as FT
 from . import icons, sidebars as SB, tab_detach, theme
 from . import shortcuts as K
@@ -948,6 +950,7 @@ class MainWindow(QMainWindow):
         self.tabs.pop(i)
         self.docstack.removeWidget(t)
         self.doctabs.removeTab(i)
+        CB.forget(id(t.doc))   # 같은 번호의 새 문서를 원본으로 잘못 알지 않게
         t.close(); t.deleteLater()
         if not self._closing:
             save_settings(self.settings)   # 기억한 보기 자리(창을 닫을 때는 끝에 한 번만)
@@ -1351,6 +1354,7 @@ class MainWindow(QMainWindow):
             elif key == "ribbon_fold": self.ribbon.set_folded(not self.ribbon.folded)
             elif key == "next_tab" and self.tabs: self.doctabs.setCurrentIndex((self.doctabs.currentIndex() + 1) % len(self.tabs))
             elif key == "prev_tab" and self.tabs: self.doctabs.setCurrentIndex((self.doctabs.currentIndex() - 1) % len(self.tabs))
+            elif ET.is_key(key) and t: ET.run(self, t, key)   # 자르기·복사·붙여넣기 · 쌓는 순서 · 맞춤 · 여러 쪽에 적용
             elif key == "undo" and t:
                 if d.undo(): t.viewer.clear_selection(); t.changed(None, structural=True)
             elif key == "redo" and t:
@@ -1814,6 +1818,7 @@ class MainWindow(QMainWindow):
             if data and os.path.exists(data) and QMessageBox.question(self, "링크", f"이 파일을 열까요?\n{data}") == QMessageBox.StandardButton.Yes:
                 os.startfile(data)
         elif kind == "action": self.on_action(data)
+        elif kind == "clip_paste_at": ET.paste(self, t, at=(data["page"], data["point"]))   # 오른쪽 클릭 붙여넣기: 누른 자리에
         elif kind == "search_text": self.quick_search(data)
         elif kind == "bookmark_text":
             if not (t.side.isVisible() and t.side_key == "bookmark"): self.toggle_side("bookmark")

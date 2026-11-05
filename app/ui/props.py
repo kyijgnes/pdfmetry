@@ -14,6 +14,7 @@ from ..engine import annot_shapes as SH
 from ..engine import annot_style as S
 from ..engine import annots as A
 from .dialogs import ColorButton, from_rgb01
+from .props_arrange import ArrangeBox
 from .props_content import ContentProps
 from .sidebar import group_card, panel_head
 
@@ -89,6 +90,7 @@ class PropsPanel(QWidget):
         head.addWidget(self.lock, 0, Qt.AlignmentFlag.AlignTop)
         lay.addLayout(head)
         self.edit_props = ContentProps(viewer); lay.addWidget(self.edit_props)   # 편집: 고른 글자 덩어리·그림
+        self.arrange = ArrangeBox(viewer); lay.addWidget(self.arrange)   # 편집 객체 쌓는 순서·맞춤·분배
 
         self.look_box, f = group_card("모양"); lay.addWidget(self.look_box); self.look = f
         sw = QWidget(); sl = QHBoxLayout(sw); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(4)
@@ -214,6 +216,7 @@ class PropsPanel(QWidget):
             self._set_lock(False)
         self.lock.setVisible(self.sel is not None)
         self.edit_props.show_sel(sel if self.key is None else None)
+        self.arrange.show_sel(sel if self.key is None else None)
         self._layout_rows()
         self.redact_props.show_sel(sel, tool)
 

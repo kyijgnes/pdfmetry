@@ -26,7 +26,7 @@ def build(v, i: int, sp: QPointF) -> QMenu:
     if s and s.kind == "words":
         _words(v, m, s)
     elif s and s.kind == "annot":
-        _annot(v, m, s)
+        _annot(v, m, s, i, sp)
     elif s and s.kind == "link":
         _link(v, m, s)
     elif s and s.kind == "widget":
@@ -34,14 +34,62 @@ def build(v, i: int, sp: QPointF) -> QMenu:
     elif v.form_mode:
         _form_blank(v, m)
     elif s and s.kind == "block":
-        _block(v, m, s)
+        _block(v, m, s, i, sp)
     elif s and s.kind == "image":
-        _image(v, m, s)
+        _image(v, m, s, i, sp)
     elif v.edit_mode:
-        _edit_blank(v, m, i)
+        _edit_blank(v, m, i, sp)
     else:
         _blank(v, m, i, sp)
     return m
+
+
+def pick_object_at(v, i: int, sp: QPointF) -> None:
+    """편집 모드에서 고르지 않은 객체 위를 오른쪽 클릭하면 그 객체 하나를 고른다(고른 것 위면 그대로)."""
+    if not v.edit_mode or i < 0:
+        return
+    from ..engine import objects as O
+    from . import edit_tools as ET
+    pt = v.to_page(i, sp)
+    pg, cur = ET.picked_objects(v)
+    if pg == i and any(fitz.Rect(o["rect"]).contains(pt) for o in cur):
+        return
+    hit = next((o for o in reversed(O.list_objects(v.doc, i))
+                if o["kind"] in v._object_kinds() and fitz.Rect(o["rect"]).contains(pt)), None)
+    if hit is not None:
+        v.select_objects(i, [hit])
+
+
+def _clip_items(v, m: QMenu, mode: str, i: int = -1, sp: QPointF | None = None, cut_copy: bool = True) -> None:
+    """자르기·복사·붙여넣기 세 줄(주석·편집 객체). 오른쪽 클릭 붙여넣기는 누른 자리에 묶음의 왼쪽 위."""
+    from . import clipboard as CB
+    if cut_copy:
+        m.addAction("자르기", lambda: _act(v, "clip_cut"))
+        m.addAction("복사", lambda: _act(v, "clip_copy"))
+    if i >= 0 and sp is not None:
+        pt = v.to_page(i, sp)
+        a = m.addAction("붙여넣기", lambda: v.requestDialog.emit("clip_paste_at", {"page": i, "point": pt}))
+    else:
+        a = m.addAction("붙여넣기", lambda: _act(v, "clip_paste"))
+    a.setEnabled(CB.can_paste(mode))
+
+
+def object_arrange_items(v, m: QMenu) -> None:
+    """편집 객체의 쌓는 순서 · 맞춤 · 분배 펼침."""
+    from . import edit_tools as ET
+    _, items = ET.picked_objects(v)
+    n = len(items)
+    od = m.addMenu("쌓는 순서")
+    for h, lbl in ET.ORDER_ITEMS:
+        od.addAction(lbl, lambda h=h: _act(v, "obj_" + h)).setEnabled(n >= 1)
+    al = m.addMenu("맞춤")
+    for it in ET.ALIGN_ITEMS:
+        if it is None:
+            al.addSeparator(); continue
+        al.addAction(it[1], lambda h=it[0]: _act(v, "obj_align_" + h)).setEnabled(n >= ET.need(it[0]))
+    ds = m.addMenu("분배")
+    for h, lbl in ET.DIST_ITEMS:
+        ds.addAction(lbl, lambda h=h: _act(v, "obj_align_" + h)).setEnabled(n >= ET.need(h))
 
 
 def pick_widget_at(v, i: int, sp: QPointF) -> None:
@@ -142,12 +190,17 @@ def _select_all(v):
     v.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier))
 
 
-def _annot(v, m: QMenu, s):
+def _annot(v, m: QMenu, s, i: int = -1, sp: QPointF | None = None):
+    from ..engine import annot_clip as AC
     reply = A.is_reply(v.doc, s.xref)
     if not reply:
         m.addAction("답글", lambda: v.requestDialog.emit("reply", s))
     if s.text:
         m.addAction("글 복사", lambda: _copy_text(v, s.text))
+    m.addSeparator()
+    _clip_items(v, m, "annots", i, sp)
+    m.addAction("여러 쪽에 적용", lambda: _act(v, "annot_apply_pages")).setEnabled(
+        not reply and AC.can_apply(s.extra.get("kind", "")))
     m.addSeparator()
     m.addAction("기본값으로", lambda: v.requestDialog.emit("set_default", s)).setEnabled(not reply)
     m.addAction("속성", lambda: v.requestDialog.emit("annot_props", s))
@@ -169,8 +222,11 @@ def _link(v, m: QMenu, s):
     m.addAction("삭제", v.delete_selection)
 
 
-def _block(v, m: QMenu, s):
-    m.addAction("글자 고치기", lambda: v.requestDialog.emit("edit_block", s))
+def _block(v, m: QMenu, s, i: int = -1, sp: QPointF | None = None):
+    m.addAction("글자 고치기", lambda: v.requestDialog.emit("edit_block", s)).setEnabled(len(v.sel_objs) < 2)
+    m.addSeparator()
+    _clip_items(v, m, "objects", i, sp)
+    object_arrange_items(v, m)
     m.addSeparator()
     m.addAction("링크 만들기", lambda: v.requestDialog.emit("link_text", {"page": s.page, "rect": fitz.Rect(s.rect)}))
     m.addAction("북마크 추가", lambda: v.requestDialog.emit("bookmark_text", {"page": s.page, "text": s.text}))
@@ -178,7 +234,10 @@ def _block(v, m: QMenu, s):
     m.addAction("삭제", v.delete_selection)
 
 
-def _image(v, m: QMenu, s):
+def _image(v, m: QMenu, s, i: int = -1, sp: QPointF | None = None):
+    _clip_items(v, m, "objects", i, sp)
+    object_arrange_items(v, m)
+    m.addSeparator()
     m.addAction("이미지 바꾸기", lambda: v.requestDialog.emit("replace_image", s))
     m.addAction("이미지 저장", lambda: v.requestDialog.emit("save_image", s))
     m.addSeparator()
@@ -193,8 +252,9 @@ def _image(v, m: QMenu, s):
     m.addAction("삭제", v.delete_selection)
 
 
-def _edit_blank(v, m: QMenu, i: int):
-    m.addAction("모두 선택", lambda: _select_all(v))
+def _edit_blank(v, m: QMenu, i: int, sp: QPointF | None = None):
+    _clip_items(v, m, "objects", i, sp, cut_copy=False)
+    m.addAction("모두 선택", lambda: _act(v, "obj_select_all"))
     m.addSeparator()
     m.addAction("텍스트 추가", lambda: v.requestDialog.emit("tool", "addtext"))
     m.addAction("이미지 추가", lambda: v.requestDialog.emit("tool", "addimage"))
@@ -205,6 +265,8 @@ def _edit_blank(v, m: QMenu, i: int):
 
 def _blank(v, m: QMenu, i: int, sp: QPointF):
     act = lambda key: _act(v, key)  # noqa: E731
+    if i >= 0:
+        _clip_items(v, m, "annots", i, sp, cut_copy=False)
     m.addAction("모두 선택", lambda: _select_all(v))
     m.addAction("편집", lambda: act("edit_all_toggle"))
     if i >= 0:

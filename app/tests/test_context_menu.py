@@ -258,7 +258,7 @@ def test_edit_mode_blank_is_edit_menu(win, tab, monkeypatch):
     win._set_edit(tab, True); pump(0.1)
     m = build(v)
     got = names(m)
-    assert got == ["모두 선택", "텍스트 추가", "이미지 추가", "쪽 삽입", "편집 끝내기"]
+    assert got == ["붙여넣기", "모두 선택", "텍스트 추가", "이미지 추가", "쪽 삽입", "편집 끝내기"]
     trigger(m, "텍스트 추가"); pump(0.1)
     assert v.tool == "addtext"
     win._set_edit(tab, True)

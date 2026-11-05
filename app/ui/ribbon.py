@@ -26,6 +26,15 @@ def DECO_MENU(prefix: str) -> list:
 
 EDIT_TARGETS = (("all", "모두"), ("text", "텍스트"), ("image", "이미지"), ("link", "링크"))
 EDIT_MENU = [(f"edit_target_{k}", lbl) for k, lbl in EDIT_TARGETS]
+# 편집 객체 「정렬」 펼침: 쌓는 순서 넷 | 맞춤 여섯 | 쪽 가운데 셋 | 분배 둘(설계 17, 4.5·4.6)
+OBJ_ARRANGE_MENU = [("obj_front", "맨 앞으로 가져오기"), ("obj_forward", "앞으로 가져오기"), ("obj_backward", "뒤로 보내기"),
+                    ("obj_back", "맨 뒤로 보내기"), MENU_SEP,
+                    ("obj_align_left", "왼쪽 맞춤"), ("obj_align_right", "오른쪽 맞춤"), ("obj_align_top", "위쪽 맞춤"),
+                    ("obj_align_bottom", "아래쪽 맞춤"), ("obj_align_hcenter", "가로 가운데 맞춤"),
+                    ("obj_align_vcenter", "세로 가운데 맞춤"), MENU_SEP,
+                    ("obj_align_page_h", "페이지 가로 가운데"), ("obj_align_page_v", "페이지 세로 가운데"),
+                    ("obj_align_page_both", "페이지 한가운데"), MENU_SEP,
+                    ("obj_align_dist_h", "가로 분배"), ("obj_align_dist_v", "세로 분배")]
 
 TABS: list[tuple[str, str, list]] = [
     ("home", "홈", [
@@ -40,7 +49,8 @@ TABS: list[tuple[str, str, list]] = [
     ("edit", "편집", [
         ("edit_all", "edit", "모두 편집", "toggle", EDIT_MENU), ("addtext", "addtext", "텍스트 추가", "tool", None),
         ("addimage", "addimage", "이미지 추가", "tool", None),
-        ("link", "link", "링크 추가", "tool", None), SEP,
+        ("link", "link", "링크 추가", "tool", None),
+        ("obj_arrange", "align", "정렬", "menu", OBJ_ARRANGE_MENU), SEP,
         ("watermark", "watermark", "워터마크", "action", DECO_MENU("watermark")),
         ("background", "background", "배경화면", "action", DECO_MENU("background")),
         ("headerfooter", "headerfooter", "머리글·바닥글", "action", DECO_MENU("headerfooter")),

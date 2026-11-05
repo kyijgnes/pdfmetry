@@ -843,8 +843,17 @@ def _paste_line(doc: Document, page: int, s: dict, dx: float, dy: float) -> int:
     return oid
 
 
-# 글 자료를 새 글 객체로 쓰는 길. 2단계에서 textbox 로 잇는다(없으면 annots.add_text).
-TEXT_WRITER = None
+def _textbox_writer(doc: Document, page: int, r: fitz.Rect, text: str, st: dict) -> int | None:
+    """글 자료를 textbox 글 객체로 쓴다(밑줄·취소선·줄 간격·문자 간격까지). 글 방향은 붙이는 쪽의 회전."""
+    from . import annots as A
+    style = {k: v for k, v in st.items() if k not in ("text", "rect", "rotate")}
+    got = A.add_text(doc, page, r, text, float(st.get("fontsize", 10) or 10), tuple(st.get("color") or (0, 0, 0)),
+                     bool(st.get("bold")), int(st.get("align", 0) or 0), italic=bool(st.get("italic")), style=style)
+    return got or None
+
+
+# 글 자료를 새 글 객체로 쓰는 길(다른 문서·원문 글·다른 프로그램 글). 시험이 바꿔 끼울 수 있게 이름으로 둔다.
+TEXT_WRITER = _textbox_writer
 
 
 def _paste_text(doc: Document, page: int, s: dict, dx: float, dy: float) -> int | None:

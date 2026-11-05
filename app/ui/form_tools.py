@@ -11,9 +11,10 @@ from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QDoubleSpinBox, QGridLayout, QGroupBox, QMessageBox, QPushButton, QSpinBox
 
 from ..engine import annots as A
+from . import clipboard as CB
 
-# 앱 안 칸 클립보드(탭 사이에서도 같은 것). A.field_spec 목록
-CLIP: list[dict] = []
+# 앱 안 칸 클립보드(탭 사이에서도 같은 것). A.field_spec 목록. 공용 클립보드의 양식 칸 칸을 그대로 가리킨다
+CLIP: list[dict] = CB.FIELDS
 
 ALIGNS = ("left", "right", "top", "bottom", "hcenter", "vcenter", "page_h", "page_v", "page_both")
 KEYS = {"field_cut", "field_copy", "field_paste", "field_select_all", "field_set_default", "copies", "tab_order",
@@ -74,7 +75,7 @@ def run(win, t, key: str) -> None:
     if not items:
         win.say("양식 칸을 고르세요"); return
     if key in ("field_copy", "field_cut"):
-        CLIP[:] = [s for pg, x in items if (s := A.field_spec(d, pg, x))]
+        CB.put("fields", [s for pg, x in items if (s := A.field_spec(d, pg, x))], id(d), items[0][0])
         if key == "field_cut":
             v.delete_selection()
         win.say(f"칸 {len(CLIP)}개를 {'잘라 냈' if key == 'field_cut' else '복사했'}습니다")

@@ -22,9 +22,12 @@ from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsScene, QGra
 from ..engine import annot_shapes as SH
 from ..engine import annots as A
 from ..engine import form_props as FP
+from ..engine import objects as O
 from ..engine import stamps as ST
 from ..engine.document import Document
+from . import clipboard as CB
 from . import context_menu as CM
+from . import edit_tools as ET
 from . import form_tools as FT
 from . import theme
 
@@ -395,6 +398,9 @@ class PageView(QGraphicsView):
         self.sel: Selection | None = None
         self.sel_fields: list[tuple[int, int]] = []   # 양식 편집에서 고른 칸들(쪽, xref), 고른 차례. 하나면 sel 과 같은 칸
         self._group_from: fitz.Rect | None = None      # 여러 칸 함께 옮기기: 누를 때 잡은 칸 자리
+        # 편집 모드에서 여럿 고른 객체(objects.list_objects 항목 + page, 같은 쪽, 고른 차례). 둘 이상일 때만 채우고 마지막 것이 sel
+        self.sel_objs: list[dict] = []
+        self._objs_from: fitz.Rect | None = None       # 여러 객체 함께 옮기기: 누를 때 sel 자리
         self._drag_start: QPointF | None = None  # 화면(뷰포트) 좌표
         self._drag_page = -1
         self._drag_rect: QRectF | None = None    # 장면 좌표
@@ -1159,6 +1165,8 @@ class PageView(QGraphicsView):
 
     def clear_selection(self):
         self.sel_fields = []
+        self.sel_objs = []
+        self._objs_from = None
         if self.sel is not None:
             self.sel = None
             self.selectionChanged.emit(None)
@@ -1233,7 +1241,10 @@ class PageView(QGraphicsView):
             if t == "edit" and self._links_editable() and self._press_link(i, sp):
                 return
             if t == "edit":
-                if self._press_content(i, sp) or self._select_block_or_image(i, sp):
+                if e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+                    if self._toggle_object(i, self.to_page(i, sp)):   # Ctrl·Shift+클릭: 더하고 빼기
+                        return
+                elif self._press_content(i, sp) or self._select_block_or_image(i, sp):
                     return
             self._drag_start_scene = sp
             self._drag_end_scene = sp
@@ -1393,7 +1404,9 @@ class PageView(QGraphicsView):
             self._drag_rect = None
             small = r.width() < 3 and r.height() < 3
             pr = self._scene_rect_to_page(i, r)
-            if t in ("select", "edit"):
+            if t == "edit" and not small and self._band_objects(i, pr):
+                pass
+            elif t in ("select", "edit"):
                 self._select_words(i, pr, click=small, scene_pt=sp)
             elif t == "form":
                 if not small:
@@ -1541,8 +1554,12 @@ class PageView(QGraphicsView):
                     self.requestDialog.emit("action", key); return
         if self.form_mode and e.matches(QKeySequence.StandardKey.Paste) and FT.CLIP:
             self.requestDialog.emit("action", "field_paste"); return
+        if not self.form_mode and self._clip_key(e):
+            return
         if e.matches(QKeySequence.StandardKey.Copy):
             self.copy_selection(); return
+        if e.matches(QKeySequence.StandardKey.SelectAll) and self.edit_mode:
+            ET.select_all(self); return
         if e.matches(QKeySequence.StandardKey.SelectAll) and self.form_mode:
             self.select_all_fields(self.sel.page if self.sel and self.sel.kind == "widget" else self.current); return
         if e.matches(QKeySequence.StandardKey.SelectAll) and self.tool in ("select", "hand"):
@@ -1656,12 +1673,87 @@ class PageView(QGraphicsView):
                             self.sel.extra["xref"] = im["xref"]
                             break
                 self.sel.extra["rect"] = fitz.Rect(self.sel.rect)
+                self.sel_objs = []
                 self.selectionChanged.emit(self.sel)
                 self._moving_annot = True
                 self._resize_corner = -1
                 self._move_last = pt
                 self.viewport().update()
                 return True
+        return False
+
+    # ── 편집 객체 여럿 고르기(설계 17, 4.6) ────────────────────────
+    def _object_kinds(self) -> tuple[str, ...]:
+        return {"text": ("text",), "image": ("image",)}.get(self.edit_target, ("text", "image"))
+
+    def select_objects(self, page: int, items: list[dict]):
+        """편집 객체들을 고른다(같은 쪽, 고른 차례). 마지막 것이 sel(크기 손잡이·속성 패널이 보는 것)."""
+        items = [dict(o, page=page) for o in items]
+        if not items:
+            self.clear_selection(); return
+        last = items[-1]
+        r = fitz.Rect(last["rect"])
+        if last["kind"] == "text":
+            text = self.doc.fitz[page].get_textbox(r).strip()
+            sel = Selection("block", page, -1, r, text=text)
+        else:
+            sel = Selection("image", page, -1, r, extra={"xref": last.get("xref", 0)})
+        sel.extra["rect"] = fitz.Rect(r)
+        self.sel = sel
+        self.sel_fields = []
+        self.sel_objs = items if len(items) > 1 else []
+        self.selectionChanged.emit(sel)
+        self.viewport().update()
+
+    def _toggle_object(self, i: int, pt: fitz.Point) -> bool:
+        kinds = self._object_kinds()
+        hit = next((o for o in reversed(O.list_objects(self.doc, i))
+                    if o["kind"] in kinds and fitz.Rect(o["rect"]).contains(pt)), None)
+        if hit is None:
+            return False
+        pg, cur = ET.picked_objects(self)
+        if pg != i:
+            cur = []
+        k = ET._key(hit)
+        cur = [o for o in cur if ET._key(o) != k] if any(ET._key(o) == k for o in cur) else cur + [hit]
+        self.select_objects(i, cur)
+        return True
+
+    def _band_objects(self, i: int, pr: fitz.Rect) -> bool:
+        """빈 곳에서 끈 네모에 걸친 객체들을 고른다. 하나도 없으면 False(글자 고르기로)."""
+        kinds = self._object_kinds()
+        hit = [o for o in O.list_objects(self.doc, i) if o["kind"] in kinds and fitz.Rect(o["rect"]).intersects(pr)]
+        if not hit:
+            return False
+        self.select_objects(i, hit)
+        return True
+
+    def _move_objects(self, page: int, dx: float, dy: float):
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            return
+        pg, items = ET.picked_objects(self)
+        ids = O.move(self.doc, page, [ET._ref(o) for o in items], dx, dy)
+        self.refresh_pages([page])
+        self.docChanged.emit()
+        ET.select_ids(self, page, ids)
+
+    def _clip_key(self, e: QKeyEvent) -> bool:
+        """Ctrl+C·X·V 를 모드에 맞는 칸으로(양식 편집은 앞에서 따로). 글자를 고른 Ctrl+C 는 그대로 글자 복사."""
+        s = self.sel
+        copy, cut, paste = (e.matches(k) for k in (QKeySequence.StandardKey.Copy, QKeySequence.StandardKey.Cut,
+                                                    QKeySequence.StandardKey.Paste))
+        if not (copy or cut or paste):
+            return False
+        if self.edit_mode:
+            if (copy or cut) and (self.sel_objs or (s and s.kind in ("block", "image"))):
+                self.requestDialog.emit("action", "clip_copy" if copy else "clip_cut"); return True
+            if paste:
+                self.requestDialog.emit("action", "clip_paste"); return True
+            return False
+        if (copy or cut) and s and s.kind == "annot":
+            self.requestDialog.emit("action", "clip_copy" if copy else "clip_cut"); return True
+        if paste and CB.ANNOTS:
+            self.requestDialog.emit("action", "clip_paste"); return True
         return False
 
     def _press_content(self, i: int, sp: QPointF) -> bool:
@@ -1676,8 +1768,10 @@ class PageView(QGraphicsView):
                 self._resize_corner = n
                 self._moving_annot = True
                 return True
-        if not s.rect.contains(pt):
+        group = len(self.sel_objs) > 1 and any(fitz.Rect(o["rect"]).contains(pt) for o in self.sel_objs)
+        if not (group or s.rect.contains(pt)):
             return False
+        self._objs_from = fitz.Rect(s.rect) if group else None
         self._moving_annot = True
         self._resize_corner = -1
         self._move_last = pt
@@ -1773,6 +1867,9 @@ class PageView(QGraphicsView):
             return
         elif s.kind == "link":
             A.delete_link(self.doc, s.page, s.xref)
+        elif s.kind in ("block", "image") and len(self.sel_objs) > 1:
+            pg, items = ET.picked_objects(self)
+            O.delete(self.doc, pg, [ET._ref(o) for o in items])
         elif s.kind == "block":
             A.edit_block(self.doc, s.page, s.rect, "")
         elif s.kind == "image":
@@ -1822,7 +1919,12 @@ class PageView(QGraphicsView):
                 self.refresh_pages(sorted(pages))
             self._group_from = None
         elif s.kind in ("block", "image"):
-            self.place_content(s.rect)
+            g, self._objs_from = self._objs_from, None
+            if len(self.sel_objs) > 1 and g is not None and self._resize_corner < 0:
+                self._move_objects(s.page, s.rect.x0 - g.x0, s.rect.y0 - g.y0)
+            else:
+                self.sel_objs = []
+                self.place_content(s.rect)
         self._move_last = None
 
     def _follow_link(self, sp: QPointF):
@@ -2065,6 +2167,7 @@ class PageView(QGraphicsView):
     # ── 오른쪽 클릭 ───────────────────────────────────────────
     def _context_menu(self, e: QMouseEvent, i: int, sp: QPointF):
         CM.pick_widget_at(self, i, sp)
+        CM.pick_object_at(self, i, sp)
         CM.build(self, i, sp).exec(e.globalPosition().toPoint())
 
     def _markup_sel(self, kind: str):
@@ -2144,6 +2247,13 @@ class PageView(QGraphicsView):
                 p.restore()
         # 고른 것
         s = self.sel
+        if s and s.page == i and len(self.sel_objs) > 1:
+            g = self._objs_from
+            dx, dy = (s.rect.x0 - g.x0, s.rect.y0 - g.y0) if g is not None and s.rect is not None else (0, 0)
+            p.save(); p.setPen(QPen(accent, 1.5, Qt.PenStyle.DashLine)); p.setBrush(QColor(60, 140, 240, 35))
+            for o in self.sel_objs[:-1]:
+                p.drawRect(self.from_page_rect(i, fitz.Rect(o["rect"]) + (dx, dy, dx, dy)))
+            p.restore()
         if s and s.page == i:
             if s.kind == "words":
                 p.setPen(Qt.PenStyle.NoPen)
