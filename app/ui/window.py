@@ -1663,7 +1663,7 @@ class MainWindow(QMainWindow):
                     A.free_text(t.doc, i, rect, text, st["fontsize"], st["text_color"], st.get("fill"), st.get("border"),
                                 st.get("width", 0), st.get("opacity", 1.0), callout=callout,
                                 author=A.user_author(t.viewer.props["author"]), typewriter=(k == "typewriter"),
-                                rotate=t.viewer.text_rotation(i))
+                                rotate=t.viewer.text_rotation(i), family=st.get("family", ""))
                     t.changed([i])
                 t.viewer.toolDone.emit(k)
             sp = data.get("scene_pt") or v.from_page_rect(data["page"], data["rect"]).topLeft()   # 끌어 그린 네모면 왼쪽 위
@@ -1697,7 +1697,7 @@ class MainWindow(QMainWindow):
                 if t.viewer.closed:
                     return
                 if A.add_text(t.doc, i, rect, text, style["fontsize"], style["color"], style["bold"], style["align"],
-                              italic=style["italic"], rotate=t.viewer.text_rotation(i)):
+                              italic=style["italic"], rotate=t.viewer.text_rotation(i), style=style):
                     t.changed([i])
                 self.on_tool("select" if not t.viewer.edit_mode else "edit")
             InlineText(v, data["page"], data["scene_pt"], self.prefs.get("addtext_style"), done, data.get("width"))
@@ -1707,7 +1707,10 @@ class MainWindow(QMainWindow):
             dlg.bold.setChecked(s.extra.get("bold", False))
             if dlg.exec():
                 vals = dlg.values()
-                A.edit_block(d, s.page, s.rect, vals["text"], vals["fontsize"], vals["text_color"] or (0, 0, 0), vals["bold"], vals["align"])
+                st = A.block_style(d, s.page, s.rect)   # 대화상자에 없는 칸(기울임·글꼴·밑줄·간격)은 지금 서식 그대로
+                A.edit_block(d, s.page, s.rect, vals["text"], vals["fontsize"], vals["text_color"] or (0, 0, 0), vals["bold"],
+                             vals["align"], italic=st["italic"], family=st["family"],
+                             style={k: st[k] for k in ("underline", "strike", "line_height", "letter_spacing")})
                 v.clear_selection(); t.changed([s.page])
         elif kind == "addimage":
             p = v.props.get("image_path") or QFileDialog.getOpenFileName(self, "넣을 이미지", "", "이미지 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.webp)")[0]

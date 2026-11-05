@@ -36,7 +36,7 @@ BLANK_NAME = "제목 없음"
 MM = 72 / 25.4
 
 EDIT_FONT = {"font": "맑은 고딕", "style": "normal", "size": 14, "color": [0, 0, 0]}
-COMMENT_FONT = {"size": 14, "color": [1, 0, 0]}
+COMMENT_FONT = {"font": "Malgun Gothic", "size": 14, "color": [1, 0, 0]}   # font: 글꼴 이름(fonts.font_families)
 GRID = {"w": 72 / 2.54, "h": 72 / 2.54, "left": 0.0, "top": 0.0, "sub": 3, "color": [1, 0, 0]}
 BLANK = {"name": BLANK_NAME, "count": 1, "size": "A4", "w": 210 * MM, "h": 297 * MM, "landscape": False}
 
@@ -228,7 +228,10 @@ class PreferencesDialog(QDialog):
         r1 = QPushButton("기본 재설정"); r1.clicked.connect(lambda: self._fill_edit_font(EDIT_FONT)); f1.addRow(r1)
         v.addWidget(g1)
         g2 = QGroupBox("주석 텍스트 박스 글꼴"); f2 = QFormLayout(g2)
-        cf = QFontComboBox(); cf.setCurrentFont(QFont("맑은 고딕")); cf.setEnabled(False); f2.addRow("글꼴", cf)
+        from ..engine import fonts as F
+        self.cf_font = QComboBox(); self.cf_font.setEditable(True)
+        self.cf_font.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.cf_font.addItems(F.font_families()); f2.addRow("글꼴", self.cf_font)
         self.cf_size = self._size_combo(); f2.addRow("크기", self.cf_size)
         self.cf_color = D.ColorButton(); f2.addRow("색상", self.cf_color)
         r2 = QPushButton("기본 재설정"); r2.clicked.connect(lambda: self._fill_comment_font(COMMENT_FONT)); f2.addRow(r2)
@@ -244,6 +247,7 @@ class PreferencesDialog(QDialog):
         self.ef_color.color = tuple(d["color"]); self.ef_color._paint()
 
     def _fill_comment_font(self, d: dict):
+        self.cf_font.setCurrentText(d.get("font") or COMMENT_FONT["font"])
         self.cf_size.setEditText(f"{float(d['size']):g}")
         self.cf_color.color = tuple(d["color"]); self.cf_color._paint()
 
@@ -257,7 +261,10 @@ class PreferencesDialog(QDialog):
     def _save_font(self):
         self.prefs["edit_font"] = {"font": self.ef_font.currentFont().family(), "style": self.ef_style.currentData(),
                                    "size": self._size_val(self.ef_size, 14), "color": list(self.ef_color.color)}
-        self.prefs["comment_font"] = {"size": self._size_val(self.cf_size, 14), "color": list(self.cf_color.color)}
+        from ..engine import fonts as F
+        fam = self.cf_font.currentText().strip()
+        self.prefs["comment_font"] = {"font": fam if fam in F.font_families() else COMMENT_FONT["font"],
+                                      "size": self._size_val(self.cf_size, 14), "color": list(self.cf_color.color)}
 
     # ── OCR ──────────────────────────────────────────────────────
     def _build_ocr(self) -> QWidget:
