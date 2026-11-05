@@ -58,7 +58,8 @@ def write_notices(dist: str) -> str:
     """제3자 라이선스 고지(THIRD-PARTY-NOTICES.txt). 실은 패키지의 dist-info 에서 LICENSE·COPYING 을 모은다."""
     from importlib import metadata
     names = ("PyMuPDF", "PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6", "pikepdf", "pillow", "numpy",
-             "python-docx", "python-pptx", "openpyxl", "psutil", "pywin32", "lxml", "cryptography")
+             "python-docx", "python-pptx", "openpyxl", "psutil", "pywin32", "lxml", "cryptography",
+             "pyHanko", "pyhanko-certvalidator", "asn1crypto", "oscrypto", "tzlocal", "uritools")
     out = [f"{APP_NAME} {VERSION} 에 들어 있는 오픈소스 부품과 라이선스",
            f"{APP_NAME} 자체는 AGPL-3.0 이다(PyMuPDF 가 AGPL). 소스: https://github.com/{ORG}/rpdf",
            "Qt(PySide6)는 LGPL-3.0 이다. Qt 소스: https://download.qt.io/official_releases/qt/ · https://code.qt.io/",
@@ -115,6 +116,9 @@ def main() -> int:
            "--collect-all", "pymupdf", "--collect-all", "fitz", "--hidden-import", "PySide6.QtPrintSupport", "--hidden-import", "PySide6.QtNetwork",
            "--hidden-import", "win32com.client", "--hidden-import", "docx", "--hidden-import", "openpyxl", "--hidden-import", "pptx",
            "--hidden-import", "pikepdf", "--hidden-import", "PIL",
+           # 디지털 서명(pyHanko): 하위 모듈을 늦게 불러서 통째로 싣는다
+           "--collect-all", "pyhanko", "--collect-all", "pyhanko_certvalidator", "--hidden-import", "asn1crypto", "--hidden-import", "oscrypto",
+           "--hidden-import", "tzlocal",
            "run.py"]
     # 앱이 안 쓰는데 훅이 끌어오는 무거운 패키지(첫 빌드 783MB 가운데 torch 366MB·scipy 71MB 등)
     for m in EXCLUDE:
