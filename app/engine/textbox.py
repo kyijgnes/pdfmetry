@@ -318,6 +318,8 @@ def _next_id(page: fitz.Page) -> int:
 
 def _ensure_wrapped(page: fitz.Page) -> None:
     """원문 내용을 q … Q 로 감싸 둔다(원문이 맨 바깥에서 좌표계를 바꿔도 우리 줄은 기본 좌표계에)."""
+    if lines(page):   # 이미 우리 객체 줄이 있으면 감싸지 않는다(다시 감싸면 앞 줄이 q … Q 안에 갇혀 객체로 안 읽힘)
+        return
     f = page.parent
     cs = page.get_contents()
     first = (f.xref_stream(cs[0]) or b"").lstrip() if cs else b""

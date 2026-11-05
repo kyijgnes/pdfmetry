@@ -396,3 +396,21 @@ def test_original_text_order_follows_text_engine(three):
     objs = O.list_objects(d, 0)
     assert objs[0]["id"] == oid and objs[0]["kind"] == "text" and len(d._undo) == 1
     assert "Hello objects" in " ".join(d.fitz[0].get_text().split())
+
+
+# ── 라운드 17 이음새: 글 엔진이 쓴 글 객체를 객체 엔진이 읽고 순서를 바꾼다 ──
+def test_textbox_objects_listed_and_ordered():
+    d = Document.blank()
+    a = A.add_text(d, 0, fitz.Rect(100, 100, 260, 140), "첫째 글", 12)
+    b = A.add_text(d, 0, fitz.Rect(100, 200, 260, 240), "둘째 글", 12)
+    texts = [o for o in O.list_objects(d, 0) if o["kind"] == "text" and o["ours"]]
+    assert [o["id"] for o in texts] == [a, b]
+    O.order(d, 0, texts[0], "front")
+    after = [o["id"] for o in O.list_objects(d, 0) if o["kind"] == "text" and o["ours"]]
+    assert after == [b, a]
+    assert "첫째 글" in d.fitz[0].get_text() and "둘째 글" in d.fitz[0].get_text()
+
+
+def test_blocked_order_rolls_back_with_batch():
+    # Document.batch() 를 쓰는 길에서도 막힌 순서 바꾸기는 문서·실행 취소를 되돌린다
+    test_image_in_form_refused()

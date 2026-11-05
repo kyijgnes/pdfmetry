@@ -458,8 +458,15 @@ def _one_step(doc: Document):
     """안에서 부른 snapshot() 을 한 걸음으로 묶는다. Document.batch() 가 있으면 그것을 쓴다."""
     batch = getattr(doc, "batch", None)
     if batch is not None:
-        with batch():
-            yield
+        outer = not getattr(doc, "_batch", 0)
+        try:
+            with batch():
+                yield
+        except BaseException:
+            if outer:   # 막혔으면 들어가기 전 모습으로 되돌리고 batch 가 뜬 사본도 거둔다
+                doc.fitz.close()
+                doc.fitz = doc._load(doc._undo.pop())
+            raise
         return
     if getattr(doc, "_rpdf_step", False):   # 바깥 걸음 안이면 그대로
         yield
