@@ -45,6 +45,8 @@ def comment_style(kind: str, style: dict, comment_font: dict | None) -> dict:
         if "color" in comment_font and tuple(out.get("text_color") or ()) == tuple(dflt.get("text_color") or ()):
             out["text_color"] = tuple(float(c) for c in comment_font["color"])
     out["fontsize"] = max(5.0, float(out["fontsize"]))
+    if (comment_font or {}).get("font"):
+        out["family"] = str(comment_font["font"])   # 글꼴 이름(빈 칸이면 맑은 고딕)
     return out
 
 
@@ -157,7 +159,7 @@ class InlineAnnot(QObject):
         self.leader = QGraphicsPathItem(it) if (kind == "callout") else None
         if self.leader is not None:
             self.leader.setZValue(9)
-        f = QFont(FAMILY)
+        f = QFont(self.style.get("family") or FAMILY)   # 쪽에 굽는 글꼴과 같게(환경 설정 「주석 텍스트 박스 글꼴」)
         f.setPixelSize(BASE_PX)
         self.box.setFont(f)
         self.box.setDefaultTextColor(QColor.fromRgbF(*self.style["text_color"]))

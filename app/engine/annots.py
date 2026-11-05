@@ -12,9 +12,9 @@ from typing import Sequence
 
 import fitz
 
-from .document import Document, _text_rotation, del_keys, korean_font_name, redact_only
+from .document import Document, _text_rotation, del_keys, redact_only
 from . import fonts as F
-from .fonts import korean_fontfile
+from . import textbox as T
 
 Color = tuple[float, float, float]
 
@@ -195,23 +195,66 @@ def _rc_xml(text: str) -> str:
             f'xfa:spec="2.4">{paras}</body>')
 
 
-def _ds_css(fontsize: float, color: Color) -> str:
+def _ds_css(fontsize: float, color: Color, family: str = "") -> str:
     hexc = "".join(f"{round(max(0, min(1, c)) * 255):02x}" for c in color)
-    return f"font-family: Malgun Gothic, sans-serif; font-size: {fontsize:g}pt; color: #{hexc};"
+    return f"font-family: {family or F.DEFAULT_FAMILY}, sans-serif; font-size: {fontsize:g}pt; color: #{hexc};"
+
+
+def freetext_family(f: fitz.Document, a: fitz.Annot) -> str:
+    """글상자의 글꼴: 우리가 입힌 외관의 글꼴, 없으면 /DS 의 font-family 가 설치 글꼴이면 그것, 아니면 맑은 고딕."""
+    fam = T.annot_font(f, a.xref)
+    if fam:
+        return fam
+    ds = f.xref_get_key(a.xref, "DS")[1] or ""
+    m = re.search(r"font-family\s*:\s*([^;]+)", ds)
+    if m:
+        names = F.font_families()
+        for name in m.group(1).split(","):
+            name = name.strip().strip("'\"")
+            if name and name in names:
+                return name
+    return F.DEFAULT_FAMILY
+
+
+def _ft_text_area(f: fitz.Document, a: fitz.Annot) -> fitz.Rect:
+    """글이 들어가는 네모(회전 전 쪽 좌표): /RD 를 걷은 상자에서 테두리 + 2 만큼 안쪽(쪽 위 입력 상자와 같은 여백)."""
+    width = (a.border or {}).get("width") or 0
+    box = _inner(a.rect, _rd(f, a))
+    pad = width + 2
+    return fitz.Rect(box.x0 + pad, box.y0 + pad, box.x1 - pad, box.y1 - pad)
+
+
+def _ft_dress(f: fitz.Document, a: fitz.Annot, text: str, fontsize: float, text_color: Color, family: str) -> None:
+    """MuPDF 가 그린 외관의 글 부분을 고른 설치 글꼴의 글 Form 으로 바꿔 입힌다(annot.update() 뒤마다)."""
+    q = f.xref_get_key(a.xref, "Q")
+    align = int(q[1]) if q[0] == "int" and q[1] in ("0", "1", "2") else 0
+    st = {"text": text, "family": "" if family == F.DEFAULT_FAMILY else family, "fontsize": fontsize,
+          "color": tuple(text_color), "align": align, "rotate": max(a.rotation, 0)}
+    try:
+        T.dress_annot(f, a.xref, st, _ft_text_area(f, a), a.parent)
+    except Exception:  # noqa: BLE001  외관 모양을 모르면 MuPDF 외관 그대로
+        pass
 
 
 def _ft_redraw(f: fitz.Document, a: fitz.Annot, text: str, fontsize: float, text_color: Color,
-               fill: Color | None, border: Color | None, rich: bool, **kw) -> None:
+               fill: Color | None, border: Color | None, rich: bool, family: str | None = None, **kw) -> None:
     """글상자 모양을 다시 그린다. 리치텍스트면 /RC·/DS 를 먼저 쓰고(set_info 가 /RC 를 지운다),
-    그린 뒤 테두리 색을 고친다(MuPDF 는 테두리를 글자색으로 그린다)."""
+    그린 뒤 테두리 색을 고치고(MuPDF 는 테두리를 글자색으로 그린다) 글을 설치 글꼴로 다시 입힌다.
+    family 가 None 이면 지금 글꼴 그대로."""
+    if family is None:
+        family = freetext_family(f, a)
+    old_form = T.annot_form(f, a.xref)   # update() 가 외관을 새로 지으면 우리 옛 글 Form 은 고아가 된다
     if rich:
-        f.xref_set_key(a.xref, "DS", fitz.get_pdf_str(_ds_css(fontsize, text_color)))
+        f.xref_set_key(a.xref, "DS", fitz.get_pdf_str(_ds_css(fontsize, text_color, family)))
         f.xref_set_key(a.xref, "RC", fitz.get_pdf_str(_rc_xml(text)))
     a.update(fontsize=fontsize, text_color=text_color, fill_color=fill, **kw)
     if rich and border is not None and tuple(border) != tuple(text_color):
         r, g, b = border
         ap = re.sub(rb"[\d.]+\s+[\d.]+\s+[\d.]+\s+RG", f"{r:g} {g:g} {b:g} RG".encode(), a._getAP(), count=1)
         a._setAP(ap)
+    _ft_dress(f, a, text, fontsize, text_color, family)
+    if old_form and old_form != T.annot_form(f, a.xref):
+        T.free_forms(f, [old_form])
 
 
 def annot_colors(doc: Document, a: fitz.Annot) -> dict:
@@ -507,9 +550,11 @@ def erase_ink_at(doc: Document, page: int, point: fitz.Point, radius: float = 6,
 # ── 글 상자 · 노트 ────────────────────────────────────────────────
 def free_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float = 11, text_color: Color = (0, 0, 0),
               fill: Color | None = None, border: Color | None = None, width: float = 0, opacity: float = 1.0,
-              callout=None, author: str = "", typewriter: bool = False, rotate: int | None = None) -> int:
+              callout=None, author: str = "", typewriter: bool = False, rotate: int | None = None,
+              family: str = "") -> int:
     """텍스트 박스(테두리·바탕 있음) · 타자기(typewriter=True, 테두리 없음) · 말풍선(callout).
     rotate: 글 방향(없으면 쪽 회전, 보기 회전으로 돌린 화면에서는 그 화면에 바로 서게 넘겨 받는다).
+    family: 글꼴 이름(빈 이름이면 맑은 고딕, 환경 설정 「주석 텍스트 박스 글꼴」).
 
     callout 은 지시선 끝 점 하나(상자 위 가운데로 잇는다) 또는 끝 점부터 상자까지의 꼭짓점 목록.
     지시선 끝은 열린 화살촉. PyMuPDF 는 richtext 가 아니면 테두리 색을 따로 못 준다(테두리는 글자색).
@@ -523,29 +568,32 @@ def free_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float
         if typewriter:
             fill, border, width = None, None, 0
         return _add_free_text(p, r, text, fontsize, text_color, fill, border, width, opacity, callout,
-                              p.rotation if rotate is None else rotate % 360, author).xref  # 회전된 쪽에서도 보이는 화면에 바로 서게
+                              p.rotation if rotate is None else rotate % 360, author, family).xref  # 회전된 쪽에서도 보이는 화면에 바로 서게
 
 
 def _add_free_text(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, text_color: Color, fill: Color | None,
-                   border: Color | None, width: float, opacity: float, callout, rotate: int, author: str = "") -> fitz.Annot:
+                   border: Color | None, width: float, opacity: float, callout, rotate: int, author: str = "",
+                   family: str = "") -> fitz.Annot:
     """글상자 하나(free_text·주석 가져오기·고치기가 같이 씀). callout 은 말풍선 선의 꼭짓점들(없으면 None)."""
     kw = {"rotate": rotate}
     if callout:
         kw["callout"] = tuple(fitz.Point(q) for q in callout)
         kw["line_end"] = fitz.PDF_ANNOT_LE_OPEN_ARROW
     text_color = tuple(text_color)
+    family = family if family and family in F.font_families() else F.DEFAULT_FAMILY
     rich = border is not None and tuple(border) != text_color
     if rich:
         a = p.add_freetext_annot(r, text, fontsize=fontsize, text_color=text_color, fill_color=fill,
                                  border_color=border, border_width=width, opacity=opacity, richtext=True,
-                                 style=_ds_css(fontsize, text_color), **kw)
+                                 style=_ds_css(fontsize, text_color, family), **kw)
     else:
         a = p.add_freetext_annot(r, text, fontsize=fontsize, fontname="malgun", text_color=text_color,
                                  fill_color=fill, border_width=width if border is not None else 0,
                                  opacity=opacity, **kw)
     # 리치텍스트 글상자는 /Contents 가 비어 주석 목록·내보내기·속성 창에 내용이 안 나온다
     a.set_info(content=text, title=author or None)
-    _ft_redraw(p.parent, a, text, fontsize, text_color, fill, tuple(border) if border is not None else None, rich)
+    _ft_redraw(p.parent, a, text, fontsize, text_color, fill, tuple(border) if border is not None else None, rich,
+               family)
     return a
 
 
@@ -567,7 +615,8 @@ def freetext_info(doc: Document, page: int, xref: int) -> dict | None:
         return {"kind": kind, "text": a.info.get("content", ""), "box": box, "fontsize": fs, "text_color": tc,
                 "fill": tuple(fill) if fill else None, "border": _freetext_border(a) if width else None,
                 "width": width, "opacity": 1.0 if op is None or op < 0 else op, "callout": callout,
-                "rotate": max(a.rotation, 0), "author": a.info.get("title", ""), "subject": a.info.get("subject", "")}
+                "rotate": max(a.rotation, 0), "author": a.info.get("title", ""), "subject": a.info.get("subject", ""),
+                "family": freetext_family(f, a)}
 
 
 def edit_free_text(doc: Document, page: int, xref: int, text: str, box: fitz.Rect | None = None) -> int | None:
@@ -587,6 +636,7 @@ def edit_free_text(doc: Document, page: int, xref: int, text: str, box: fitz.Rec
             return None
         f = doc.fitz
         keep = [(k, f.xref_get_key(xref, k)) for k in ("NM", "CreationDate")]
+        old_form = T.annot_form(f, xref)
         p.delete_annot(a)
         b = fitz.Rect(box or info["box"])
         callout = info["callout"]
@@ -595,10 +645,11 @@ def edit_free_text(doc: Document, page: int, xref: int, text: str, box: fitz.Rec
             callout = list(callout[:-1]) + [(min(max(q[0], b.x0), b.x1), min(max(q[1], b.y0), b.y1))]
         n = _add_free_text(p, b, text, info["fontsize"], info["text_color"], info["fill"],
                            info["border"], info["width"], info["opacity"], callout, info["rotate"],
-                           info["author"])
+                           info["author"], info["family"])
         for k, (t, v) in keep:
             if t != "null":
                 f.xref_set_key(n.xref, k, v)
+        T.free_forms(f, [old_form])
         if info["subject"]:
             f.xref_set_key(n.xref, "Subj", fitz.get_pdf_str(info["subject"]))
         for r in p.annots():   # 이 글상자에 달린 답글이 새 글상자를 가리키게
@@ -769,6 +820,7 @@ def export_annots(doc: Document) -> list[dict]:
                 if kind == "FreeText":
                     e["fontsize"] = _freetext_style(doc, a)[0]  # 있으면 colors 가 stroke=글자색·fill=바탕색(10-19 3차부터)
                     e["rotate"] = max(a.rotation, 0)
+                    e["family"] = freetext_family(f, a)
                     if f.xref_get_key(a.xref, "IT")[1] == "/FreeTextCallout":
                         e["callout"] = a.vertices
                 if kind == "Text":
@@ -813,7 +865,8 @@ def _import_one(doc: Document, e: dict) -> bool:
         # 테두리 색이 없는 옛 파일은 글자색으로(그때는 테두리를 글자색으로 그렸다)
         bc = tuple(cols.get("border") or tc) if width else None
         a = _add_free_text(p, box, info.get("content", ""), fs, tuple(tc), fill, bc,
-                           width, op, e.get("callout"), e.get("rotate", 0), info.get("title", ""))
+                           width, op, e.get("callout"), e.get("rotate", 0), info.get("title", ""),
+                           str(e.get("family") or ""))
         if info.get("subject"):  # 다시 그리면 고쳐 둔 테두리 색이 풀리므로 열쇠만 쓴다
             doc.fitz.xref_set_key(a.xref, "Subj", fitz.get_pdf_str(info["subject"]))
         return True
@@ -1311,90 +1364,40 @@ def apply_redactions(doc: Document, pages: Sequence[int] | None = None, images: 
 
 
 # ── 텍스트·이미지 편집(원문 내용) ─────────────────────────────────
-ITALIC_SLANT = 0.2   # 기울임: 글 방향으로 기울이는 정도(맑은 고딕에는 기울임 글꼴 파일이 없다)
-TEXT_PAD = 2         # 쪽에 넣는 글 상자의 여유(화면 글 상자와 줄바꿈이 어긋나지 않게)
+ITALIC_SLANT = T.ITALIC_SLANT   # 기울임 파일이 없는 글꼴: 상자째 글 방향으로 기울이는 정도
+TEXT_PAD = T.TEXT_PAD           # 쪽에 넣는 글 상자의 여유(화면 글 상자와 줄바꿈이 어긋나지 않게)
+STYLE_KEYS = ("fontsize", "color", "bold", "italic", "family", "align", "underline", "strike", "line_height",
+              "letter_spacing")
 
 
-def _font_res(p: fitz.Page, family: str, text: str, bold: bool, italic: bool) -> tuple[str, str, bool, bool]:
-    """글꼴 이름 → 쪽에 넣은 (글꼴 자원 이름, 글꼴 파일, 굵게를 흉내 낼지, 기울임을 흉내 낼지). 빈 이름이거나 글자를 못 그리는 글꼴이면 맑은 고딕."""
-    if family and family != F.DEFAULT_FAMILY:
-        path, fake_bold, fake_italic = F.font_file(family, bold, italic)
-        if F.covers(path, text):
-            base = re.sub(r"[^A-Za-z0-9]", "", os.path.splitext(os.path.basename(path))[0]) or "F"
-            fonts = {f[4]: f[3] for f in p.get_fonts()}
-            name, k = base, 1
-            while name in fonts and re.match(r"[A-Z]{6}\+", fonts[name] or ""):  # 저장 때 줄인 글꼴은 피한다
-                k += 1
-                name = f"{base}{k}"
-            p.insert_font(fontname=name, fontfile=path)
-            return name, path, fake_bold, fake_italic
-    name = korean_font_name(p, bold)  # 굵기마다 이름을 나누고, 저장 때 줄인 글꼴은 피한다
-    p.insert_font(fontname=name, fontfile=korean_fontfile(bold))
-    return name, korean_fontfile(bold), False, italic
+def text_box_size(text: str, fontsize: float, bold: bool = False, min_width: float = 0,
+                  style: dict | None = None) -> tuple[float, float]:
+    """글을 줄바꿈 없이 넣을 상자 크기(pt, 글 방향 기준). 너비는 가장 긴 줄, 높이는 줄 수만큼.
+    style 을 주면 그 글꼴·문자 간격·줄 간격으로 잰다."""
+    return T.box_size({**(style or {}), "text": text, "fontsize": fontsize, "bold": bold}, min_width)
 
 
-def _insert_box(p: fitz.Page, r: fitz.Rect, text: str, fontsize: float, color: Color, bold: bool, align: int,
-                rotate: int | None = None, italic: bool = False, family: str = "", grow: bool = False):
-    """상자에 글을 넣는다(글꼴 이름이 비면 맑은 고딕). 방향은 기본이 쪽 회전(화면에 바로 섬), 넘치면 글 방향의 아래로 늘린다.
-
-    grow=True 면 줄이 상자보다 길 때 줄바꿈하지 않고 상자를 글 방향으로 넓힌다(정렬 쪽을 붙박고)."""
-    rot = p.rotation if rotate is None else rotate
-    name, path, fake_bold, italic = _font_res(p, family, text, bold, italic)
-    extra = {"render_mode": 2, "border_width": 0.04, "fill": color} if fake_bold else {}
-    if grow:
-        fo = F.font_object(path)
-        need = max(fo.text_length(ln, fontsize) for ln in text.split("\n")) + TEXT_PAD + 1
-        lr = fitz.Rect(r) * fitz.Matrix(rot)
-        lr.normalize()
-        if lr.width < need:
-            if align == 1:
-                lr.x0 -= (need - lr.width) / 2
-                lr.x1 = lr.x0 + need
-            elif align == 2:
-                lr.x0 = lr.x1 - need
-            else:
-                lr.x1 = lr.x0 + need
-            r = lr * fitz.Matrix(-rot)
-            r.normalize()
-
-    def put(box: fitz.Rect) -> float:
-        morph = None
-        if italic:  # 글 방향 기준 가로 기울이기를 쪽 좌표로 옮긴다. 상자 가운데를 축으로 해서 위아래가 고르게 기운다
-            m = fitz.Matrix(rot) * fitz.Matrix(1, 0, ITALIC_SLANT, 1, 0, 0) * fitz.Matrix(-rot)
-            morph = (fitz.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2), m)
-        return p.insert_textbox(box, text, fontsize=fontsize, fontname=name, color=color, align=align, rotate=rot,
-                                morph=morph, **extra)
-
-    rc = put(r)
-    if rc < 0:  # 상자가 작으면 아래로 늘려 다시
-        lr = fitz.Rect(r) * fitz.Matrix(rot)
-        lr.normalize()
-        lr.y1 += -rc + 4
-        r2 = lr * fitz.Matrix(-rot)
-        r2.normalize()
-        put(r2)
-
-
-def text_box_size(text: str, fontsize: float, bold: bool = False, min_width: float = 0) -> tuple[float, float]:
-    """글을 줄바꿈 없이 넣을 상자 크기(pt, 글 방향 기준). 너비는 가장 긴 줄, 높이는 줄 수만큼."""
-    f = fitz.Font(fontfile=korean_fontfile(bold))
-    lines = text.split("\n")
-    w = max(f.text_length(ln, fontsize) for ln in lines) + TEXT_PAD
-    lh = fontsize * (f.ascender - f.descender)
-    return max(w, min_width), lh * len(lines) + TEXT_PAD
+def _style_of(base: dict | None, style: dict | None, **given) -> dict:
+    """서식 묶음 합치기: base(지금 서식) ← 넘겨 받은 칸(given, None 은 건너뜀) ← style(새 서식 칸)."""
+    out = dict(base or {})
+    out.update({k: v for k, v in given.items() if v is not None})
+    out.update({k: v for k, v in (style or {}).items() if k in STYLE_KEYS})
+    return out
 
 
 def add_text(doc: Document, page: int, r: fitz.Rect, text: str, fontsize: float = 10, color: Color = (0, 0, 0),
-             bold: bool = False, align: int = 0, italic: bool = False, rotate: int | None = None) -> bool:
-    """쪽 내용에 글자를 직접 넣는다(주석 아님). 빈 글이면 아무것도 안 하고 False(실행 취소 자리도 안 만듦).
-    rotate: 글 방향(없으면 쪽 회전)."""
+             bold: bool = False, align: int = 0, italic: bool = False, rotate: int | None = None,
+             style: dict | None = None) -> int:
+    """쪽 내용에 글 객체를 넣는다(주석 아님). 만든 객체의 Id(1부터). 빈 글이면 아무것도 안 하고 0(실행 취소 자리도 안 만듦).
+    rotate: 글 방향(없으면 쪽 회전). style: 글꼴·밑줄·취소선·줄 간격·문자 간격 같은 나머지 서식 칸."""
     if not text.strip():
-        return False
+        return 0
     doc.snapshot()
     with doc.lock:
-        _insert_box(doc.fitz[page], r, text, fontsize, color, bold, align, italic=italic,
-                    rotate=None if rotate is None else rotate % 360)
-    return True
+        p = doc.fitz[page]
+        st = _style_of(None, style, fontsize=fontsize, color=tuple(color), bold=bold, align=align, italic=italic)
+        st.update(text=text, rotate=p.rotation if rotate is None else rotate % 360)
+        return T.write(p, st, fitz.Rect(r))
 
 
 def add_image(doc: Document, page: int, r: fitz.Rect, path: str, keep_proportion: bool = True):
@@ -1404,13 +1407,27 @@ def add_image(doc: Document, page: int, r: fitz.Rect, path: str, keep_proportion
         p.insert_image(r, filename=path, keep_proportion=keep_proportion, overlay=True, rotate=p.rotation)
 
 
+def text_object(doc: Document, page: int, rect: fitz.Rect) -> dict | None:
+    """rect 자리의 우리 글 객체({id, style, rect, …}), 없으면 None."""
+    with doc.lock:
+        return T.find_text(doc.fitz[page], rect)
+
+
 def block_style(doc: Document, page: int, block_rect: fitz.Rect) -> dict:
-    """글자 덩어리 첫 글자의 모양: 크기·색·굵게·기울임·글꼴 이름(고를 수 있는 글꼴 가운데 맞는 것, 없으면 빈 이름)."""
+    """글자 덩어리의 모양: 크기·색·굵게·기울임·글꼴 이름(고를 수 있는 글꼴 가운데 맞는 것, 없으면 빈 이름)과
+    정렬·밑줄·취소선·줄 간격·문자 간격. 우리 글 객체면 /RPDFText 를 그대로, 원문이면 첫 글자에서 읽는다."""
+    obj = text_object(doc, page, block_rect)
+    if obj is not None:
+        st = obj["style"]
+        out = {k: st[k] for k in STYLE_KEYS}
+        out["family"] = st["family"] or F.DEFAULT_FAMILY
+        return out
+    plain = {"align": 0, "underline": False, "strike": False, "line_height": 0.0, "letter_spacing": 0.0}
     with doc.lock:
         spans = [s for b in doc.fitz[page].get_text("dict", clip=block_rect)["blocks"] if b.get("type") == 0
                  for l in b["lines"] for s in l["spans"] if s["text"].strip()]
     if not spans:
-        return {"fontsize": 11.0, "color": (0, 0, 0), "bold": False, "italic": False, "family": ""}
+        return {"fontsize": 11.0, "color": (0, 0, 0), "bold": False, "italic": False, "family": "", **plain}
     s = spans[0]
     c = s["color"]
     raw = s["font"].split("+", 1)[-1]
@@ -1420,16 +1437,28 @@ def block_style(doc: Document, page: int, block_rect: fitz.Rect) -> dict:
         family = F.DEFAULT_FAMILY
     return {"fontsize": round(s["size"], 1), "color": ((c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255),
             "bold": bool(s["flags"] & 16) or "bold" in raw.lower(), "italic": bool(s["flags"] & 2),
-            "family": family}
+            "family": family, **plain}
 
 
 def edit_block(doc: Document, page: int, block_rect: fitz.Rect, new_text: str, fontsize: float | None = None,
                color: Color = (0, 0, 0), bold: bool = False, align: int = 0, *, italic: bool = False,
-               family: str = "", new_rect: fitz.Rect | None = None):
-    """원문 글자 덩어리를 고친다: 자리를 교정(흰 칠)하고 새 글자를 같은 자리(new_rect 면 그 자리)에 넣는다."""
+               family: str = "", new_rect: fitz.Rect | None = None, style: dict | None = None) -> int:
+    """글자 덩어리를 고친다. 만든(고친) 글 객체의 Id, 지웠으면 0.
+
+    우리 글 객체면 그 줄 자리에서 바꿔 쓴다(쌓는 순서 그대로, 밑줄·취소선·줄 간격·문자 간격은 style 에 없으면 그대로).
+    원문 글이면 자리를 교정(흰 칠)하고 같은 자리(new_rect 면 그 자리)에 글 객체로 넣는다(줄이 길면 너비를 늘림).
+    빈 글이면 지운다."""
     doc.snapshot()
     with doc.lock:
         p = doc.fitz[page]
+        obj = T.find_text(p, block_rect)
+        fam = "" if family == F.DEFAULT_FAMILY else family
+        if obj is not None:
+            st = _style_of(obj["style"], style, fontsize=fontsize, color=tuple(color), bold=bold, align=align,
+                           italic=italic, family=fam)
+            st.update(text=new_text, rotate=obj["style"]["rotate"])
+            box = fitz.Rect(new_rect) if new_rect is not None else obj["rect"]
+            return T.write(p, st, box, oid=obj["id"])
         if fontsize is None:
             spans = [s for b in p.get_text("dict", clip=block_rect)["blocks"] if b.get("type") == 0
                      for l in b["lines"] for s in l["spans"]]
@@ -1439,9 +1468,12 @@ def edit_block(doc: Document, page: int, block_rect: fitz.Rect, new_text: str, f
                 color = ((c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255)
         rot = _text_rotation(p, block_rect)  # 원래 글 방향(지우기 전에)
         redact_only(p, [block_rect], fill=(1, 1, 1), images=fitz.PDF_REDACT_IMAGE_NONE)
-        if new_text.strip():
-            _insert_box(p, fitz.Rect(new_rect or block_rect), new_text, fontsize, color, bold, align, rotate=rot,
-                        italic=italic, family=family, grow=True)
+        if not new_text.strip():
+            return 0
+        st = _style_of(None, style, fontsize=fontsize, color=tuple(color or (0, 0, 0)), bold=bold, align=align,
+                       italic=italic, family=fam)
+        st.update(text=new_text, rotate=rot)
+        return T.write(p, st, fitz.Rect(new_rect or block_rect), grow=True)
 
 
 def delete_image(doc: Document, page: int, r: fitz.Rect):

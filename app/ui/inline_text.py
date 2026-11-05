@@ -10,7 +10,7 @@ from typing import Callable
 
 import fitz
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextOption
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextBlockFormat, QTextCursor, QTextOption
 from PySide6.QtWidgets import (QColorDialog, QFrame, QGraphicsItem, QGraphicsTextItem, QGraphicsView, QHBoxLayout,
                                QLabel, QStyleOptionGraphicsItem, QToolButton, QWidget)
 
@@ -21,7 +21,8 @@ BASE_PX = 100          # 글꼴은 이 크기로 그리고 항목 배율로 실�
 MIN_WIDTH = 100.0      # 처음 글 상자 너비(pt)
 LINE = 1.33            # 맑은 고딕 한 줄 높이(글자 크기 배)
 SIZES = (6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72)
-DEFAULT_STYLE = {"fontsize": 10.0, "color": (0, 0, 0), "bold": False, "italic": False, "align": 0}
+DEFAULT_STYLE = {"fontsize": 10.0, "color": (0, 0, 0), "bold": False, "italic": False, "align": 0,
+                 "underline": False, "strike": False, "line_height": 0.0, "letter_spacing": 0.0}
 
 
 def clean_style(s: dict | None) -> dict:
@@ -32,8 +33,12 @@ def clean_style(s: dict | None) -> dict:
             out[k] = float(v)
         elif k == "color" and isinstance(v, (list, tuple)) and len(v) == 3:
             out[k] = tuple(min(1.0, max(0.0, float(c))) for c in v)
-        elif k in ("bold", "italic"):
+        elif k in ("bold", "italic", "underline", "strike"):
             out[k] = bool(v)
+        elif k == "line_height" and isinstance(v, (int, float)) and 0 <= v <= 10:
+            out[k] = float(v)   # 글자 크기 배수, 0 = 글꼴 기본
+        elif k == "letter_spacing" and isinstance(v, (int, float)) and -20 <= v <= 100:
+            out[k] = float(v)   # pt
         elif k == "align" and v in (0, 1, 2):
             out[k] = v
     return out
@@ -94,6 +99,10 @@ class _Bar(QFrame):
         f = self.bold.font(); f.setBold(True); self.bold.setFont(f)
         self.italic = btn("기울임", lambda on: ed.set_style(italic=on), True)
         f = self.italic.font(); f.setItalic(True); self.italic.setFont(f)
+        self.underline = btn("밑줄", lambda on: ed.set_style(underline=on), True)
+        f = self.underline.font(); f.setUnderline(True); self.underline.setFont(f)
+        self.strike = btn("취소선", lambda on: ed.set_style(strike=on), True)
+        f = self.strike.font(); f.setStrikeOut(True); self.strike.setFont(f)
         self.color = btn("색", ed.pick_color)
         self.aligns = [btn(t, lambda _=False, a=a: ed.set_style(align=a), True)
                        for a, t in enumerate(("왼쪽", "가운데", "오른쪽"))]
@@ -104,6 +113,8 @@ class _Bar(QFrame):
         self.size.setText(f"{s['fontsize']:g}pt")
         self.bold.setChecked(s["bold"])
         self.italic.setChecked(s["italic"])
+        self.underline.setChecked(s["underline"])
+        self.strike.setChecked(s["strike"])
         c = QColor.fromRgbF(*s["color"])
         self.color.setStyleSheet(f"QToolButton {{ color: {c.name()}; font-weight: bold; }}")
         for a, b in enumerate(self.aligns):
@@ -165,14 +176,34 @@ class InlineText(QObject):
         f.setPixelSize(BASE_PX)
         f.setBold(s["bold"])
         f.setItalic(s["italic"])
+        f.setUnderline(s["underline"])
+        f.setStrikeOut(s["strike"])
+        # 문자 간격(pt)을 항목 단위로: 항목 한 칸이 글자 크기/BASE_PX pt
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, s["letter_spacing"] / self._unit())
         self.box.setFont(f)
         self.box.setDefaultTextColor(QColor.fromRgbF(*s["color"]))
         opt = self.box.document().defaultTextOption()
         opt.setAlignment((Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight)[s["align"]])
         opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.box.document().setDefaultTextOption(opt)
+        self._line_height()
         self.bar.sync()
         self._place()
+
+    def _line_height(self):
+        """줄 간격: 쪽에 굽는 글과 같은 한 줄 높이(글자 크기 배)를 모든 문단에 건다. 0 이면 Qt 기본(글꼴 높이)."""
+        lh = self.style.get("line_height") or 0
+        fmt = QTextBlockFormat()
+        if lh:
+            fmt.setLineHeight(lh * BASE_PX, QTextBlockFormat.LineHeightTypes.FixedHeight.value)
+        else:
+            fmt.setLineHeight(100, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        c = QTextCursor(self.box.document())
+        c.select(QTextCursor.SelectionType.Document)
+        c.mergeBlockFormat(fmt)
+        cur = self.box.textCursor()
+        cur.mergeBlockFormat(fmt)   # 새로 치는 문단도 같은 줄 간격
+        self.box.setTextCursor(cur)
 
     def _fit(self):
         """너비는 처음 100pt 에서 가장 긴 줄만큼 늘고, 쪽 오른쪽 끝에서 줄을 바꾼다."""
@@ -275,7 +306,7 @@ class InlineText(QObject):
     def page_rect(self) -> fitz.Rect:
         """쪽에 넣을 상자(회전 전 쪽 좌표). 너비는 화면 상자와 같게, 글이 그보다 길면 글에 맞춘다."""
         s = self.style
-        w, h = A.text_box_size(self.text(), s["fontsize"], s["bold"], 0)
+        w, h = A.text_box_size(self.text(), s["fontsize"], s["bold"], 0, style=s)
         u = self._unit()
         w = min(max(w, self.box.textWidth() * u), self.max_width)
         h = max(h, self.box.boundingRect().height() * u)

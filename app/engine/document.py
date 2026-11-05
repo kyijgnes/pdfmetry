@@ -11,6 +11,7 @@ import re
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -120,6 +121,39 @@ def redact_only(page: fitz.Page, rects: Iterable[fitz.Rect], fill=(1, 1, 1), **k
     page.apply_redactions(**kw)
     for r, f in keep:
         page.add_redact_annot(r, fill=f).update()
+
+
+def _merge_text_objects(page: fitz.Page, blocks: list[dict]) -> list[dict]:
+    """우리 글 객체(표식 줄 + /RPDFText)는 문단마다 덩어리가 갈라져 나오므로 객체 하나를 덩어리 하나로 묶는다.
+    줄은 객체에 적어 둔 글 그대로(자동 줄바꿈으로 생긴 줄은 나누지 않음), bbox 는 객체 상자."""
+    from . import textbox as T
+    try:
+        objs = T.text_objects(page)
+    except Exception:  # noqa: BLE001
+        return blocks
+    if not objs:
+        return blocks
+    out = list(blocks)
+    for o in objs:
+        r = o["rect"]
+        if r.is_empty:
+            continue
+        mine = [b for b in out if b.get("type") == 0 and r.contains(fitz.Rect(b["bbox"]).tl + (fitz.Rect(b["bbox"]).br - fitz.Rect(b["bbox"]).tl) * 0.5)]
+        if not mine:
+            continue
+        st = o["style"]
+        c = st["color"]
+        rgb = (round(c[0] * 255) << 16) | (round(c[1] * 255) << 8) | round(c[2] * 255)
+        first = next((s for b in mine for l in b["lines"] for s in l["spans"]), None)
+        font = first["font"] if first else (st["family"] or "Malgun Gothic")
+        flags = (16 if st["bold"] else 0) | (2 if st["italic"] else 0)
+        d = math.radians(st["rotate"])
+        lines = [{"bbox": tuple(r), "dir": (round(math.cos(d), 6), -round(math.sin(d), 6)), "wmode": 0,
+                  "spans": [{"text": ln, "size": st["fontsize"], "font": font, "flags": flags, "color": rgb,
+                             "bbox": tuple(r), "origin": (r.x0, r.y1)}]} for ln in st["text"].split("\n")]
+        out = [b for b in out if not any(b is m for m in mine)]
+        out.append({"type": 0, "bbox": tuple(r), "lines": lines, "number": len(out), "rpdf_id": o["id"]})
+    return out
 
 
 @dataclass
@@ -405,9 +439,26 @@ class Document:
             old.close()
 
     # ── 되돌리기 ───────────────────────────────────────────────
-    def snapshot(self):
-        """바꾸기 직전에 부른다."""
+    @contextmanager
+    def batch(self):
+        """여러 엔진 함수를 실행 취소 한 걸음으로 묶는다. 들어갈 때 사본을 한 번 뜨고, 안에서 부른 snapshot() 은 무시한다.
+        겹쳐 써도 된다(바깥 것만 사본을 뜬다)."""
         with self.lock:
+            if not getattr(self, "_batch", 0):
+                self.snapshot()
+            self._batch = getattr(self, "_batch", 0) + 1
+        try:
+            yield self
+        finally:
+            with self.lock:
+                self._batch -= 1
+
+    def snapshot(self):
+        """바꾸기 직전에 부른다(batch() 안에서는 들어갈 때 뜬 사본 하나로 끝)."""
+        with self.lock:
+            if getattr(self, "_batch", 0):
+                self.modified = True
+                return
             self._undo.append(self.fitz.tobytes(garbage=0, deflate=False, encryption=fitz.PDF_ENCRYPT_KEEP))
             if len(self._undo) > MAX_UNDO:
                 self._undo.pop(0)
@@ -509,6 +560,7 @@ class Document:
         with self.lock:
             page = self.fitz[i]
             blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES)["blocks"]
+            blocks = _merge_text_objects(page, blocks)
             blocks += [{"type": 1, "bbox": tuple(im["bbox"])} for im in page.get_image_info()]
             return blocks
 

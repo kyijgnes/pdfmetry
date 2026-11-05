@@ -1,4 +1,4 @@
-"""속성 패널의 편집 개체 칸: 고른 글자 덩어리(글꼴·크기·색·굵게·기울임·정렬)와 그림(돌리기·뒤집기·불투명도·크기·바꾸기).
+"""속성 패널의 편집 개체 칸: 고른 글자 덩어리(글꼴·크기·색·굵게·기울임·밑줄·취소선·정렬·줄 간격·문자 간격)와 그림(돌리기·뒤집기·불투명도·크기·바꾸기).
 
 바꾸는 즉시 쪽에 적용하고 한 번 바꿀 때마다 실행 취소 한 걸음이 된다. 「쪽 가운데」 정렬 셋은 둘 다 쓴다.
 """
@@ -57,11 +57,22 @@ class ContentProps(QWidget):
         self.color = ColorButton((0, 0, 0)); f.addRow("글자색", self.color)
         self.bold, self.italic = _toggle("굵게"), _toggle("기울임")
         f.addRow("모양", _row(self.bold, self.italic))
+        self.underline, self.strike = _toggle("밑줄"), _toggle("취소선")
+        for b, attr in ((self.bold, "setBold"), (self.italic, "setItalic"), (self.underline, "setUnderline"),
+                        (self.strike, "setStrikeOut")):
+            fo = b.font(); getattr(fo, attr)(True); b.setFont(fo)
+        f.addRow("", _row(self.underline, self.strike))
         self.align = QButtonGroup(self)
         btns = []
         for n, t in enumerate(ALIGNS):
             b = _toggle(t); self.align.addButton(b, n); btns.append(b)
         f.addRow("정렬", QWidget()); f.addRow(_row(*btns))
+        self.line_height = QDoubleSpinBox(); self.line_height.setRange(0, 5); self.line_height.setDecimals(2)
+        self.line_height.setSingleStep(0.1); self.line_height.setSpecialValueText("기본"); self.line_height.setSuffix(" 배")
+        f.addRow("줄 간격", self.line_height)
+        self.spacing = QDoubleSpinBox(); self.spacing.setRange(-5, 50); self.spacing.setDecimals(1)
+        self.spacing.setSingleStep(0.5); self.spacing.setSuffix(" pt")
+        f.addRow("문자 간격", self.spacing)
 
         # 그림
         self.image_box, f = group_card("이미지"); lay.addWidget(self.image_box)
@@ -89,7 +100,9 @@ class ContentProps(QWidget):
         self.family.lineEdit().editingFinished.connect(self._edited)
         self.size.valueChanged.connect(self._edited)
         self.color.clicked.connect(self._edited)
-        self.bold.toggled.connect(self._edited); self.italic.toggled.connect(self._edited)
+        for w in (self.bold, self.italic, self.underline, self.strike):
+            w.toggled.connect(self._edited)
+        self.line_height.valueChanged.connect(self._edited); self.spacing.valueChanged.connect(self._edited)
         self.align.idClicked.connect(self._edited)
         self.rot_l.clicked.connect(lambda: self._image(rotate=-90))
         self.rot_r.clicked.connect(lambda: self._image(rotate=90))
@@ -130,6 +143,9 @@ class ContentProps(QWidget):
                 self.size.setValue(float(st["fontsize"]))
                 self.color.color = tuple(st["color"]); self.color._paint()
                 self.bold.setChecked(st["bold"]); self.italic.setChecked(st["italic"])
+                self.underline.setChecked(bool(st.get("underline"))); self.strike.setChecked(bool(st.get("strike")))
+                self.line_height.setValue(float(st.get("line_height") or 0))
+                self.spacing.setValue(float(st.get("letter_spacing") or 0))
                 self.align.button(st.get("align", 0)).setChecked(True)
             else:
                 op = A.image_opacity(self.viewer.doc, sel.page, sel.extra.get("xref", 0), sel.rect)
@@ -172,11 +188,16 @@ class ContentProps(QWidget):
         fam = self.family.currentText().strip()
         st = {"fontsize": self.size.value(), "color": self.color.color or (0, 0, 0), "bold": self.bold.isChecked(),
               "italic": self.italic.isChecked(), "align": max(0, self.align.checkedId()),
-              "family": "" if fam in ("", F.DEFAULT_FAMILY) or fam not in F.font_families() else fam}
-        if st == s.extra.get("style"):
+              "family": "" if fam in ("", F.DEFAULT_FAMILY) or fam not in F.font_families() else fam,
+              "underline": self.underline.isChecked(), "strike": self.strike.isChecked(),
+              "line_height": round(self.line_height.value(), 2), "letter_spacing": round(self.spacing.value(), 1)}
+        old = dict(s.extra.get("style") or {})
+        if old.get("family") == F.DEFAULT_FAMILY:
+            old["family"] = ""
+        if all(old.get(k) == v for k, v in st.items()):
             return
         A.edit_block(self.viewer.doc, s.page, s.rect, s.text, st["fontsize"], st["color"], st["bold"], st["align"],
-                     italic=st["italic"], family=st["family"])
+                     italic=st["italic"], family=st["family"], style=st)
         s.extra["style"] = st
         self.viewer.refresh_pages([s.page])
 
