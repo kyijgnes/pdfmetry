@@ -29,9 +29,10 @@ OCR_KEYS = ("docx", "xlsx", "pptx", "txt", "html", "rtf", "epub")   # 「OCR 인
 DPI_CHOICES = [("원본 DPI 유지", 0), ("72 dpi", 72), ("96 dpi", 96), ("120 dpi", 120), ("150 dpi", 150),
                ("300 dpi", 300), ("450 dpi", 450), ("600 dpi", 600)]
 PPTX_DPIS = [100, 150, 200, 300, 600]
+PPTX_MODES = [("text", "글 상자로"), ("image", "쪽 그림으로")]
 IMAGE_MODES = [("pages", "쪽마다 한 장"), ("merge", "한 장으로 합치기"), ("extract", "PDF 속 이미지 내보내기")]
 OCR_MODES = [("all", "모든 파일"), ("scan", "스캔된 PDF"), ("off", "OCR 인식 비활성화")]
-DEFAULTS = {"dpi": 0, "mode": "pages", "ocr": "scan", "pptx_dpi": 150, "one_sheet": False,
+DEFAULTS = {"dpi": 0, "mode": "pages", "ocr": "scan", "pptx_dpi": 150, "pptx_mode": "text", "one_sheet": False,
             "zoom": 100, "frame_w": 1, "frame_color": "#FFFFFF", "cover": ""}
 OUT_SUB = os.path.join("PDFmetry", "변환")
 MAX_PATH = 259
@@ -197,7 +198,7 @@ class FormatFields:
                  langs_fn=ocr_languages):
         self.form, self.owner, self.fmt, self.prefs = form, owner, fmt, prefs
         sv = {**DEFAULTS, **(saved or {})}
-        self.dpi = self.mode_group = self.ocr = self.pptx_dpi = self.one_sheet = None
+        self.dpi = self.mode_group = self.ocr = self.pptx_dpi = self.pptx_mode = self.one_sheet = None
         self.zoom = self.frame_w = self.frame_color = self.cover_on = self.cover_path = self.lang = None
         self.modes: dict[str, QRadioButton] = {}
         if fmt in IMAGE_KEYS:
@@ -215,6 +216,9 @@ class FormatFields:
             for rb in self.modes.values():
                 rb.toggled.connect(self._sync)
         elif fmt == "pptx":
+            self.pptx_mode = self._add("변환 방식", QComboBox())
+            for k, lb in PPTX_MODES:
+                self.pptx_mode.addItem(lb, k)
             self.pptx_dpi = self._add("이미지 해상도", QComboBox())
             for d in PPTX_DPIS:
                 self.pptx_dpi.addItem(f"{d} dpi", d)
@@ -254,6 +258,7 @@ class FormatFields:
             self.frame_color.color = _rgb01(sv["frame_color"]); self.frame_color._paint()
         if self.pptx_dpi is not None:
             self.pptx_dpi.setCurrentIndex(max(0, self.pptx_dpi.findData(sv["pptx_dpi"])))
+            self.pptx_mode.setCurrentIndex(max(0, self.pptx_mode.findData(sv["pptx_mode"])))
         if self.one_sheet is not None:
             self.one_sheet.setChecked(bool(sv["one_sheet"]))
         if self.cover_on is not None:
@@ -302,6 +307,7 @@ class FormatFields:
             d["zoom"] = self.zoom.value(); d["frame_w"] = self.frame_w.value(); d["frame_color"] = _hex(self.frame_color.color)
         if self.pptx_dpi is not None:
             d["pptx_dpi"] = self.pptx_dpi.currentData()
+            d["pptx_mode"] = self.pptx_mode.currentData()
         if self.one_sheet is not None:
             d["one_sheet"] = self.one_sheet.isChecked()
         if self.cover_on is not None:
