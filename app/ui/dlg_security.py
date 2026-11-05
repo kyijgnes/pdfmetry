@@ -269,7 +269,7 @@ _READ_KEYS = {"hand", "select", "zoomin", "zoomout", "search", "snapshot", "prin
               "m_distance", "m_perimeter", "m_area", "annot_color", "digital_sign", "sign_manage"}
 _WRITE_TABS = ("edit", "comment", "page", "form")
 _WRITE_EXTRA = {"edit_all", "addtext", "crop", "ocr", "ocrarea", "deskew", "redact", "redact_search", "redact_apply", "hidden",
-                "sign_apply", "rotate_pages", "delete_blank"}
+                "sign_apply", "rotate_pages", "delete_blank", "dsign_clear"}
 
 
 def _write_keys() -> set[str]:

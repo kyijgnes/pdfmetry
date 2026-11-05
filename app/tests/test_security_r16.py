@@ -409,3 +409,8 @@ def test_batch_security_uses_new_dialog(win, folder, monkeypatch):
     data, _ = T.encrypt_bytes(fitz.open(src), **dlg.security)
     g = fitz.open("pdf", data)
     assert g.needs_pass and g.authenticate("bpw")
+
+
+def test_protected_doc_blocks_dsign_clear():
+    # 보호 문서에서 「모든 서명 제거」도 쓰기 명령으로 막는다(라운드 16 합치기).
+    assert "dsign_clear" in SEC._write_keys()
