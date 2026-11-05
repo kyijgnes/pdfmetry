@@ -380,3 +380,19 @@ def test_arrange_then_move_one_step(three):
             O.move(d, 0, [o["id"]], r.x0 - o["rect"].x0, r.y0 - o["rect"].y0 + 50)
     assert len(d._undo) == 1
     assert {round(o["rect"].y0) for o in O.list_objects(d, 0) if o["kind"] == "image"} == {150}
+
+
+def test_original_text_order_follows_text_engine(three):
+    """원문 글의 쌓는 순서는 annots.edit_block(덩어리 나의 글 객체)에 기댄다. 글 엔진이 글 객체를 쓰면 표식 글 객체가
+    되고, 아직 쓰지 않으면 바꾸지 않고 막으며 문서도 그대로다(합치기 전 main)."""
+    d = three
+    item = O.find(d, 0, fitz.Rect(100, 285, 200, 305), "block")
+    content = O._joined(d.fitz, d.fitz[0])
+    try:
+        oid = O.order(d, 0, item, "back")
+    except ValueError:
+        assert O._joined(d.fitz, d.fitz[0]) == content and not d.can_undo()
+        return
+    objs = O.list_objects(d, 0)
+    assert objs[0]["id"] == oid and objs[0]["kind"] == "text" and len(d._undo) == 1
+    assert "Hello objects" in " ".join(d.fitz[0].get_text().split())
