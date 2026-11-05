@@ -209,6 +209,8 @@ class DocTab(QWidget):
         self.scan_bar = SCB.attach(self, root)   # 스캔 문서 안내 막대(보기 위 한 줄)
         from . import dlg_redact as DR, dlg_security as SEC, redact_panel as RP
         self.protect_bar, self.redact_bar, self.redact_panel = SEC.attach(self, root), DR.attach(self, root), RP.attach(self)
+        from . import sign_bar as SGB
+        self.sign_bar = SGB.attach(self, root)   # 서명된 문서 띠(보안 띠 아래)
         self.ocr_area = OA.OcrArea(self)         # 영역 OCR 사각형·오른쪽 패널(도구 「ocrarea」 일 때만)
         self.table_tool = None                   # 표 인식 모드(window.table_recognize 가 만든다)
         self.side_key = ""
@@ -1361,6 +1363,9 @@ class MainWindow(QMainWindow):
             # 검색·버전(문서 없어도)
             elif key == "search_advanced": ADV.open_for(self)
             elif key == "about": self.show_help()
+            elif key == "dsign_ids":   # 디지털 인증서(디지털 ID·신뢰할 인증서) 창은 문서 없이도
+                from . import dlg_dsign as DG
+                DG.manage(self)
             # 보기
             elif not t: return
             elif key == "zoomin": v.zoom_in()
@@ -1508,9 +1513,9 @@ class MainWindow(QMainWindow):
             elif key == "hidden":
                 from . import dlg_redact as DR
                 DR.hidden(self, t)
-            elif key == "digital_sign":
-                QMessageBox.information(self, "디지털 서명", "인증서 기반 디지털 서명은 넣지 않았습니다(공인 인증서·시점 확인 서버가 필요합니다).\n"
-                                        "손글씨·도장 그림을 넣는 「서명 관리 → 서명 넣기」 를 쓰세요.")
+            elif key in ("digital_sign", "dsign_validate", "dsign_clear"):
+                from . import dlg_dsign as DG
+                DG.on_action(self, t, key)
             elif key in ("sign_new", "sign_apply"): self.on_tool("signature")
             elif key == "sign_clear": self.prefs.pop("signature_image", None); save_settings(self.settings)
             elif key == "crop": self.on_tool("crop")
@@ -1787,6 +1792,12 @@ class MainWindow(QMainWindow):
             sel = getattr(t.viewer, "sel_fields", None)
             items = list(sel) if sel else [(data.page, data.xref)]
             FieldPropsDialog(self, d, items, on_change=lambda pages: t.changed(pages or None)).exec()
+        elif kind == "fill_field" and data["widget"].field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE:
+            from . import dlg_dsign as DG
+            DG.field_clicked(self, t, data)   # 빈 서명 칸은 서명, 서명된 칸은 서명 속성
+        elif kind == "dsign":   # 서명 칸 우클릭(지우기·인증·속성)
+            from . import dlg_dsign as DG
+            DG.request(self, t, data)
         elif kind == "fill_field":
             w = data["widget"]
             val = D.fill_field(self, w)

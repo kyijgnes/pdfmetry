@@ -285,6 +285,8 @@ def read_cert_file(path: str):
 def sig_widgets(f: fitz.Document) -> list[dict]:
     """문서의 서명 칸: page, xref, name, rect, signed."""
     out = []
+    if not f.is_pdf or not f.is_form_pdf:
+        return out
     for i in range(f.page_count):
         for w in f[i].widgets():
             if w.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE:

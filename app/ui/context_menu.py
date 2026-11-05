@@ -90,7 +90,13 @@ def _widget(v, m: QMenu, s):
 
 
 def signature_items(v, m: QMenu, s) -> None:
-    """서명 칸에만 붙는 줄(디지털 서명 덩어리가 채운다)."""
+    """서명 칸에만 붙는 줄: 서명 지우기 · 서명 인증 · 서명 속성 보기(서명된 칸일 때만 켜짐)."""
+    from ..engine import dsign as G
+    hit = next((x for x in G.sig_widgets(v.doc.fitz) if x["xref"] == s.xref), None)
+    name, signed = (hit["name"], hit["signed"]) if hit else ("", False)
+    m.addSeparator()
+    for do, lbl in (("clear", "서명 지우기"), ("validate", "서명 인증"), ("props", "서명 속성 보기")):
+        m.addAction(lbl, lambda do=do: v.requestDialog.emit("dsign", {"do": do, "name": name})).setEnabled(signed)
 
 
 def _form_blank(v, m: QMenu):

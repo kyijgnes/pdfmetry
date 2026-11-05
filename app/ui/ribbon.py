@@ -144,7 +144,8 @@ TABS: list[tuple[str, str, list]] = [
         ("redact", "redact", "교정 표시", "tool", None), ("redact_search", "redactsearch", "검색·교정", "action", None),
         ("redact_apply", "redactapply", "교정 적용", "action", None), ("hidden", "hidden", "숨겨진 데이터 삭제", "action", None), SEP,
         ("digital_sign", "cert", "디지털 서명", "action", None),
-        ("sign_manage", "signature", "서명 관리", "menu", [("sign_new", "서명 이미지 등록"), ("sign_apply", "서명 넣기"), ("sign_clear", "등록한 서명 지우기")]),
+        ("sign_manage", "signature", "서명 관리", "menu", [("dsign_validate", "모든 서명 인증"), ("dsign_clear", "모든 서명 제거"), ("dsign_ids", "디지털 인증서"), MENU_SEP,
+                                                          ("sign_new", "서명 이미지 등록"), ("sign_apply", "서명 넣기"), ("sign_clear", "등록한 서명 지우기")]),
     ]),
 ]
 
