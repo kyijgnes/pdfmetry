@@ -24,7 +24,7 @@ F_HIDDEN, F_PRINT, F_NOVIEW, F_LOCKED = 2, 4, 32, 128
 VISIBILITY = (("visible", "표시"), ("hidden", "숨기기"), ("noprint", "보이지만 출력되지 않음"), ("noview", "숨겨졌지만 출력 가능"))
 BORDER_WIDTHS = ((1, "가늘게"), (2, "보통"), (3, "굵게"))
 BORDER_STYLES = (("S", "실선"), ("D", "대시"), ("B", "사선"), ("I", "삽입"), ("U", "밑줄"))
-FONTS = (("Helv", "Helvetica"), ("TiRo", "Times Roman"), ("Cour", "Courier"))
+FONTS = (("Helv", "Helvetica"), ("TiRo", "Times Roman"), ("Cour", "Courier"), ("Malgun", "맑은 고딕"))
 FONT_SIZES = (0, 5, 5.5, 6.5, 7.5, 8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72)
 CHECK_STYLES = (("check", "확인 표시", "4"), ("circle", "원", "l"), ("cross", "분기(십자)", "8"),
                 ("diamond", "다이아몬드", "u"), ("square", "사각형", "n"), ("star", "별모양", "H"))
@@ -326,8 +326,14 @@ def _fix_js(f: fitz.Document, x: int) -> None:
             f.xref_set_key(x, f"AA/{k}", f"<</S/JavaScript/JS{_pdf_str(text)}>>")
 
 
-def after_save(w: fitz.Widget, kept: list[tuple[str, str]]) -> None:
-    """annots.save_widget 이 w.update() 뒤에 부른다."""
+def uses_ko(f: fitz.Document, x: int) -> bool:
+    """DA 가 맑은 고딕인지. w.update() 는 기본 글꼴 아닌 이름을 Helv 로 되돌려서 그 전에 본다."""
+    da = f.xref_get_key(x, "DA")[1] or f.xref_get_key(_holder(f, x), "DA")[1] or ""
+    return f"/{KO_FONT} " in da
+
+
+def after_save(w: fitz.Widget, kept: list[tuple[str, str]], ko: bool = False) -> None:
+    """annots.save_widget 이 w.update() 뒤에 부른다. ko: update 전에 맑은 고딕이던 칸."""
     f = w.parent.parent
     _fix_js(f, w.xref)
     restore_actions(f, w.xref, kept)
@@ -337,6 +343,206 @@ def after_save(w: fitz.Widget, kept: list[tuple[str, str]]) -> None:
         apply_shown_text(w)
         restore_actions(f, w.xref, kept)
         _fix_js(f, w.xref)
+        korean_ap(f, w.xref, force=ko)
+        if w.field_type == fitz.PDF_WIDGET_TYPE_BUTTON:
+            draw_icon(f, w.xref)
+
+
+# ── 한글 글꼴 외관 ──────────────────────────────────────────────
+# MuPDF 는 Helvetica 로 못 쓰는 글자를 임베드하지 않은 바탕(Adobe-Korea1)으로 대신 그린다. 다른 뷰어·인쇄에선
+# 그 글꼴이 없으면 한글이 깨지고, DA 가 Helv 라 다른 뷰어가 외관을 다시 지을 때도 깨진다.
+# 그래서 MuPDF 가 지은 외관(자리·줄 나눔은 그대로)의 글자만 임베드한 맑은 고딕으로 바꿔 쓰고, DA·DR 에도 맑은 고딕을 넣는다.
+KO_FONT = "Malgun"
+_TMP_FONT = "FmKoTmp"
+_KO: dict = {}
+_TOK = re.compile(rb"<[0-9A-Fa-f\s]*>|\((?:\\.|[^\\)])*\)|/[^\s/<>\[\]()]+|[-+]?(?:\d+\.?\d*|\.\d+)|[A-Za-z'\"*]+")
+_BT = re.compile(rb"(?ms)^BT\s*$(.*?)^ET\s*$")
+_BASE14 = {"Helvetica": "helv", "Times": "tiro", "Courier": "cour", "Symbol": "symb", "ZapfDingbats": "zadb"}
+
+
+def _ko_font_obj() -> fitz.Font:
+    if "font" not in _KO:
+        from .fonts import korean_fontfile
+        _KO["font"] = fitz.Font(fontfile=korean_fontfile())
+        _KO["cjk"] = fitz.Font("korea")
+    return _KO["font"]
+
+
+def _subset(f: fitz.Document, x: int) -> bool:
+    return bool(re.match(r"/?[A-Z]{6}\+", f.xref_get_key(x, "BaseFont")[1] or ""))
+
+
+def ko_font(f: fitz.Document, page: fitz.Page) -> int:
+    """AcroForm/DR 의 맑은 고딕 글꼴 xref. 없거나 저장 때 줄인(subset) 것이면 새로 넣는다(줄인 글꼴엔 새 글자가 없다)."""
+    t, v = f.xref_get_key(f.pdf_catalog(), f"AcroForm/DR/Font/{KO_FONT}")
+    if t == "xref":
+        x = int(v.split()[0])
+        if not _subset(f, x):
+            return x
+    from .fonts import korean_fontfile
+    x = page.insert_font(fontname=_TMP_FONT, fontfile=korean_fontfile())
+    # 쪽 자원에는 남기지 않는다(쪽 내용은 이 글꼴을 안 쓴다)
+    holder, key = page.xref, f"Resources/Font/{_TMP_FONT}"
+    t, v = f.xref_get_key(holder, "Resources")
+    if t == "xref":
+        holder, key = int(v.split()[0]), f"Font/{_TMP_FONT}"
+    t, v = f.xref_get_key(holder, key.rsplit("/", 1)[0])
+    if t == "xref":
+        holder, key = int(v.split()[0]), _TMP_FONT
+    if f.xref_get_key(holder, key)[0] != "null":
+        del_keys(f, holder, [key])
+    f.xref_set_key(f.pdf_catalog(), f"AcroForm/DR/Font/{KO_FONT}", f"{x} 0 R")
+    return x
+
+
+def _unescape(b: bytes) -> bytes:
+    out, i = bytearray(), 0
+    esc = {ord("n"): 10, ord("r"): 13, ord("t"): 9, ord("b"): 8, ord("f"): 12}
+    while i < len(b):
+        c = b[i]
+        if c == 0x5C and i + 1 < len(b):
+            n = b[i + 1]
+            if 0x30 <= n <= 0x37:
+                m = re.match(rb"[0-7]{1,3}", b[i + 1:i + 4])
+                out.append(int(m.group(), 8) & 0xFF); i += 1 + len(m.group()); continue
+            out.append(esc.get(n, n)); i += 2; continue
+        out.append(c); i += 1
+    return bytes(out)
+
+
+def _font_kinds(f: fitz.Document, ap: int) -> dict[str, tuple[str, str]]:
+    """외관 자원의 글꼴 이름 → (종류, 기본14 이름). 종류: utf16 · simple · other."""
+    kinds = {}
+    t, v = f.xref_get_key(ap, "Resources/Font")
+    if t == "xref":
+        v = f.xref_object(int(v.split()[0]), compressed=True)
+    for name, x in re.findall(r"/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R", v or ""):
+        o = f.xref_object(int(x), compressed=True)
+        base = (re.search(r"/BaseFont\s*/([^\s/<>\[\]()]+)", o) or [None, ""])[1]
+        if "/Type0" in o:
+            kinds[name] = ("utf16" if "UTF16" in o else "other", "")
+        else:
+            kinds[name] = ("simple", next((v14 for k, v14 in _BASE14.items() if base.startswith(k)), "helv"))
+    return kinds
+
+
+def _rewrite_block(block: bytes, kinds: dict, k: float, keep_x: bool) -> bytes | None:
+    """BT…ET 안을 맑은 고딕 글리프로. k: 줄 폭이 바뀐 만큼 옮길 몫(왼쪽 0·가운데 .5·오른쪽 1)."""
+    font = _ko_font_obj()
+    items, ops, font_name, size = [], [], "", 0.0
+    lines = [[0.0, 0.0]]   # 줄마다 [옛 폭, 새 폭]
+    for m in _TOK.finditer(block):
+        tok = m.group()
+        if not (tok[:1].isalpha() or tok[:1] in b"'\"*"):
+            ops.append(tok); continue
+        if tok == b"Tf" and len(ops) >= 2:
+            font_name, size = ops[-2].decode("latin-1")[1:], float(ops[-1])
+        elif tok == b"Td" and len(ops) >= 2:
+            items.append(("td", float(ops[-2]), float(ops[-1]), len(lines)))
+            lines.append([0.0, 0.0])
+        elif tok == b"Tj" and ops:
+            s = ops[-1]
+            raw = bytes.fromhex(s[1:-1].decode().replace(" ", "")) if s[:1] == b"<" else _unescape(s[1:-1])
+            kind, b14 = kinds.get(font_name, ("other", ""))
+            if kind == "utf16":
+                text = raw.decode("utf-16-be", "replace")
+                old = _KO["cjk"].text_length(text, size)
+            elif kind == "simple":
+                text = raw.decode("cp1252", "replace")
+                old = fitz.get_text_length(text, b14, size)
+            else:
+                return None
+            lines[-1][0] += old
+            lines[-1][1] += font.text_length(text, size)
+            items.append(("tj", text, size))
+        else:
+            items.append(("raw", b" ".join(ops + [tok])))
+        ops = []
+    shift = [0.0 if keep_x else k * (o - n) for o, n in lines]
+    out = [b"BT"]
+    for it in items:
+        if it[0] == "td":
+            _, tx, ty, i = it
+            out.append(f"{tx + shift[i] - shift[i - 1]:.3f} {ty:.3f} Td".encode())
+        elif it[0] == "tj":
+            gids = "".join(f"{font.has_glyph(ord(c)):04x}" for c in it[1])
+            out.append(f"/{KO_FONT} {it[2]:g} Tf <{gids}> Tj".encode())
+        else:
+            out.append(it[1])
+    out.append(b"ET")
+    return b"\n".join(out) + b"\n"
+
+
+def _need_ko(f: fitz.Document, x: int, kinds: dict) -> bool:
+    da = f.xref_get_key(x, "DA")[1] or f.xref_get_key(_holder(f, x), "DA")[1] or ""
+    return f"/{KO_FONT} " in da or any(k == "utf16" for k, _ in kinds.values())
+
+
+def _set_da_font(f: fitz.Document, x: int) -> None:
+    for h in {x, _holder(f, x)}:
+        t, da = f.xref_get_key(h, "DA")
+        if t == "string" and f"/{KO_FONT} " not in da:
+            f.xref_set_key(h, "DA", _pdf_str(re.sub(r"/[^\s/<>\[\]()]+(\s+[-+.\d]+\s+Tf)", f"/{KO_FONT}\\1", da)))
+
+
+def korean_ap(f: fitz.Document, x: int, force: bool = False) -> bool:
+    """텍스트·콤보·목록·단추 칸 외관의 글자를 맑은 고딕으로. 바꿨으면 True."""
+    t, v = f.xref_get_key(x, "FT")
+    ft = v if t == "name" else f.xref_get_key(_holder(f, x), "FT")[1]
+    if ft not in ("/Tx", "/Ch", "/Btn"):
+        return False
+    if ft == "/Btn" and not _int(f, _holder(f, x), "Ff") & (1 << 16):   # 체크·라디오는 ZapfDingbats 그대로
+        return False
+    q = _int(f, x, "Q", _int(f, _holder(f, x), "Q"))
+    k = 0.5 if ft == "/Btn" else {1: 0.5, 2: 1.0}.get(q, 0.0)
+    comb = bool(_int(f, _holder(f, x), "Ff") & FF_COMB)
+    page = None
+    done = False
+    for state in ("N", "D", "R"):
+        t, v = f.xref_get_key(x, f"AP/{state}")
+        if t != "xref":
+            continue
+        ap = int(v.split()[0])
+        if not f.xref_is_stream(ap):
+            continue
+        kinds = _font_kinds(f, ap)
+        if not (force or _need_ko(f, x, kinds)):
+            continue
+        s = f.xref_stream(ap) or b""
+        parts, pos, ok = [], 0, True
+        for m in _BT.finditer(s):
+            nb = _rewrite_block(m.group(1), kinds, k, comb)
+            if nb is None:
+                ok = False; break
+            parts += [s[pos:m.start()], nb]
+            pos = m.end()
+        if not ok or not parts:
+            continue
+        if page is None:
+            pg = _page_of(f, x)
+            if pg is None:
+                return False
+            page = f[pg]
+            fx = ko_font(f, page)
+        f.update_stream(ap, b"".join(parts) + s[pos:])
+        f.xref_set_key(ap, "Resources/Font", f"<</{KO_FONT} {fx} 0 R>>")
+        done = True
+    if done:
+        _set_da_font(f, x)
+    return done
+
+
+def _page_of(f: fitz.Document, x: int) -> int | None:
+    t, v = f.xref_get_key(x, "P")
+    if t == "xref":
+        px = int(v.split()[0])
+        for i in range(f.page_count):
+            if f.page_xref(i) == px:
+                return i
+    for i in range(f.page_count):
+        if any(a[0] == x for a in f[i].annot_xrefs()):
+            return i
+    return 0 if f.page_count else None
 
 
 # ── 읽기 ────────────────────────────────────────────────────────
@@ -404,7 +610,8 @@ def read(doc, page: int, xref: int) -> dict:
         if kind == "button":
             d.update(layout=_int(f, xref, "MK/TP"), highlight=_str(f, xref, "H") or "I",
                      captions={"N": _str(f, xref, "MK/CA") or (w.button_caption or ""), "D": _str(f, xref, "MK/RC"),
-                               "R": _str(f, xref, "MK/AC")})
+                               "R": _str(f, xref, "MK/AC")},
+                     icons={k: f.xref_get_key(xref, key)[0] == "xref" for k, key in ICON_KEYS.items()})
         if kind in ("text", "combo"):
             d["format"] = C.parse_format(C.js_text(w.script_format), C.js_text(w.script_stroke))
             d["validate"] = C.parse_validate(C.js_text(w.script_change))
@@ -422,6 +629,9 @@ def read(doc, page: int, xref: int) -> dict:
 # ── 쓰기 ────────────────────────────────────────────────────────
 _WIDGET_KEYS = {"tooltip", "border_color", "fill_color", "border_width", "border_style", "font", "fontsize",
                 "text_color", "maxlen", "format", "validate", "calc", "selchange", "captions"}
+ICON_KEYS = {"N": "MK/I", "D": "MK/IX", "R": "MK/RI"}   # 위로·아래로·롤오버 아이콘
+ICON_FILTER = "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff)"
+ICON_DAMAGED = "파일을 로드하지 못했습니다. 파일이 손상되었는지 확인하세요."
 
 
 def _set_ff(f: fitz.Document, h: int, bit: int, on: bool) -> None:
@@ -483,6 +693,13 @@ def _write_one(f: fitz.Document, page: int, xref: int, ch: dict) -> None:
             w.border_dashes = [3] if ch["border_style"] == "D" else None
         if "font" in ch and not btn:
             w.text_font = ch["font"]
+            if ch["font"] == KO_FONT:   # update 가 Helv 로 되돌리므로 save_widget 이 보게 DA 에 먼저 적는다
+                f.xref_set_key(xref, "DA", _pdf_str(f"0 0 0 rg /{KO_FONT} 10 Tf"))
+            elif uses_ko(f, xref):
+                for h in {xref, _holder(f, xref)}:
+                    t, da = f.xref_get_key(h, "DA")
+                    if t == "string":
+                        f.xref_set_key(h, "DA", _pdf_str(da.replace(f"/{KO_FONT} ", f"/{ch['font']} ")))
         if "fontsize" in ch:
             w.text_fontsize = float(ch["fontsize"])
         if "text_color" in ch:
@@ -549,6 +766,16 @@ def _write_one(f: fitz.Document, page: int, xref: int, ch: dict) -> None:
         if f.xref_get_key(xref, "MK")[0] == "null":
             f.xref_set_key(xref, "MK", "<<>>")
         f.xref_set_key(xref, "MK/TP", str(int(ch["layout"])))
+        raw_ap = True
+    if "icon" in ch and kind == "button":
+        state, ix = ch["icon"]   # ix: 그림 파일 경로 또는 make_icon 의 xref, 빈 값이면 지우기
+        if isinstance(ix, str) and ix:
+            ix = make_icon(f, ix)
+        if f.xref_get_key(xref, "MK")[0] == "null":
+            f.xref_set_key(xref, "MK", "<<>>")
+        key = ICON_KEYS[state]
+        f.xref_set_key(xref, key, f"{ix} 0 R") if ix else del_keys(f, xref, [key])
+        raw_ap = True
     if "highlight" in ch and kind == "button":
         f.xref_set_key(xref, "H", f"/{ch['highlight']}")
     if "captions" in ch and kind == "button":
@@ -621,6 +848,11 @@ def is_locked(doc, xref: int) -> bool:
     return bool(_int(f, xref, "F") & F_LOCKED)
 
 
+def unlocked(doc, items: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """잠긴 칸을 뺀 (쪽, xref) 목록. 잠긴 칸은 옮기기·크기 바꾸기·지우기를 하지 않는다."""
+    return [(pg, x) for pg, x in items if not is_locked(doc, x)]
+
+
 def name_conflict(doc, items: list[tuple[int, int]], name: str) -> bool:
     """다른 종류 칸이 이미 그 이름을 쓰는지."""
     f = _f(doc)
@@ -660,3 +892,122 @@ def prepare_print(f: fitz.Document, pages) -> None:
                 p.delete_widget(w)
             elif fl & F_NOVIEW:
                 f.xref_set_key(w.xref, "F", str(fl & ~F_NOVIEW))
+
+
+# ── 단추 아이콘 ────────────────────────────────────────────────
+# 아이콘은 그림 한 장을 담은 폼 XObject(MK/I·IX·RI). 외관은 MuPDF 가 지은 단추(테두리·라벨)에
+# 레이아웃(MK/TP)대로 아이콘을 비례 맞춰 덧그리고, 라벨 자리를 옮긴다.
+ICON_NAME = "FmIcon"
+
+
+def make_icon(doc, path: str) -> int:
+    """그림 파일로 아이콘 폼 XObject 를 만든다. 못 읽으면 ValueError(ICON_DAMAGED)."""
+    import zlib
+    f = _f(doc)
+    try:
+        pix = fitz.Pixmap(path)
+    except Exception as e:
+        raise ValueError(ICON_DAMAGED) from e
+    with _lock(doc):
+        alpha = None
+        if pix.alpha:
+            alpha = bytes(pix.samples[pix.n - 1::pix.n])
+            pix = fitz.Pixmap(pix, 0)
+        if not pix.colorspace or pix.colorspace.n != 3:
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+        w, h = pix.width, pix.height
+        img = f.get_new_xref()
+        f.update_object(img, f"<</Type/XObject/Subtype/Image/Width {w}/Height {h}/ColorSpace/DeviceRGB/BitsPerComponent 8>>")
+        f.update_stream(img, zlib.compress(bytes(pix.samples)), compress=False)
+        f.xref_set_key(img, "Filter", "/FlateDecode")
+        if alpha is not None and any(a != 255 for a in alpha):
+            sm = f.get_new_xref()
+            f.update_object(sm, f"<</Type/XObject/Subtype/Image/Width {w}/Height {h}/ColorSpace/DeviceGray/BitsPerComponent 8>>")
+            f.update_stream(sm, zlib.compress(alpha), compress=False)
+            f.xref_set_key(sm, "Filter", "/FlateDecode")
+            f.xref_set_key(img, "SMask", f"{sm} 0 R")
+        form = f.get_new_xref()
+        f.update_object(form, f"<</Type/XObject/Subtype/Form/BBox[0 0 {w} {h}]/Resources<</XObject<</Im0 {img} 0 R>>>>>>")
+        f.update_stream(form, f"q {w} 0 0 {h} 0 0 cm /Im0 Do Q".encode())
+        return form
+
+
+def _fit(box: fitz.Rect, w: float, h: float) -> fitz.Rect:
+    """box 안에 w×h 를 비례 맞춰 가운데로."""
+    if box.width <= 0 or box.height <= 0 or w <= 0 or h <= 0:
+        return fitz.Rect()
+    s = min(box.width / w, box.height / h)
+    cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+    return fitz.Rect(cx - w * s / 2, cy - h * s / 2, cx + w * s / 2, cy + h * s / 2)
+
+
+_TD = re.compile(rb"([-+]?[\d.]+)\s+([-+]?[\d.]+)\s+Td")
+_TF = re.compile(rb"/[^\s/<>\[\]()]+\s+([-+]?[\d.]+)\s+Tf")
+
+
+def draw_icon(f: fitz.Document, x: int) -> bool:
+    """단추 외관(N·D)에 아이콘을 덧그린다. 그렸으면 True."""
+    tp = _int(f, x, "MK/TP")
+    if tp == 0:
+        return False
+    done = False
+    for state, ap_key in (("N", "AP/N"), ("D", "AP/D")):
+        t, v = f.xref_get_key(x, f"{ICON_KEYS[state]}")
+        if t != "xref" and state == "D":
+            t, v = f.xref_get_key(x, ICON_KEYS["N"])
+        if t != "xref":
+            continue
+        icon = int(v.split()[0])
+        ta, va = f.xref_get_key(x, ap_key)
+        if ta != "xref":
+            continue
+        ap = int(va.split()[0])
+        if not f.xref_is_stream(ap):
+            continue
+        bb = [float(n) for n in re.findall(r"[-+]?[\d.]+", f.xref_get_key(ap, "BBox")[1])]
+        ib = [float(n) for n in re.findall(r"[-+]?[\d.]+", f.xref_get_key(icon, "BBox")[1])]
+        if len(bb) != 4 or len(ib) != 4:
+            continue
+        W, H = bb[2] - bb[0], bb[3] - bb[1]
+        iw, ih = ib[2] - ib[0], ib[3] - ib[1]
+        bw = float(f.xref_get_key(x, "BS/W")[1] or 1) if f.xref_get_key(x, "BS/W")[0] != "null" else 1.0
+        pad = max(1.0, 3 * bw)   # 테두리 + 입체 테두리 안쪽
+        s = f.xref_stream(ap) or b""
+        m = _BT.search(s)
+        fs = float((_TF.search(m.group(1)) or [0, b"10"])[1]) if m else 10.0
+        fs = fs or 10.0
+        lh = fs * 1.25
+        side = min(H - 2 * pad, (W - 2 * pad) / 2)
+        # PDF 좌표(아래가 0): 상자는 (x0, y0, x1, y1) 아래→위
+        areas = {1: (pad, pad, W - pad, H - pad), 2: (pad, pad + lh, W - pad, H - pad),
+                 3: (pad, pad, W - pad, H - pad - lh), 4: (pad, pad, pad + side, H - pad),
+                 5: (W - pad - side, pad, W - pad, H - pad), 6: (pad, pad, W - pad, H - pad)}
+        r = _fit(fitz.Rect(*areas.get(tp, areas[1])), iw, ih)
+        if r.is_empty:
+            continue
+        draw = f"q {r.width / iw:.4f} 0 0 {r.height / ih:.4f} {r.x0 - ib[0] * r.width / iw:.3f} {r.y0 - ib[1] * r.height / ih:.3f} cm /{ICON_NAME} Do Q\n".encode()
+        if m:
+            block = m.group(0)
+            if tp == 1:
+                block = b""
+            else:
+                td = _TD.search(block)
+                if td:
+                    tx, ty = float(td.group(1)), float(td.group(2))
+                    if tp == 2:
+                        ty = pad + fs * 0.3
+                    elif tp == 3:
+                        ty = H - pad - fs * 0.95
+                    elif tp == 4:
+                        tx += side / 2
+                    elif tp == 5:
+                        tx -= side / 2
+                    block = block[:td.start()] + f"{tx:.3f} {ty:.3f} Td".encode() + block[td.end():]
+            s = s[:m.start()] + draw + block + s[m.end():]
+        else:
+            q = s.rfind(b"Q")
+            s = (s[:q] + draw + s[q:]) if q >= 0 else s + draw
+        f.update_stream(ap, s)
+        f.xref_set_key(ap, f"Resources/XObject/{ICON_NAME}", f"{icon} 0 R")
+        done = True
+    return done

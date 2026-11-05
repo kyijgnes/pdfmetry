@@ -1719,6 +1719,9 @@ def add_field(doc: Document, page: int, r: fitz.Rect, ftype: str, name: str | No
             doc._last_radio = group
             _radio_move(doc.fitz, x, group)
             _refresh_widget(p, x)
+        else:
+            from . import form_props
+            form_props.korean_ap(doc.fitz, annot.xref)   # 기본 단추 이름·한글 항목도 맑은 고딕으로
         return annot.xref
 
 
@@ -1790,10 +1793,11 @@ def save_widget(w: fitz.Widget) -> None:
         w.field_value = False
     from . import form_props
     kept = form_props.keep_actions(w.parent.parent, w.xref)   # update 가 지우는 자바스크립트 아닌 동작
+    ko = form_props.uses_ko(w.parent.parent, w.xref)   # update 가 맑은 고딕을 Helv 로 되돌린다
     w.update()
     if radio:
         _sync_radio(w.parent.parent, w.xref)
-    form_props.after_save(w, kept)   # 동작 되살리기 · 체크 모양 · 서식대로 보이는 글
+    form_props.after_save(w, kept, ko)   # 동작 되살리기 · 체크 모양 · 서식대로 보이는 글
 
 
 def reset_widget(w: fitz.Widget) -> None:
@@ -1803,6 +1807,8 @@ def reset_widget(w: fitz.Widget) -> None:
         save_widget(w)
     else:
         w.reset()  # field_value = "" 는 텍스트·콤보·목록에서 무시된다
+        from . import form_props
+        form_props.korean_ap(w.parent.parent, w.xref)
 
 
 def _rename_on(f: fitz.Document, x: int, old: str, new: str) -> None:

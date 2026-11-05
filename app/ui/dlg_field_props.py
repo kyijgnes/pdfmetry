@@ -502,7 +502,48 @@ class FieldPropsDialog(QDialog):
         keys = ("N", "D", "R")
         self.states.currentRowChanged.connect(lambda k: self.cap.setText(self.caps.get(keys[k], "")) if k >= 0 else None)
         self.cap.editingFinished.connect(self._caption)
+        self.icons = dict(self.p.get("icons", {"N": False, "D": False, "R": False}))
+        self.icon_state = QLabel()
+        self.icon_pick = QPushButton("아이콘 선택"); self.icon_pick.setAutoDefault(False)
+        self.icon_clear = QPushButton("지우기"); self.icon_clear.setAutoDefault(False)
+        self.icon_pick.clicked.connect(self._icon_pick)
+        self.icon_clear.clicked.connect(lambda: self._icon_set(""))
+        row = QHBoxLayout(); row.addWidget(self.icon_state, 1); row.addWidget(self.icon_pick); row.addWidget(self.icon_clear)
+        f.addRow("아이콘", row)
+        self.states.currentRowChanged.connect(lambda _k: self._icon_show())
+        lay.currentIndexChanged.connect(lambda _k: self._icon_show())
+        self.btn_layout = lay
         self.states.setCurrentRow(0)
+        self._icon_show()
+
+    def _icon_key(self) -> str:
+        return ("N", "D", "R")[max(0, self.states.currentRow())]
+
+    def _icon_show(self):
+        """레이아웃이 「라벨만」 이면 아이콘 단추를 끈다(알PDF 대로)."""
+        on = self.btn_layout.currentIndex() != 0
+        has = bool(self.icons.get(self._icon_key()))
+        self.icon_state.setText("그림 있음" if has else "없음")
+        self.icon_pick.setEnabled(on)
+        self.icon_clear.setEnabled(on and has)
+
+    def _icon_pick(self):
+        path, _ = QFileDialog.getOpenFileName(self, "아이콘 선택", "", P.ICON_FILTER)
+        if not path:
+            return
+        try:
+            import fitz
+            fitz.Pixmap(path)
+        except Exception:
+            QMessageBox.warning(self, "아이콘 선택", P.ICON_DAMAGED)
+            return
+        self._icon_set(path)
+
+    def _icon_set(self, path: str):
+        k = self._icon_key()
+        self.apply({"icon": (k, path)})
+        self.icons[k] = bool(path)
+        self._icon_show()
 
     def _caption(self):
         k = self.states.currentRow()

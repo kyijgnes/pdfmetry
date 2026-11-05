@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsScene, QGra
 
 from ..engine import annot_shapes as SH
 from ..engine import annots as A
+from ..engine import form_props as FP
 from ..engine import stamps as ST
 from ..engine.document import Document
 from . import context_menu as CM
@@ -1601,8 +1602,9 @@ class PageView(QGraphicsView):
                         self.sel_fields = [key]
                     self._set_widget_sel(i, w)
                     self._group_from = fitz.Rect(w.rect)
-                    self._moving_annot = True
-                    self._move_last = pt
+                    if not FP.is_locked(self.doc, w.xref):   # 잠긴 칸은 끌어도 그대로
+                        self._moving_annot = True
+                        self._move_last = pt
                     self.viewport().update()
                     return True
         return False
@@ -1757,6 +1759,12 @@ class PageView(QGraphicsView):
             A.delete(self.doc, s.page, s.xref)
         elif s.kind == "widget":
             items = self.sel_fields or [(s.page, s.xref)]
+            free = FP.unlocked(self.doc, items)
+            if len(free) < len(items):
+                self.status.emit("잠긴 칸은 지우지 않았습니다")
+            items = free
+            if not items:
+                return
             self.doc.snapshot()
             for pg, x in items:
                 A.delete_field(self.doc, pg, x, snapshot=False)
@@ -1804,7 +1812,7 @@ class PageView(QGraphicsView):
                 dx, dy = (s.rect.x0 - g.x0, s.rect.y0 - g.y0) if g is not None else (0, 0)
                 group = len(self.sel_fields) > 1 and self._resize_corner < 0
                 pages = set()
-                for pg, x in (self.sel_fields if group else [(s.page, s.xref)]):
+                for pg, x in FP.unlocked(self.doc, self.sel_fields if group else [(s.page, s.xref)]):
                     p = self.doc.fitz[pg]
                     pages.add(pg)
                     for w in p.widgets():

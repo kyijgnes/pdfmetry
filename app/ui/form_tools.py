@@ -109,13 +109,19 @@ def align(win, t, how: str) -> bool:
     items = v.sel_fields
     if len(items) < 2:
         return False
+    from ..engine import form_props as FP
+    sel, items = items, FP.unlocked(d, items)   # 잠긴 칸은 그 자리 그대로
+    if len(items) < len(sel):
+        win.say("잠긴 칸은 옮기지 않았습니다")
+    if not items:
+        return True
     from ..engine import tools as T
     if how in ("dist_h", "dist_v") and len(items) < 3:
         win.say("같은 간격으로 벌리려면 칸을 셋 이상 고르세요"); return True
     d.snapshot()
     T.align_widgets(d.fitz, items, how)
     t.changed(sorted({pg for pg, _ in items}))
-    v.select_fields(items)
+    v.select_fields(sel)
     return True
 
 
@@ -181,8 +187,9 @@ def _copies_dialog_class():
                 self.doc.snapshot()
                 self.moved = True
             d = (sx * self.STEP, sy * self.STEP, sx * self.STEP, sy * self.STEP)
+            from ..engine import form_props as FP
             with self.doc.lock:
-                for pg, x in self.items:
+                for pg, x in FP.unlocked(self.doc, self.items):
                     for w in self.doc.fitz[pg].widgets():
                         if w.xref == x:
                             w.rect = fitz.Rect(w.rect) + d
