@@ -245,7 +245,7 @@ class BatchDialog(QDialog):
         f.addRow("암호", row)
 
     def edit_security(self):
-        from .dialogs import EncryptDialog
+        from .dlg_security import EncryptDialog
         dlg = EncryptDialog(self, (self.security or {}).get("method"))
         dlg.form.setRowVisible(dlg.here.parentWidget(), False)   # 일괄은 늘 새 파일로
         if dlg.exec():

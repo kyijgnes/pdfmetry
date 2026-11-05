@@ -87,9 +87,12 @@ def keep_copy(f: fitz.Document, password: str | None = None) -> fitz.Document:
     암호도 내용도 없는 파일을 쓴다(10-19 2차 점검에서 확인). 그래서 열린 문서는 늘 KEEP 바이트로만 사본을 뜬다."""
     w = fitz.open("pdf", f.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP))
     pw = password if password is not None else getattr(f, "_pdfapp_pw", None)
-    if w.needs_pass and not w.authenticate(pw or ""):
+    locked = w.needs_pass
+    if locked and not w.authenticate(pw or ""):
         w.close()
         raise DocumentError("암호가 걸린 문서라 사본을 뜨지 못했습니다(열기 암호가 맞지 않음)")
+    if pw and not locked and (w.metadata or {}).get("encryption"):
+        w.authenticate(pw)   # 권한 암호만 걸린 문서: 풀어 둔 권한을 사본도 갖게
     w._pdfapp_pw = pw
     return w
 
@@ -255,10 +258,15 @@ class Document:
                     d = fitz.open("pdf", f.read())
         except Exception as e:  # noqa: BLE001
             raise DocumentError(f"열 수 없는 파일입니다 ({e})") from e
+        self.open_password = None   # 열기 암호(암호화 창의 가짜 글자 자리). 권한 암호로 열었으면 모른다
         if d.needs_pass:
-            if password is None or not d.authenticate(password):
+            rc = d.authenticate(password) if password is not None else 0
+            if not rc:
                 d.close()
                 raise NeedsPassword(path)
+            self.open_password = password if rc & 2 else None
+        elif password and (d.metadata or {}).get("encryption"):
+            d.authenticate(password)
         d._pdfapp_pw = password  # 사본을 뜰 때 같은 암호로 푼다(keep_copy)
         if not d.is_pdf:
             # 이미지·epub·xps 등은 PDF 로 바꿔 연다
@@ -274,8 +282,8 @@ class Document:
     def _load(self, data: bytes) -> fitz.Document:
         """저장·되돌리기 뒤 바이트에서 다시 연다. 암호 문서는 열 때 쓴 암호로 다시 푼다."""
         d = fitz.open("pdf", data)
-        if d.needs_pass and self.password:
-            d.authenticate(self.password)
+        if self.password and (d.needs_pass or (d.metadata or {}).get("encryption")):
+            d.authenticate(self.password)   # 권한 암호만 걸린 문서도 풀어 둔 권한을 다시 갖게
         d._pdfapp_pw = self.password
         self._apply_layers(d)
         return d
@@ -371,6 +379,7 @@ class Document:
             self.fitz.close()
             if sec is not None:
                 self.password = pw   # 다시 열 때와 되돌리기에 새 암호를 쓴다
+                self.open_password = (sec or {}).get("user_pw") or None
             self.fitz = self._load(data)
             self.path = target
             self.modified = False

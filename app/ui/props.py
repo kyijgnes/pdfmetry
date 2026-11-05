@@ -132,6 +132,8 @@ class PropsPanel(QWidget):
         # 칸을 떠날 때 바로 적용(적용 단추 없음)
         self.author.editingFinished.connect(self._apply_info); self.subject.editingFinished.connect(self._apply_info)
         self.content.installEventFilter(self)
+        from .dlg_redact import RedactProps
+        self.redact_props = RedactProps(viewer); lay.addWidget(self.redact_props)   # 교정 도구·교정 표시
         self.del_btn = QPushButton("고른 주석 삭제"); self.del_btn.clicked.connect(self.deleteSel.emit); lay.addWidget(self.del_btn)
         lay.addStretch()
         self._align_labels(body)
@@ -213,6 +215,7 @@ class PropsPanel(QWidget):
         self.lock.setVisible(self.sel is not None)
         self.edit_props.show_sel(sel if self.key is None else None)
         self._layout_rows()
+        self.redact_props.show_sel(sel, tool)
 
     def _layout_rows(self):
         fs = self._fields()
