@@ -272,17 +272,20 @@ def _key(o: dict):
 
 
 def align(win, t, how: str) -> None:
-    """고른 객체들을 보이는 화면(쪽 회전 반영) 기준으로 맞추거나 분배한다. 한 걸음."""
+    """고른 객체들을 보이는 화면(쪽 회전·보기 회전 반영) 기준으로 맞추거나 분배한다. 한 걸음."""
     v, d = t.viewer, t.doc
     page, items = picked_objects(v)
     if len(items) < need(how):
         win.say("같은 간격으로 벌리려면 셋 이상 고르세요" if how.startswith("dist") else "맞출 객체를 둘 이상 고르세요")
         return
     p = d.fitz[page]
-    rot, back = p.rotation_matrix, p.derotation_matrix
+    rot, bounds = p.rotation_matrix, fitz.Rect(p.rect)
+    if getattr(v, "view_rot", 0):   # 보기 회전까지 거친 화면에서 왼쪽·위
+        rot, bounds = rot * v.view_matrix(page), fitz.Rect(v.page_rect_pt(page))
+    back = ~rot
     olds = [fitz.Rect(it["rect"]) for it in items]
     vis = [(r * rot).normalize() for r in olds]
-    news = O.arrange(vis, how, fitz.Rect(p.rect))
+    news = O.arrange(vis, how, bounds)
     moves = []
     for it, old, nv in zip(items, olds, news):
         nb = (nv * back).normalize()

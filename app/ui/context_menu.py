@@ -294,7 +294,7 @@ def _blank(v, m: QMenu, i: int, sp: QPointF):
 def page_targets(v, i: int) -> list[tuple[str, int, fitz.Rect]]:
     """i 쪽의 초점 대상 (종류, xref, 쪽 좌표 네모), 화면에서 위→아래·왼→오른쪽 차례. 종류: annot · link · widget."""
     f = v.doc.fitz[i]
-    rot = f.rotation_matrix
+    rot = f.rotation_matrix * v.view_matrix(i) if getattr(v, "view_rot", 0) else f.rotation_matrix   # 돌린 화면의 위→아래
     out: list[tuple[str, int, fitz.Rect]] = []
     if v.show_annots:
         for a in f.annots():
@@ -373,5 +373,5 @@ def _select(v, i: int, t: tuple[str, int, fitz.Rect]):
 def _reveal(v, i: int, rect: fitz.Rect):
     """고른 네모가 화면에 들어오게(보기 회전·쪽 회전을 거친 장면 좌표로)."""
     if v.layout_mode in ("single", "facing") and i not in v.visible_pages_for_layout():
-        v.goto(i, rect.y0)
+        v.goto(i, rect.y0, rect=rect)
     v.ensureVisible(v.from_page_rect(i, rect), 60, 60)

@@ -105,7 +105,7 @@ class RedactPanel(QWidget):
     def _goto(self, it: QListWidgetItem):
         h = self.hits[self.list.row(it)]
         r = h["rects"][0] if h["rects"] else None
-        self.tab.viewer.goto(h["page"], r.y0 if r is not None else None)
+        self.tab.viewer.goto(h["page"], r.y0 if r is not None else None, rect=r)
 
     def checked(self) -> list[int]:
         return [i for i in range(self.list.count()) if self.list.item(i).checkState() == Qt.CheckState.Checked]
