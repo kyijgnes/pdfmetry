@@ -55,7 +55,7 @@ def annot_spec(doc: Document, page: int, xref: int) -> dict | None:
             e["stamp"] = _stamp_face(f, a)
             e["name"] = (f.xref_get_key(xref, "Name")[1] or "").lstrip("/")
         if kind == "FileAttachment":
-            fi = a.file_info
+            fi = A.attach_info(a)
             e["file"] = {"data": a.get_file(), "name": fi.get("filename", "file"), "desc": fi.get("description", ""),
                          "icon": (f.xref_get_key(xref, "Name")[1] or "/PushPin").lstrip("/")}
         keys = {k: f.xref_get_key(xref, k) for k in MEASURE_KEYS}
@@ -110,6 +110,28 @@ def _map_spec(e: dict, m: fitz.Matrix, turn: int = 0) -> dict:
     return e
 
 
+def _turn_png(img: bytes, turn: int) -> bytes:
+    """스탬프 외관 그림을 쪽 회전 turn(시계 방향 90 배수)에 맞춰 돌린 PNG(stamps.render_png 와 같은 방향, 알파 유지)."""
+    pix = fitz.Pixmap(img)
+    tmp = fitz.open()
+    try:
+        pg = tmp.new_page(width=max(1, pix.width), height=max(1, pix.height))
+        pg.insert_image(pg.rect, stream=img)
+        return pg.get_pixmap(matrix=fitz.Matrix(1, 1).prerotate(-turn), alpha=True).tobytes("png")
+    finally:
+        tmp.close()
+
+
+def _turn_rect(r: fitz.Rect, turn: int) -> fitz.Rect:
+    """가운데를 그대로 두고 90·270 이면 가로·세로를 바꾼 네모(회전이 다른 쪽에 붙일 때 보이는 크기를 지킨다)."""
+    r = fitz.Rect(r)
+    if turn % 180 == 0:
+        return r
+    c = (r.tl + r.br) / 2
+    w, h = r.height / 2, r.width / 2
+    return fitz.Rect(c.x - w, c.y - h, c.x + w, c.y + h)
+
+
 # ── 붙이기 ───────────────────────────────────────────────────────
 def _put(doc: Document, page: int, e: dict) -> int | None:
     """자료 하나를 쪽에 만든다(실행 취소 자리는 부르는 쪽이 잡음). 새 xref."""
@@ -121,7 +143,11 @@ def _put(doc: Document, page: int, e: dict) -> int | None:
     op = e.get("opacity")
     op = op if op is not None and op >= 0 else 1.0
     if kind == "Stamp":
-        a = p.add_stamp_annot(r, stamp=e["stamp"]["image"])
+        img = e["stamp"]["image"]
+        turn = (p.rotation - e.get("page_rotation", p.rotation)) % 360
+        if turn:                     # 외관 그림은 원본 쪽 회전에 맞춰 돌려 구운 것: 이 쪽 회전만큼 더 돌린다
+            img = _turn_png(img, turn)
+        a = p.add_stamp_annot(r, stamp=img)
         if e.get("name"):
             f.xref_set_key(a.xref, "Name", "/" + e["name"])
         a = p.load_annot(a.xref)
@@ -134,8 +160,7 @@ def _put(doc: Document, page: int, e: dict) -> int | None:
         fd = e["file"]
         icon = fd.get("icon") if fd.get("icon") in A.ATTACH_ICONS else "PushPin"
         a = p.add_file_annot(r.tl, fd["data"], fd["name"], desc=fd.get("desc") or fd["name"], icon=icon)
-        for k in ("F", "UF"):   # PyMuPDF 는 한글 파일 이름을 UTF-8 바이트 그대로 적어 깨진다: 글자열로 다시 쓴다
-            f.xref_set_key(a.xref, f"FS/{k}", fitz.get_pdf_str(fd["name"]))
+        A.set_attach_name(f, a.xref, fd["name"])
         if cols.get("stroke"):
             a.set_colors(stroke=cols["stroke"])
         if op < 1:
@@ -171,8 +196,12 @@ def paste_annots(doc: Document, page: int, specs: Sequence[dict], dx: float = 0,
     m = fitz.Matrix(1, 0, 0, 1, dx, dy)
     out = []
     with doc.lock, _one_step(doc):
+        rot = doc.fitz[page].rotation
         for e in specs:
-            x = _put(doc, page, _map_spec(e, m))
+            e = _map_spec(e, m)
+            if e["type"] == "Stamp":     # 회전이 다른 쪽에 붙이면 보이는 가로·세로를 지킨다(그림은 _put 이 돌림)
+                e["rect"] = list(_turn_rect(e["rect"], rot - e.get("page_rotation", rot)))
+            x = _put(doc, page, e)
             if x:
                 out.append(x)
     return out

@@ -132,7 +132,7 @@ def test_values_after_save_reopen(doc):
     m = A.measure_info(back, 0, new["measure"])
     assert m["ratio"] == "1 cm = 2 m" and m["value"] == "5.29 cm" and m["kind"] == "distance"
     a = A.get(back, 0, new["attach"])
-    assert a.get_file() == "첨부 내용".encode("utf-8") and a.file_info["filename"] == src["attach"]["file"]["name"]
+    assert a.get_file() == "첨부 내용".encode("utf-8") and A.attach_info(a)["filename"] == src["attach"]["file"]["name"] == "메모.txt"
     assert back.fitz.xref_get_key(new["stamp"], "Subtype")[1] == "/Stamp"
     assert back.fitz.xref_get_key(new["stamp"], "Name")[1] == "/" + src["stamp"]["name"]
 

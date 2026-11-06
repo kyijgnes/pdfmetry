@@ -770,11 +770,35 @@ ATTACH_ICONS = ("Graph", "Paperclip", "PushPin", "Tag")
 def attachment(doc: Document, page: int, point: fitz.Point, path: str, author: str = "", icon: str = "PushPin",
                color: Color | None = None, opacity: float | None = None) -> int:
     doc.snapshot()
+    name = os.path.basename(path)
     with doc.lock:
-        a = doc.fitz[page].add_file_annot(point, open(path, "rb").read(), os.path.basename(path),
-                                          desc=os.path.basename(path), icon=icon if icon in ATTACH_ICONS else "PushPin")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        a = doc.fitz[page].add_file_annot(point, data, name, desc=name, icon=icon if icon in ATTACH_ICONS else "PushPin")
+        set_attach_name(doc.fitz, a.xref, name)
         _finish(a, stroke=color, opacity=opacity, author=author)
         return a.xref
+
+
+def set_attach_name(f: fitz.Document, xref: int, name: str) -> None:
+    """첨부 주석의 파일 이름(/FS 의 /F·/UF)을 PDF 글자열로 적는다(한글이 UTF-8 낱바이트로 들어가지 않게)."""
+    for k in ("F", "UF"):
+        f.xref_set_key(xref, f"FS/{k}", fitz.get_pdf_str(name))
+
+
+def attach_info(a: fitz.Annot) -> dict:
+    """첨부 주석의 file_info, 파일 이름은 바르게 풀어서. PyMuPDF 의 file_info 는 한글 이름을 낱바이트로 깨뜨린다."""
+    from .document import _unmangle   # 다른 프로그램이 UTF-8 낱바이트로 적은 이름도 되살린다
+    fi = dict(a.file_info)
+    f = a.parent.parent
+    for k in ("UF", "F"):
+        t, v = f.xref_get_key(a.xref, f"FS/{k}")
+        if t == "string" and v:
+            fi["filename"] = _unmangle(v)
+            break
+    else:
+        fi["filename"] = _unmangle(fi.get("filename") or "")
+    return fi
 
 
 # ── 주석 내보내기 · 가져오기(JSON) ──────────────────────────────────
@@ -1561,7 +1585,9 @@ def transform_image(doc: Document, page: int, xref: int, rect: fitz.Rect, *, rot
             nr.normalize()
             sx, sy = nr.width / max(b.width, 1e-6), nr.height / max(b.height, 1e-6)
             m_new = m_new * fitz.Matrix(1, 0, 0, 1, -b.x0, -b.y0) * fitz.Matrix(sx, sy) * fitz.Matrix(1, 0, 0, 1, nr.x0, nr.y0)
-        tm = p.transformation_matrix                  # PDF 좌표 → 쪽 좌표
+        # PDF 좌표 → 회전 전 쪽 좌표. page.transformation_matrix 는 돌린 쪽에서 미디어 상자 시작점을 빠뜨려 직접 짓는다
+        cb, mb = p.cropbox, p.mediabox
+        tm = fitz.Matrix(1, 0, 0, -1, -cb.x0, mb.y1 - cb.y0)
         flip = fitz.Matrix(1, 0, 0, -1, 0, 1)         # MuPDF 는 그림 단위 네모를 위아래 뒤집어 쓴다
         old_total, new_total = flip * m_old * ~tm, flip * m_new * ~tm
         outer = old_total if prev is None else ~prev * old_total   # 그림 줄 바깥의 좌표계

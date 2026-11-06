@@ -1273,7 +1273,7 @@ class AttachmentPanel(_Prefs, QWidget):
             for i in range(self.doc.page_count):
                 for a in self.doc.fitz[i].annots(types=[fitz.PDF_ANNOT_FILE_ATTACHMENT]) or []:
                     try:
-                        fi = a.file_info
+                        fi = A.attach_info(a)
                     except Exception:  # noqa: BLE001
                         continue
                     name = fi.get("filename") or "첨부"
