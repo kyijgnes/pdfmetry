@@ -949,8 +949,9 @@ class PageView(QGraphicsView):
     # ── 이동 ──────────────────────────────────────────────────
     HISTORY = 50  # 이전 보기로 돌아갈 수 있는 자리 수
 
-    def goto(self, i: int, y_pt: float | None = None, remember: bool = True):
-        """i 쪽으로(y_pt 를 주면 그 높이가 위에서 조금 아래에 오게). 다른 쪽으로 건너뛰면 떠나는 자리를 「이전 보기」 에 남긴다."""
+    def goto(self, i: int, y_pt: float | None = None, remember: bool = True, rect: fitz.Rect | None = None):
+        """i 쪽으로(y_pt 를 주면 그 높이가 위에서 조금 아래에 오게). 다른 쪽으로 건너뛰면 떠나는 자리를 「이전 보기」 에 남긴다.
+        y_pt 는 회전 전 쪽의 높이라 쪽이나 화면이 돌았으면 맞지 않는다. 그때는 rect(회전 전 쪽 좌표)가 돌린 화면에서 놓인 자리로 간다."""
         if self.closed:
             return
         i = max(0, min(i, self.doc.page_count - 1))
@@ -962,9 +963,15 @@ class PageView(QGraphicsView):
             self.relayout()
         it = self.items[i]
         y = it.pos().y() - 8
-        if y_pt is not None:
+        sr = None
+        if rect is not None and (self.view_rot or self.doc.fitz[i].rotation):
+            sr = self.from_page_rect(i, rect)
+            y = sr.top() - 40
+        elif y_pt is not None:
             y = it.pos().y() + y_pt * self.zoom - 40
         self.verticalScrollBar().setValue(int(y))
+        if sr is not None:   # 돌린 쪽은 가로로 넓어 옆으로도 들어오게
+            self.ensureVisible(sr, 60, 0)
         if self.current != i:
             self.current = i
             self.pageChanged.emit(i)

@@ -251,7 +251,7 @@ class DocTab(QWidget):
         self.bookmarks.tocMade.connect(lambda n: self.changed(None, structural=True,
                                                               mapping=[None] * n + list(range(self.doc.page_count - n))))
         self.attachments.openPdf.connect(lambda path: self.win.open_path(path))
-        self.fieldlist.gotoField.connect(lambda pg, r: self.viewer.goto(pg, r.y0))
+        self.fieldlist.gotoField.connect(lambda pg, r: self.viewer.goto(pg, r.y0, rect=r))
         self.viewer.pageChanged.connect(self.thumbs.set_current)
         self.viewer.selectionChanged.connect(self.props.show_selection)
         self.props.applyToSel.connect(self.apply_props)
@@ -313,7 +313,7 @@ class DocTab(QWidget):
         if 0 <= current < len(hits) and (self.search.jump if jump is None else jump):
             pg, rs = hits[current]
             r = rs[0] if isinstance(rs, list) else rs
-            self.viewer.goto(pg, max(0, r.y0 - 100))
+            self.viewer.goto(pg, max(0, r.y0 - 100), rect=r)
         self.viewer.viewport().update()
 
     def pick_annot(self, page: int, xref: int):
@@ -323,7 +323,7 @@ class DocTab(QWidget):
         if a is None:
             return
         v = self.viewer
-        v.goto(page, a.rect.y0)
+        v.goto(page, a.rect.y0, rect=fitz.Rect(a.rect))
         v.sel = Selection("annot", page, xref, fitz.Rect(a.rect), text=a.info.get("content", ""),
                           extra={"kind": a.type[1], "kind_ko": A.KIND_NAMES.get(a.type[1], a.type[1]),
                                  "colors": A.annot_colors(self.doc, a), "opacity": a.opacity,
