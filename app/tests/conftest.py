@@ -38,13 +38,18 @@ def sweep():
         QApplication.clipboard().clear()   # offscreen Qt 는 HTML 클립보드를 남기면 죽는다
     except Exception:
         pass
+    try:
+        from app.ui.window import MainWindow
+    except Exception:
+        MainWindow = None
     tops = [w for w in QApplication.topLevelWidgets() if shiboken6.isValid(w) and w.parent() is None]
     for w in tops:
-        for t in list(getattr(w, "tabs", None) or []):   # 저장을 묻지 않게
-            try:
-                t.doc.modified = False
-            except Exception:
-                pass
+        if MainWindow is not None and isinstance(w, MainWindow):
+            for t in list(w.tabs):   # 저장을 묻지 않게
+                try:
+                    t.doc.modified = False
+                except Exception:
+                    pass
         if w.isVisible():
             try:
                 w.close()
@@ -62,6 +67,10 @@ def sweep():
         app.processEvents()
     gc.collect()
     return len(QApplication.allWidgets())
+
+
+def pytest_sessionfinish(session, exitstatus):
+    sweep()   # 끝낼 때 남은 위젯이 없어야 파이썬이 내려가며 Qt 를 정리하다 죽지 않는다
 
 
 @pytest.fixture(autouse=True)
