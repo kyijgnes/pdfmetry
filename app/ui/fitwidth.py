@@ -5,9 +5,9 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QRect
-from PySide6.QtWidgets import (QAbstractSpinBox, QComboBox, QLineEdit, QStyle, QStyleOptionComboBox, QStyleOptionFrame,
-                               QStyleOptionSpinBox, QWidget)
+from PySide6.QtCore import QEvent, QObject, QRect, Qt
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QStyle, QStyleOptionComboBox, QStyleOptionFrame,
+                               QStyleOptionSpinBox, QStylePainter, QWidget)
 
 PROBE = 1000      # 테두리·여백을 재려고 대 보는 넉넉한 폭
 LINE_MARGIN = 2   # QLineEdit 이 글자 양옆에 두는 안쪽 여백(Qt 고정값)
@@ -127,3 +127,90 @@ def list_need(lst, lines) -> int:
 def fit_list(lst, lines, floor: int = 0) -> int:
     """목록 폭을 가장 긴 항목 글줄에 맞춰 고정한다. 스타일이 바뀌면 다시 잰다."""
     return _keep(lst, lines, floor, list_need)
+
+
+ELLIPSIS = "…"
+
+
+def distinct_elide(text: str, others, fm, width: int) -> str:
+    """text 를 width 안에 넣되, 같은 머리를 가진 다른 이름과 갈리는 부분(끝의 「(69)」, IP 주소 끝 등)은 남긴다.
+
+    다른 이름과 같은 머리 가운데 가장 긴 것까지를 앞에서 줄이고, 거기서부터 끝까지를 뒤에 그대로 둔다.
+    뒷부분만으로도 넘치면 뒷부분의 끝 쪽을 남긴다.
+    """
+    if fm.horizontalAdvance(text) <= width:
+        return text
+    common = 0
+    for o in others:
+        if o == text:
+            continue
+        n = 0
+        for a, b in zip(text, o):
+            if a != b:
+                break
+            n += 1
+        common = max(common, n)
+    cut = min(common, len(text) - 1)
+    while cut > 0 and not text[cut - 1].isspace() and text[cut - 1].isalnum() and text[cut].isalnum():
+        cut -= 1                                  # 낱말 가운데서 끊지 않는다(「PCL(69)」의 「6」만 남지 않게)
+    if cut > 0 and text[cut - 1] in "([{（":
+        cut -= 1
+    tail = text[cut:] if common else ""
+    room = width - fm.horizontalAdvance(ELLIPSIS)
+    if not tail or fm.horizontalAdvance(tail) > room:
+        # 갈리는 부분이 없거나 그것만으로 넘치면 끝 쪽을 남긴다
+        keep = text[cut:] if tail else text
+        while keep and fm.horizontalAdvance(ELLIPSIS + keep) > width:
+            keep = keep[1:]
+        if not tail:                               # 다른 이름과 겹치지 않으면 보통처럼 앞을 남긴다
+            return fm.elidedText(text, Qt.TextElideMode.ElideRight, width)
+        return ELLIPSIS + keep
+    head = text[:cut]
+    room -= fm.horizontalAdvance(tail)
+    while head and fm.horizontalAdvance(head) > room:
+        head = head[:-1]
+    return head.rstrip() + ELLIPSIS + tail
+
+
+class NameCombo(QComboBox):
+    """긴 이름(프린터 등)을 고르는 목록. 펼친 목록은 가장 긴 이름이 다 보이게 넓히고(화면 폭까지),
+    닫힌 칸이 좁으면 이름끼리 다른 부분이 남도록 줄여 그린다."""
+
+    def names(self) -> list[str]:
+        return [self.itemText(i) for i in range(self.count())]
+
+    def shown_text(self, width: int | None = None) -> str:
+        """닫힌 칸에 그릴 글자(칸이 좁으면 줄인 것)."""
+        if width is None:
+            width = self._label_width()
+        return distinct_elide(self.currentText(), self.names(), self.fontMetrics(), width)
+
+    def _label_width(self) -> int:
+        opt = QStyleOptionComboBox(); self.initStyleOption(opt)
+        r = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, opt, QStyle.SubControl.SC_ComboBoxEditField, self)
+        return r.width() - 2 * LINE_MARGIN
+
+    def paintEvent(self, e):
+        p = QStylePainter(self)
+        opt = QStyleOptionComboBox(); self.initStyleOption(opt)
+        p.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
+        opt.currentText = self.shown_text()
+        p.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opt)
+
+    def popup_width(self) -> int:
+        """펼친 목록이 가장 긴 이름을 다 보이게 하는 바깥 폭(목록 테두리·여백·세로 막대 포함)."""
+        v = self.view()
+        box = v.window()
+        chrome = box.width() - v.viewport().width() if box.isVisible() else 2 * v.frameWidth() + 8
+        return v.sizeHintForColumn(0) + chrome + 4
+
+    def showPopup(self):
+        super().showPopup()
+        box = self.view().window()
+        need = self.popup_width()
+        if need <= box.width():
+            return
+        scr = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        w = min(need, scr.width())
+        x = max(scr.left(), min(box.x(), scr.right() + 1 - w))
+        box.setGeometry(x, box.y(), w, box.height())

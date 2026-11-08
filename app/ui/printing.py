@@ -706,7 +706,7 @@ class PrintDialog(QDialog):
         left = self._column("printcol"); lv = left.layout()
         self._head(lv, "프린터", first=True)
         prow = QHBoxLayout(); prow.setSpacing(6)
-        self.printer = QComboBox(); self.printer.setMinimumWidth(60)
+        self.printer = fitwidth.NameCombo(); self.printer.setMinimumWidth(60)
         names = QPrinterInfo.availablePrinterNames()
         self.printer.addItems(names)
         want = r.get("printer") if r.get("printer") in names else QPrinterInfo.defaultPrinterName()
@@ -914,7 +914,8 @@ class PrintDialog(QDialog):
         self.prev_btn.clicked.connect(lambda: self._go(self._idx - 1)); self.next_btn.clicked.connect(lambda: self._go(self._idx + 1))
         self.pos.editingFinished.connect(self._pos_entered)
         self._set_advanced(self._advanced, adjust=False)
-        self.resize(self.COL_W * (2 if self._advanced else 1) + 525, 637)
+        self.left_w = self._fit_left(left)
+        self.resize(self.left_w + (self.COL_W if self._advanced else 0) + 525, 637)
         self._refresh()
 
     # ── 짓는 도우미 ──
@@ -922,6 +923,16 @@ class PrintDialog(QDialog):
         w = QWidget(); w.setObjectName(name); w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         w.setFixedWidth(self.COL_W)
         v = QVBoxLayout(w); v.setContentsMargins(24, 18, 18, 14); v.setSpacing(8)
+        return w
+
+    def _fit_left(self, left: QWidget) -> int:
+        """왼쪽 열을 가장 긴 프린터 이름이 다 보이는 폭으로 넓힌다(원래 폭의 1.5배와 화면 폭의 1/4 가운데 큰 것까지). 정한 폭을 돌려준다."""
+        m = left.layout().contentsMargins()
+        row = (m.left() + m.right() + fitwidth.need(self.printer, self.printer.names())
+               + 6 + self.props_btn.sizeHint().width())
+        scr = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        w = max(self.COL_W, min(row, max(self.COL_W * 3 // 2, scr.width() // 4)))
+        left.setFixedWidth(w)
         return w
 
     def _head(self, lay, text: str, first: bool = False):

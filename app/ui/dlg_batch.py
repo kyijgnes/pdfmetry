@@ -263,7 +263,7 @@ class BatchDialog(QDialog):
 
     def _build_print(self, f: QFormLayout):
         from PySide6.QtPrintSupport import QPrinterInfo
-        self.printer = QComboBox(); self.printer.addItems(QPrinterInfo.availablePrinterNames())
+        self.printer = fitwidth.NameCombo(); self.printer.addItems(QPrinterInfo.availablePrinterNames())
         self.printer.setCurrentText(QPrinterInfo.defaultPrinterName())
         f.addRow("프린터", self.printer)
 

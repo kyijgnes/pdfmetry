@@ -1,0 +1,99 @@
+"""인쇄 대화상자 프린터 칸: 머리가 같은 긴 프린터 이름이 화면에서 구분되는지.
+
+python -m pytest app/tests/test_printer_names.py
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+os.environ.setdefault("APPDATA", tempfile.mkdtemp(prefix="rpdf_prnames_test_"))
+
+import fitz  # noqa: E402
+import pytest  # noqa: E402
+from PySide6.QtGui import QFontMetrics  # noqa: E402
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget  # noqa: E402
+
+app = QApplication.instance() or QApplication(sys.argv[:1])
+
+from app.ui import fitwidth as FW  # noqa: E402
+from app.ui import printing as PR  # noqa: E402
+
+NAMES = ["PDF메트리", "SINDOH N923 PCL (19층)", "SINDOH N803 PCL 192.168.0.68",
+         "SINDOH N800/MF Series PCL(69)", "SINDOH N800/MF Series PCL(68)"]
+
+
+def pump():
+    for _ in range(3):
+        app.processEvents()
+
+
+@pytest.fixture
+def fake_printers(monkeypatch):
+    class Info(PR.QPrinterInfo):
+        @staticmethod
+        def availablePrinterNames():
+            return list(NAMES)
+
+        @staticmethod
+        def defaultPrinterName():
+            return NAMES[3]
+    monkeypatch.setattr(PR, "QPrinterInfo", Info)
+
+
+@pytest.mark.parametrize("width", [60, 90, 120, 160, 200])
+def test_elide_keeps_distinct_part(width):
+    fm = QFontMetrics(app.font())
+    shown = [FW.distinct_elide(t, NAMES, fm, width) for t in NAMES]
+    for t, s in zip(NAMES, shown):
+        assert fm.horizontalAdvance(s) <= width, (t, s)
+    pcl = shown[3:]
+    assert pcl[0] != pcl[1]
+    if width >= 90:   # 끝의 번호가 괄호째 남는다
+        assert pcl[0].endswith("(69)") and pcl[1].endswith("(68)")
+        assert len(set(shown)) == len(shown), shown
+
+
+def test_elide_untouched_when_fits():
+    fm = QFontMetrics(app.font())
+    for t in NAMES:
+        assert FW.distinct_elide(t, NAMES, fm, 10 ** 4) == t
+
+
+def test_dialog_shows_whole_name(fake_printers):
+    d = fitz.open(); d.new_page()
+    dlg = PR.PrintDialog(None, d, 0, None)
+    dlg.show(); pump()
+    try:
+        c = dlg.printer
+        assert isinstance(c, FW.NameCombo)
+        assert dlg.left_w > dlg.COL_W           # 긴 이름에 맞춰 왼쪽 열이 넓어진다
+        fm, room = c.fontMetrics(), c._label_width()
+        shown = []
+        for t in NAMES:
+            c.setCurrentText(t); pump()
+            shown.append(c.shown_text())
+            if fm.horizontalAdvance(t) <= room:    # 열 폭 상한 안이면 이름 전체
+                assert shown[-1] == t
+        assert len(set(shown)) == len(NAMES), shown   # 상한에 걸려 줄여도 서로 구분된다
+    finally:
+        dlg.close(); d.close()
+
+
+def test_popup_wider_than_narrow_combo():
+    host = QWidget(); lay = QVBoxLayout(host)
+    c = FW.NameCombo(); c.addItems(NAMES); c.setFixedWidth(150); lay.addWidget(c)
+    host.show(); pump()
+    try:
+        c.showPopup(); pump()
+        v = c.view()
+        assert v.window().width() > c.width()
+        assert v.viewport().width() >= v.sizeHintForColumn(0)
+        # 칸이 좁아도 닫힌 칸 글자는 갈리는 끝이 남는다
+        c.setCurrentIndex(3); a = c.shown_text()
+        c.setCurrentIndex(4); b = c.shown_text()
+        assert a != b and a.endswith("9)") and b.endswith("8)")
+    finally:
+        c.hidePopup(); host.close()
