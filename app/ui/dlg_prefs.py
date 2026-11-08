@@ -209,7 +209,11 @@ class PreferencesDialog(QDialog):
         on = printer.installed()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
+            if on:
+                printer.stop_listener()
             code = printer.run_elevated(printer.UNINSTALL_FLAG if on else printer.INSTALL_FLAG)
+            if not on and code == 0 and printer.installed():
+                printer.ensure_listener()   # 인쇄를 받아 줄 수신기(로그인 때도 뜨게 등록)
         finally:
             QApplication.restoreOverrideCursor()
         self._show_printer()

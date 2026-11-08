@@ -60,7 +60,7 @@ def test_open_printed_as_new_document(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not shutil.which("gcc"), reason="gcc 없음")
-def test_monitor_dll_builds(tmp_path):
-    out = printer.build_dll(str(tmp_path / printer.DLL_NAME))
+def test_listener_builds(tmp_path):
+    out = printer.build_listener(str(tmp_path / printer.LISTENER))
     data = open(out, "rb").read()
-    assert data[:2] == b"MZ" and b"InitializePrintMonitor2" in data
+    assert data[:2] == b"MZ" and "PDFmetryPrint".encode("utf-16-le") in data

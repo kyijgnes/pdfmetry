@@ -45,6 +45,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller==6.20.0
 
+      # 「PDF메트리」 프린터 수신기(printer/listener.c)를 gcc 로 짓는다. 러너에 없으면 깐다
+      - name: gcc
+        shell: bash
+        run: |
+          if ! command -v gcc >/dev/null; then
+            choco install mingw -y --no-progress
+            echo "C:/ProgramData/mingw64/mingw64/bin" >> "$GITHUB_PATH"
+          fi
+
       - name: 빌드(PyInstaller)
         run: python build.py
 

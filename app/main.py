@@ -8,7 +8,7 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     from . import printer
-    if printer.INSTALL_FLAG in argv or printer.UNINSTALL_FLAG in argv:   # 관리자 권한으로 불린 프린터 설치·제거(창 없음)
+    if any(f in argv for f in printer.FLAGS):   # 프린터 설치·제거(관리자)·수신기 시작·멈춤(창 없음)
         return printer.cli(argv)
     from . import updater
     updater.hold_running_mutex()   # 설치·제거 프로그램이 앱이 켜져 있는지 이것으로 본다
@@ -65,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
     from .ui.update import after_update as reopen
     reopen(w, after_update)
     QTimer.singleShot(3000, w.updates.auto_check)   # 새 버전이 있으면 상태줄에 단추(설치본만)
+    if getattr(sys, "frozen", False) and not alone and printer.installed() and not printer.listening():
+        # 프린터를 깔았는데 수신기가 꺼져 있으면(로그인 등록이 지워졌거나 업데이트 직후) 다시 띄운다
+        import threading
+        threading.Thread(target=printer.ensure_listener, daemon=True).start()
     w._policy = gate.PolicyWatch(w)   # 켜 둔 동안 정책을 다시 본다(설치본만)
     w._policy.start()
     # 개발 확인용: PDFAPP_SHOT=그림경로[;탭키[;side|props|organize]] 이면 3초 뒤 창을 찍고 끝낸다

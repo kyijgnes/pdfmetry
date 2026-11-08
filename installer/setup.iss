@@ -106,12 +106,15 @@ Name: "printer"; Description: "{#AppName} 프린터 설치 (관리자 권한 필
 
 [Run]
 Filename: "{app}\{#AppExe}"; Parameters: "--printer-install"; Verb: "runas"; Flags: shellexec waituntilterminated; StatusMsg: "{#AppName} 프린터 설치"; Tasks: printer
+; 프린터가 깔려 있으면 수신기(PDFmetryPrint.exe)를 새것으로 바꿔 띄운다(업데이트 때도)
+Filename: "{app}\{#AppExe}"; Parameters: "--printer-start"; Flags: waituntilterminated runhidden; Check: PrinterInstalled
 Filename: "{app}\{#AppExe}"; Description: "{#AppName} 실행"; Flags: nowait postinstall skipifsilent
 ; 앱 안 업데이트(/RELAUNCH)면 끝나고 다시 켠다. 앱이 그 전에 열려 있던 문서를 다시 연다
 Filename: "{app}\{#AppExe}"; Parameters: "--after-update"; Flags: nowait; Check: Relaunch
 
 [UninstallRun]
-; 프린터를 깔아 두었으면 지운다(관리자 권한)
+; 수신기를 끄고 로그인 등록을 지운 뒤, 프린터를 깔아 두었으면 지운다(관리자 권한)
+Filename: "{app}\{#AppExe}"; Parameters: "--printer-stop"; Flags: waituntilterminated runhidden; RunOnceId: "PrinterStop"
 Filename: "{app}\{#AppExe}"; Parameters: "--printer-uninstall"; Verb: "runas"; Flags: shellexec waituntilterminated; Check: PrinterInstalled; RunOnceId: "PrinterUninstall"
 
 [UninstallDelete]
@@ -142,7 +145,7 @@ end;
 
 function PrinterInstalled(): Boolean;
 begin
-  Result := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Control\Print\Monitors\PDFmetry Monitor');
+  Result := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Control\Print\Printers\{#AppName}');
 end;
 
 function AskPrinter(): Boolean;

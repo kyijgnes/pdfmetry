@@ -128,10 +128,10 @@ def main() -> int:
         cmd[-1:-1] = ["--icon", os.path.join("assets", "app.ico")]
     if os.path.isdir("assets"):
         cmd[-1:-1] = ["--add-data", "assets;assets"]
-    # 「PDF메트리」 프린터 포트 모니터(printer/monitor.c → gcc). 설치 때 System32 로 복사된다(app/printer.py)
-    from app.printer import DLL_NAME, build_dll
-    dll = build_dll(os.path.join(HERE, "build", "printer", DLL_NAME))
-    cmd[-1:-1] = ["--add-data", f"{dll};printer"]
+    # 「PDF메트리」 프린터 수신기(printer/listener.c → gcc). 앱이 %LOCALAPPDATA% 로 복사해 띄운다(app/printer.py)
+    from app.printer import LISTENER, build_listener
+    exe = build_listener(os.path.join(HERE, "build", "printer", LISTENER))
+    cmd[-1:-1] = ["--add-data", f"{exe};printer"]
     with open("run.py", "w", encoding="utf-8") as f:
         f.write("from app.main import main\nimport sys\nsys.exit(main())\n")
     cmd[-1:-1] = ["--version-file", write_version_file()]
