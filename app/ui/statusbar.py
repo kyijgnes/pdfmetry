@@ -9,7 +9,7 @@ from PySide6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QRegularExp
 from PySide6.QtGui import QActionGroup, QCursor, QRegularExpressionValidator
 from PySide6.QtWidgets import QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QSlider, QToolButton, QWidget
 
-from . import icons
+from . import fitwidth, icons
 from .dlg_pagebox import FINE, UNITS
 from .viewer import PageView, pct_text
 
@@ -76,8 +76,9 @@ class StatusBar(QWidget):
         sl.addWidget(self.sb_hand); sl.addWidget(self.sb_sel); sl.addSpacing(8)
         for key in ("first", "prev"):
             sl.addWidget(self._btn(key, 14, "", lambda k=key: win.on_action(k)))
-        self.page_edit = _PageEdit(); self.page_edit.setFixedWidth(64); self.page_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_edit = _PageEdit(); self.page_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.page_edit.returnPressed.connect(win._goto_entered); sl.addWidget(self.page_edit)
+        self._fit_page_edit()
         for key in ("next", "last"):
             sl.addWidget(self._btn(key, 14, "", lambda k=key: win.on_action(k)))
         self.sb_hist = {}
@@ -95,8 +96,9 @@ class StatusBar(QWidget):
         self.zoom_slider.setFixedWidth(110); self.zoom_slider.setPageStep(1)
         self.zoom_slider.valueChanged.connect(win._zoom_slider); sl.addWidget(self.zoom_slider)
         sl.addWidget(self._btn("zoomin", 14, "확대", lambda: win.on_action("zoomin")))
-        self.zoom_box = QComboBox(); self.zoom_box.setEditable(True); self.zoom_box.setFixedWidth(68)
+        self.zoom_box = QComboBox(); self.zoom_box.setEditable(True)
         self.zoom_box.addItems([pct_text(z) for z in PageView.STEPS])
+        fitwidth.fit(self.zoom_box, fitwidth.combo_texts(self.zoom_box))   # 「1600%」까지 다 보이게
         self.zoom_box.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9.%]*"), self.zoom_box))
         self.zoom_box.activated.connect(win._zoom_box); self.zoom_box.lineEdit().returnPressed.connect(win._zoom_box)
         self.zoom_box.installEventFilter(self)
@@ -218,16 +220,32 @@ class StatusBar(QWidget):
         super().resizeEvent(e)
         self._fit_size_label()
 
+    def _slider_room(self) -> int:
+        return self.zoom_slider.width() + self.layout().spacing()
+
+    def minimumSizeHint(self):
+        """확대 슬라이더는 좁으면 숨기므로 창 최소 폭에 넣지 않는다(쪽 칸·배율 칸이 넓어져도 창 최소 폭을 밀지 않게)."""
+        s = super().minimumSizeHint()
+        if not self.zoom_slider.isHidden():
+            s.setWidth(max(0, s.width() - self._slider_room()))
+        return s
+
     def _fit_size_label(self):
-        """좁으면 쪽 크기 글자를 숨긴다(가운데 단추와 겹치지 않게)."""
+        """좁으면 쪽 크기 글자를 숨기고(가운데 단추와 겹치지 않게), 더 좁으면 확대 슬라이더도 숨긴다(±·배율 칸은 남음)."""
         lay = self.layout()
         need = lay.contentsMargins().left() + lay.contentsMargins().right()
         for i in range(lay.count()):
             w = lay.itemAt(i).widget()
-            if w is not None and w is not self.size_label and w is not self.msg_label and not w.isHidden():
-                need += w.sizeHint().width() + lay.spacing()
+            if w is not None and w not in (self.size_label, self.msg_label, self.zoom_slider) and not w.isHidden():
+                fixed = w.minimumWidth() == w.maximumWidth()
+                need += (w.minimumWidth() if fixed else w.sizeHint().width()) + lay.spacing()
             elif w is None:
                 need += lay.itemAt(i).sizeHint().width()
+        show_slider = self.width() >= need + self._slider_room()
+        if show_slider != (not self.zoom_slider.isHidden()):
+            self.zoom_slider.setVisible(show_slider)
+        if show_slider:
+            need += self._slider_room()
         need += self.size_label.sizeHint().width() + 24
         self.size_label.setVisible(self.width() >= need)
 
@@ -239,7 +257,14 @@ class StatusBar(QWidget):
         if self.page_edit.hasFocus():
             return
         cur, total = self._page
-        self.page_edit.setText(f"{self._label or cur + 1} / {total}")
+        text = f"{self._label or cur + 1} / {total}"
+        self._fit_page_edit(text)
+        self.page_edit.setText(text)
+
+    def _fit_page_edit(self, text: str = ""):
+        """쪽 칸 폭: 네 자리(「9999 / 9999」) 이상, 문서 쪽 수 자릿수·쪽 레이블이 길면 그만큼 넓힌다."""
+        nines = "9" * max(4, len(str(self._page[1] or 0)))
+        fitwidth.fit(self.page_edit, [f"{nines} / {nines}", text])
 
     def page_text(self) -> str:
         """쪽 칸에 넣은 것(「3 / 12」 면 3)."""

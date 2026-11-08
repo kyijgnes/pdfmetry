@@ -23,6 +23,7 @@ from ..engine import deco_store as S
 from ..engine import fonts as F
 from ..engine import pages as P
 from ..engine.document import Document
+from . import fitwidth
 from .dialogs import ColorButton, PageRangeEdit, _buttons
 from .dlg_pagebox import BAD_RANGE, UNITS, UnitBox, _watch
 
@@ -48,8 +49,9 @@ class FontRow(QWidget):
         top = QHBoxLayout(); top.setSpacing(6)
         self.family = QComboBox(); self.family.addItems(F.font_families()); self.family.setMinimumWidth(170)
         self.family.setMaxVisibleItems(16)
-        self.size = QComboBox(); self.size.setEditable(True); self.size.setFixedWidth(64)
+        self.size = QComboBox(); self.size.setEditable(True)
         self.size.addItems([_num(v) for v in FONT_SIZES])
+        fitwidth.fit(self.size, fitwidth.combo_texts(self.size) + ["1638"], floor=64)   # 1638 = 받는 가장 큰 값
         val = QDoubleValidator(1, 1638, 1, self.size); val.setNotation(QDoubleValidator.Notation.StandardNotation)
         self.size.setValidator(val)
         top.addWidget(self.family, 1); top.addWidget(self.size)

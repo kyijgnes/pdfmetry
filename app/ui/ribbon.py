@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLa
                                QSpinBox, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from ..engine import pages as P
-from . import icons, theme
+from . import fitwidth, icons, theme
 
 # (key, icon, label, kind, menu_items)  menu_items: [(key, label)] 또는 None. label 이 "|" 면 구분선.
 # 메뉴 항목 (key, label, [하위 항목]) 은 하위 메뉴, ("|", "|") 는 메뉴 안 구분선.
@@ -362,9 +362,10 @@ class Ribbon(QWidget):
 
     def _range_combo(self) -> QComboBox:
         c = QComboBox(); c.setEditable(True); c.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        c.lineEdit().setPlaceholderText("페이지 번호 입력"); c.setFixedWidth(140)
+        c.lineEdit().setPlaceholderText("페이지 번호 입력")
         for text, how in self.RANGE_ITEMS:
             c.addItem(text, how)
+        fitwidth.fit(c, fitwidth.combo_texts(c), floor=140)
         c.setCurrentIndex(-1); c.setEditText("")
         c.activated.connect(lambda k: self.rangePicked.emit(c.itemData(k)))
         c.lineEdit().returnPressed.connect(self._range_entered)

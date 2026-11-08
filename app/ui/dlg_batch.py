@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFor
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from ..engine import tools as T
-from . import theme
+from . import fitwidth, theme
 from .file_list import FileListPanel, OutputPanel, open_in_explorer
 
 # (열쇠, 이름, 설명 한 줄)
@@ -87,11 +87,12 @@ class BatchDialog(QDialog):
         self.security: dict | None = None
         self.setWindowTitle("일괄 편집"); self.resize(980, 600)
         root = QHBoxLayout(self)
-        self.tasks = QListWidget(); self.tasks.setFixedWidth(230)
+        self.tasks = QListWidget()
         for k, name, desc in TASKS:
             it = QListWidgetItem(f"{name}\n{desc}"); it.setData(Qt.ItemDataRole.UserRole, k)
             self.tasks.addItem(it)
         self.tasks.setSpacing(2)
+        fitwidth.fit_list(self.tasks, [t for _k, n, d in TASKS for t in (n, d)], floor=230)
         root.addWidget(self.tasks)
         right = QVBoxLayout(); root.addLayout(right, 1)
         self.title = QLabel(); self.title.setStyleSheet("font-weight:600;")

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QProgressDialog, QPushButton, QRadioButton,
                                QSpinBox, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from . import icons, print_vector as PV, theme
+from . import fitwidth, icons, print_vector as PV, theme
 from .dlg_pagebox import FINE, UNITS
 
 FITS = [("fit", "맞춤"), ("actual", "실제 크기"), ("custom", "사용자 지정 배율")]
@@ -824,7 +824,7 @@ class PrintDialog(QDialog):
         self.nup = QComboBox()
         for k, label in NUPS:
             self.nup.addItem(label, k)
-        self.nup.setFixedWidth(76)
+        fitwidth.fit(self.nup, fitwidth.combo_texts(self.nup), floor=76)   # 「사용자 지정...」까지
         self.nup_cols = QSpinBox(); self.nup_cols.setRange(1, self.MAX_GRID); self.nup_rows = QSpinBox(); self.nup_rows.setRange(1, self.MAX_GRID)
         nrow.addWidget(self.nup); nrow.addWidget(self.nup_cols, 1); nrow.addWidget(QLabel("X")); nrow.addWidget(self.nup_rows, 1)
         v.addLayout(nrow)
