@@ -2586,7 +2586,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "도움말",
                                 f"{APP_NAME} {VERSION}: 개인이 만든 무료 비영리 프로그램\n"
                                 "이스트소프트 「알PDF」와 관계없음(알PDF 는 (주)이스트소프트의 상표)\n"
-                                "소스는 AGPL-3.0 으로 공개(github.com/kyijgnes/rpdf), 오픈소스 고지는 설치 폴더 THIRD-PARTY-NOTICES.txt\n\n"
+                                "소스는 AGPL-3.0 으로 공개(github.com/kyijgnes/pdfmetry), 오픈소스 고지는 설치 폴더 THIRD-PARTY-NOTICES.txt\n\n"
                                 "홈: 손·선택·확대, 모두 편집(원문 글자·그림 고치기), 텍스트 추가, OCR, 자르기, 검색\n"
                                 "편집: 텍스트·이미지·링크 추가, 워터마크·배경·머리글/바닥글·베이츠 번호\n"
                                 "주석: 연필·지우개·강조·밑줄·취소선·글상자·말풍선·노트·도형·스탬프·서명·첨부·측정\n"

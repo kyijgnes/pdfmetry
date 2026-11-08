@@ -32,7 +32,7 @@ from .appinfo import APP_ID, VERSION
 
 # 10-20 pdf-app-releases 에서 이름을 바꿈(옛 주소는 GitHub 이 넘겨 주어 0.1.0 도 여기를 찾는다).
 # 10-29 앱 이름은 PDF메트리로 바꿨지만 저장소는 그대로 둔다(깔린 옛 버전이 이 주소로 새 버전을 찾는다)
-RELEASE_REPO = "kyijgnes/rpdf"
+RELEASE_REPO = "kyijgnes/pdfmetry"
 LATEST_URL = f"https://github.com/{RELEASE_REPO}/releases/latest/download/latest.json"
 MUTEX_NAME = f"{APP_ID}.kyijgnes.Running"     # setup 이 앱이 켜져 있는지 보는 이름(make_setup.py 가 setup.iss 에 넘긴다)
 SOURCE_ENV = "PDFAPP_UPDATE_SOURCE"

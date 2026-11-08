@@ -7,7 +7,7 @@
 
 ## ⬇️ 다운로드
 
-**[👉 최신 버전 받기 (Releases)](https://github.com/kyijgnes/rpdf/releases/latest)**
+**[👉 최신 버전 받기 (Releases)](https://github.com/kyijgnes/pdfmetry/releases/latest)**
 
 - 💻 **Windows** · `PDFmetry-setup-*.exe` 를 받아 실행 (관리자 권한 필요 없음)
 

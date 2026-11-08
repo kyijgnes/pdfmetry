@@ -195,7 +195,7 @@ def make_release(folder, version="9.9.9", sign=True, seed=SEED, setup_bytes=b"MZ
     with open(os.path.join(folder, name), "wb") as f:
         f.write(setup_bytes)
     data = {"app": "RPDF", "version": version, "setup": name, "sha256": hashlib.sha256(setup_bytes).hexdigest(),
-            "size": len(setup_bytes), "url": f"https://github.com/kyijgnes/rpdf/releases/download/v{version}/{name}"}
+            "size": len(setup_bytes), "url": f"https://github.com/kyijgnes/pdfmetry/releases/download/v{version}/{name}"}
     data.update(over)
     raw = json.dumps(data).encode()
     with open(os.path.join(folder, "latest.json"), "wb") as f:
@@ -214,7 +214,7 @@ def dl_dir(tmp_path, monkeypatch):
 
 
 def test_allowed_url():
-    assert U.allowed_url("https://github.com/kyijgnes/rpdf/releases/latest/download/latest.json")
+    assert U.allowed_url("https://github.com/kyijgnes/pdfmetry/releases/latest/download/latest.json")
     assert U.allowed_url("https://release-assets.githubusercontent.com/x")
     assert U.allowed_url("https://objects.githubusercontent.com/x")
     for bad in ("http://github.com/x", "https://github.com.evil.com/x", "https://evil.com/github.com",
