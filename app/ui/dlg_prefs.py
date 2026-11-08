@@ -188,7 +188,35 @@ class PreferencesDialog(QDialog):
         f.addRow("열 때 창 크기", self.winsize)
         self.share_dir = QLineEdit(p.get("share_dir", "")); f.addRow("공유폴더", self.share_dir)
         self.default_dir = QLineEdit(p.get("default_dir", "")); f.addRow("변환 저장 폴더", self.default_dir)
+        if os.name == "nt":
+            pr = QHBoxLayout()
+            self.printer_state = QLabel(); self.printer_btn = QPushButton()
+            self.printer_btn.clicked.connect(self._toggle_printer)
+            pr.addWidget(self.printer_state); pr.addWidget(self.printer_btn); pr.addStretch(1)
+            f.addRow(f"{APP_NAME} 프린터", pr)
+            self._show_printer()
         return self._scroll(w)
+
+    def _show_printer(self):
+        from .. import printer
+        on = printer.installed()
+        self.printer_state.setText("설치됨" if on else "설치 안 됨")
+        self.printer_btn.setText("프린터 지우기" if on else "프린터 설치")
+
+    def _toggle_printer(self):
+        """관리자 권한으로 「PDF메트리」 프린터를 깔거나 지운다(UAC 창이 뜬다)."""
+        from .. import printer
+        on = printer.installed()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            code = printer.run_elevated(printer.UNINSTALL_FLAG if on else printer.INSTALL_FLAG)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._show_printer()
+        if code == 1223:   # 사용자가 UAC 에서 「아니요」
+            return
+        if code != 0 or printer.installed() == on:
+            QMessageBox.warning(self, "환경 설정", "프린터를 " + ("지우지" if on else "설치하지") + " 못했습니다.")
 
     def _pick_dir(self, edit: QLineEdit):
         d = QFileDialog.getExistingDirectory(self, "폴더 고르기", edit.text())

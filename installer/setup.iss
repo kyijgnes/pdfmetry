@@ -99,10 +99,20 @@ Root: HKCU; Subkey: "{#RegKey}"; Flags: uninsdeletekeyifempty
 Root: HKCU; Subkey: "{#RegKeyParent}"; Flags: uninsdeletekeyifempty
 Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#RegAppName}"; ValueData: "{#RegKey}\Capabilities"; Flags: uninsdeletevalue
 
+[Tasks]
+; 「PDF메트리」 프린터(어느 프로그램에서든 인쇄하면 PDF메트리에 새 문서로). 관리자 권한이 들어 따로 묻는다.
+; 이미 깔렸거나 조용한 설치(앱 안 업데이트)면 안 묻는다. 나중에는 앱 환경 설정 > 일반 에서 깔고 지운다(app/printer.py)
+Name: "printer"; Description: "{#AppName} 프린터 설치 (관리자 권한 필요)"; Check: AskPrinter
+
 [Run]
+Filename: "{app}\{#AppExe}"; Parameters: "--printer-install"; Verb: "runas"; Flags: shellexec waituntilterminated; StatusMsg: "{#AppName} 프린터 설치"; Tasks: printer
 Filename: "{app}\{#AppExe}"; Description: "{#AppName} 실행"; Flags: nowait postinstall skipifsilent
 ; 앱 안 업데이트(/RELAUNCH)면 끝나고 다시 켠다. 앱이 그 전에 열려 있던 문서를 다시 연다
 Filename: "{app}\{#AppExe}"; Parameters: "--after-update"; Flags: nowait; Check: Relaunch
+
+[UninstallRun]
+; 프린터를 깔아 두었으면 지운다(관리자 권한)
+Filename: "{app}\{#AppExe}"; Parameters: "--printer-uninstall"; Verb: "runas"; Flags: shellexec waituntilterminated; Check: PrinterInstalled; RunOnceId: "PrinterUninstall"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -128,6 +138,16 @@ end;
 function Relaunch(): Boolean;
 begin
   Result := HasParam('/RELAUNCH');
+end;
+
+function PrinterInstalled(): Boolean;
+begin
+  Result := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Control\Print\Monitors\PDFmetry Monitor');
+end;
+
+function AskPrinter(): Boolean;
+begin
+  Result := (not WizardSilent) and (not PrinterInstalled());
 end;
 
 function WantDesktopIcon(): Boolean;

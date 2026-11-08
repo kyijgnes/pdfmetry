@@ -7,6 +7,9 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    from . import printer
+    if printer.INSTALL_FLAG in argv or printer.UNINSTALL_FLAG in argv:   # 관리자 권한으로 불린 프린터 설치·제거(창 없음)
+        return printer.cli(argv)
     from . import updater
     updater.hold_running_mutex()   # 설치·제거 프로그램이 앱이 켜져 있는지 이것으로 본다
     after_update = updater.AFTER_FLAG in argv

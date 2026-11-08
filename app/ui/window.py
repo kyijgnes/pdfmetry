@@ -790,6 +790,9 @@ class MainWindow(QMainWindow):
             except Exception as e:  # noqa: BLE001
                 QMessageBox.warning(self, "열기", f"읽을 수 없는 파일입니다 ({e})"); return
             t.changed(None); self.say(f"주석 {n}개를 가져왔습니다" + (f" · 못 가져온 것 {skipped}개" if skipped else "")); return
+        from .. import printer
+        if printer.is_printed(path):   # 「PDF메트리」 프린터로 인쇄한 것: 새 문서로(저장할 때 위치를 묻는다)
+            self.open_printed(path); return
         hit = F.find_open(self, path)   # 이미 열린 파일: 떼어 낸 다른 창이면 그 창을 앞으로
         if hit:
             F.bring(*hit); return
@@ -820,6 +823,20 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "열기", str(e)); return
         if self.add_doc(doc, view=self._saved_view(path)) is not None:
             self.add_recent(path)
+
+    def open_printed(self, path: str):
+        """프린터로 들어온 PDF: 이름 없는 새 문서(「수학반 진도표.pdf」)로 열고 인쇄 파일은 지운다."""
+        from .. import printer
+        if not self._tab_room():
+            return
+        try:
+            data = printer.take_printed(path)
+            doc = Document.from_bytes(data)
+        except (OSError, DocumentError, RuntimeError, ValueError) as e:
+            QMessageBox.critical(self, "인쇄", f"인쇄한 문서를 열지 못했습니다 ({e})"); return
+        doc.title = printer.printed_title(path)
+        doc.ask_save = True
+        self.add_doc(doc)
 
     def add_recent(self, path: str):
         rec = self.settings["recent"]
