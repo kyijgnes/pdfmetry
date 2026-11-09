@@ -271,13 +271,13 @@ def qss(dark: bool = False) -> str:
     QToolButton#nav:hover {{ background: {c['HOVER']}; }}
     QToolButton#nav:checked {{ background: {c['BG']}; border-left-color: {c['ACCENT']}; }}
 
-    /* 이름 없는 켜고 끄는 단추(속성 패널의 굵게·기울임·밑줄·정렬 등): 칸처럼 테두리, 켜지면 옅은 빨강 */
-    QFrame#group QToolButton[checkable="true"] {{ background: {c['FIELD']}; color: {c['TEXT']}; border: 1px solid {c['FIELD_LINE']};
+    /* 서식 단추(#fmt)와 카드 안 이름 없는 켜고 끄는 단추(굵게·기울임·밑줄·정렬 등): 칸처럼 테두리, 켜지면 옅은 빨강 */
+    QToolButton#fmt, QFrame#group QToolButton[checkable="true"] {{ background: {c['FIELD']}; color: {c['TEXT']}; border: 1px solid {c['FIELD_LINE']};
         border-radius: 4px; padding: 3px 6px; }}
-    QFrame#group QToolButton[checkable="true"]:hover {{ background: {c['HOVER']}; }}
-    QFrame#group QToolButton[checkable="true"]:checked {{ background: {c['SELECT_BG']}; color: {c['ACCENT_TEXT']};
+    QToolButton#fmt:hover, QFrame#group QToolButton[checkable="true"]:hover {{ background: {c['HOVER']}; }}
+    QToolButton#fmt:checked, QFrame#group QToolButton[checkable="true"]:checked {{ background: {c['SELECT_BG']}; color: {c['ACCENT_TEXT']};
         border-color: {c['ACCENT']}; }}
-    QFrame#group QToolButton[checkable="true"]:disabled {{ color: {c['TEXT_OFF']}; }}
+    QToolButton#fmt:disabled, QFrame#group QToolButton[checkable="true"]:disabled {{ color: {c['TEXT_OFF']}; }}
 
     /* 문서 탭 */
     QTabBar#doctabs::tab {{ background: transparent; border: 2px solid transparent;
@@ -387,7 +387,7 @@ def qss(dark: bool = False) -> str:
     QFrame#card:hover {{ border-color: {c['ACCENT']}; }}
 
     /* 키보드 초점: 모든 종류에 진한 파랑 테두리(빨강은 오류처럼 보여 쓰지 않음). 테두리 자리는 위에서 미리 비워 둠 */
-    QToolButton:focus, QFrame#group QToolButton[checkable="true"]:focus,
+    QToolButton:focus, QFrame#group QToolButton[checkable="true"]:focus, QToolButton#fmt:focus,
     QToolButton#rb:focus, QToolButton#quick:focus, QToolButton#nav:focus, QToolButton#ribbontab:focus,
     QToolButton#filetab:focus, QToolButton#printtab:focus, QToolButton#printstep:focus, QToolButton#orient:focus,
     QToolButton#printprops:focus, QToolButton#stripbtn:focus, QToolButton#paneltitlebtn:focus,

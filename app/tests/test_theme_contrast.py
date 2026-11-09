@@ -269,3 +269,31 @@ def test_format_toggle_readable_dark(themed_app, dark):
     assert ratio(bg, c["FIELD"]) < 1.2, bg          # 바탕이 테마 입력칸 색
     assert ratio(c["TEXT"], bg) >= TEXT
     f.close(); f.deleteLater(); app.processEvents()
+
+
+@pytest.mark.parametrize("dark", [False, True], ids=["light", "dark"])
+def test_fmt_button_rule(themed_app, dark):
+    """서식 단추 objectName 「fmt」 규칙: 카드 밖에 있어도 테마 바탕·글자색, 켜지면 빨강 글자, 초점은 파랑."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QHBoxLayout, QToolButton, QWidget
+    app = themed_app
+    css = theme.qss(dark)
+    assert "QToolButton#fmt," in css and "QToolButton#fmt:checked," in css and "QToolButton#fmt:focus," in css
+    app.setStyleSheet(css)
+    c = theme.colors(dark)
+    host = QWidget(); h = QHBoxLayout(host)
+    sink = QWidget(); sink.setFocusPolicy(Qt.FocusPolicy.StrongFocus); h.addWidget(sink)
+    b = QToolButton(); b.setObjectName("fmt"); b.setText("굵게"); b.setCheckable(True)
+    b.setFocusPolicy(Qt.FocusPolicy.StrongFocus); h.addWidget(b)
+    host.show(); app.processEvents()
+    sink.setFocus(); app.processEvents()
+    im = b.grab().toImage()
+    bg = im.pixelColor(3, im.height() // 2).name().upper()
+    assert ratio(bg, c["FIELD"]) < 1.2, bg
+    before = _focus_pixels(b, c["FOCUS"])
+    b.setFocus(Qt.FocusReason.TabFocusReason); app.processEvents()
+    assert _focus_pixels(b, c["FOCUS"]) - before >= 20
+    b.setChecked(True); sink.setFocus(); app.processEvents()
+    im = b.grab().toImage()
+    assert ratio(im.pixelColor(3, im.height() // 2).name().upper(), c["SELECT_BG"]) < 1.2
+    host.close(); host.deleteLater(); app.processEvents()
