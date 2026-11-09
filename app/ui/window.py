@@ -43,7 +43,7 @@ from . import fileops as F
 from . import clipboard as CB
 from . import edit_tools as ET
 from . import form_tools as FT
-from . import icons, sidebars as SB, tab_detach, theme
+from . import a11y, icons, sidebars as SB, tab_detach, theme
 from . import shortcuts as K
 from .inline_text import InlineText
 from .inline_annot import InlineAnnot, NotePopup, comment_style
@@ -124,6 +124,18 @@ class DocTabBar(QTabBar):
         self._hover = -1
         self._hover_timer = QTimer(self); self._hover_timer.setSingleShot(True); self._hover_timer.setInterval(self.HOVER_MS)
         self._hover_timer.timeout.connect(lambda: self._hover >= 0 and self.setCurrentIndex(self._hover))
+
+    def tabInserted(self, index):
+        super().tabInserted(index)
+        self.setVisible(True)
+        for side in (QTabBar.ButtonPosition.RightSide, QTabBar.ButtonPosition.LeftSide):
+            b = self.tabButton(index, side)
+            if b is not None and not b.accessibleName():
+                b.setAccessibleName("탭 닫기")
+
+    def tabRemoved(self, index):
+        super().tabRemoved(index)
+        self.setVisible(self.count() > 0)   # 문서가 없으면 탭 줄을 접어 「+」「⌄」가 앱 아이콘 바로 옆에 붙게
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -506,6 +518,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.status)
         root.addWidget(self.status.hot)
         self.setAcceptDrops(True)
+        a11y.name_icon_buttons(self)   # 아이콘만 있는 단추에 화면 읽기 이름(툴팁 글을 그대로)
         self.autosave = F.Autosave(self)   # 고친 문서를 몇 분마다 복구 사본으로(환경 설정 「자동 저장」)
 
     def _shortcuts(self):
@@ -1134,7 +1147,7 @@ class MainWindow(QMainWindow):
             if s:
                 webbrowser.open("https://papago.naver.com/?sk=auto&tk=ko&st=" + urllib.parse.quote(s[:500]))
             else:
-                self.say("먼저 글자를 고르세요(선택 도구)")
+                self.say("글자 선택 필요(선택 도구)")
 
     def _on_selection(self, t: DocTab, s):
         if s is not None and s.kind == "annot" and not t.props.isVisible() and t.viewer.tool == "select":
@@ -1301,10 +1314,10 @@ class MainWindow(QMainWindow):
         elif key in LABELS and key not in ("form", "edit"):
             self.say(f"{LABELS[key]}: 문서 위에서 끌어 그리세요. Esc 로 그만둡니다.")
 
-    EDIT_HINTS = {"all": "글자 덩어리를 두 번 눌러 고치고, 그림은 눌러 고른 뒤 Delete 로 지웁니다.",
-                  "text": "글자 덩어리를 두 번 눌러 고칩니다.",
-                  "image": "그림을 눌러 고른 뒤 Delete 로 지웁니다.",
-                  "link": "링크를 눌러 고르고, 두 번 눌러 고칩니다."}
+    EDIT_HINTS = {"all": "두 번 눌러 글 고치기 · Delete 삭제",
+                  "text": "두 번 눌러 글 고치기",
+                  "image": "눌러 그림 선택 · Delete 삭제",
+                  "link": "눌러 링크 선택 · 두 번 눌러 고치기"}
 
     def _set_edit(self, t, on: bool, target: str | None = None):
         """편집 켜기·끄기와 대상 고르기. 대상을 고르면 편집이 켜진다."""
@@ -1448,7 +1461,7 @@ class MainWindow(QMainWindow):
                 if not (t.side.isVisible() and t.side_key == "bookmark"): t.show_side("bookmark")
                 t.bookmarks.add()
             elif key == "bookmark_rename":
-                if not t.bookmarks.tree.currentItem(): self.say("이름을 바꿀 북마크를 먼저 고르세요"); return
+                if not t.bookmarks.tree.currentItem(): self.say("이름을 바꿀 북마크 선택 필요"); return
                 if not (t.side.isVisible() and t.side_key == "bookmark"): t.show_side("bookmark")
                 t.bookmarks.rename_current()
             elif key == "edit_all_toggle": self._set_edit(t, not v.edit_mode)
@@ -1462,7 +1475,7 @@ class MainWindow(QMainWindow):
             elif key == "delete_sel": v.delete_selection()
             elif key == "replace_image":
                 if v.sel and v.sel.kind == "image": self.on_request(t, "replace_image", v.sel)
-                else: self.say("편집 모드에서 이미지를 먼저 고르세요")
+                else: self.say("편집 모드에서 이미지 선택 필요")
             # 편집 꾸미기
             elif key.split("_")[0] in DECO_KEYS:   # 워터마크·배경·머리글·쪽 번호·베이츠의 추가·업데이트·삭제
                 run_decorate(self, t, DECO_KEYS[key.split("_")[0]], key.partition("_")[2] or "add")
@@ -1519,7 +1532,7 @@ class MainWindow(QMainWindow):
                 dlg = D.FieldAlignDialog(self, pg, ws, {v.sel.xref} if v.sel and v.sel.kind == "widget" else set(), key[6:])
                 if not dlg.exec(): return
                 vals = dlg.values()
-                if not vals["xrefs"]: self.say("맞출 칸을 고르세요"); return
+                if not vals["xrefs"]: self.say("맞출 칸 선택 필요"); return
                 d.snapshot(); _engine("tools").align_widgets(d.fitz, [(pg, x) for x in vals["xrefs"]], vals["how"]); t.changed([pg])
             # 보안
             elif key == "encrypt": self.encrypt(t)

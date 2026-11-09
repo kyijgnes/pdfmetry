@@ -123,7 +123,7 @@ def copy(win, t, cut: bool = False) -> bool:
     if CB.mode_of(v) == "objects":
         page, items = picked_objects(v)
         if not items:
-            win.say("자르거나 복사할 객체를 고르세요"); return False
+            win.say("자르거나 복사할 객체 선택 필요"); return False
         specs = [O.spec(d, page, _ref(it)) for it in items]
         imgs = [s for s in specs if s["kind"] == "image"]
         text = "\n".join(s.get("text") or "" for s in specs if s["kind"] == "text").strip()
@@ -136,7 +136,7 @@ def copy(win, t, cut: bool = False) -> bool:
         return True
     s = v.sel
     if not (s and s.kind == "annot"):
-        win.say("자르거나 복사할 주석을 고르세요"); return False
+        win.say("자르거나 복사할 주석 선택 필요"); return False
     spec = AC.annot_spec(d, s.page, s.xref)
     if spec is None:
         win.say("이 주석은 복사할 수 없습니다"); return False
@@ -246,7 +246,7 @@ def order(win, t, how: str) -> None:
     v, d = t.viewer, t.doc
     page, items = picked_objects(v)
     if not items:
-        win.say("순서를 바꿀 객체를 고르세요"); return
+        win.say("순서를 바꿀 객체 선택 필요"); return
     # 맨 앞으로는 그리는 차례대로, 맨 뒤로는 거꾸로 보내야 고른 것끼리의 차례가 그대로다
     seq = [o for o in O.list_objects(d, page)]
     pos = {(_key(o)): n for n, o in enumerate(seq)}
@@ -276,7 +276,7 @@ def align(win, t, how: str) -> None:
     v, d = t.viewer, t.doc
     page, items = picked_objects(v)
     if len(items) < need(how):
-        win.say("같은 간격으로 벌리려면 셋 이상 고르세요" if how.startswith("dist") else "맞출 객체를 둘 이상 고르세요")
+        win.say("같은 간격으로 벌리려면 셋 이상 선택 필요" if how.startswith("dist") else "맞출 객체 둘 이상 선택 필요")
         return
     p = d.fitz[page]
     rot, bounds = p.rotation_matrix, fitz.Rect(p.rect)
@@ -308,7 +308,7 @@ def apply_pages(win, t) -> None:
     v, d = t.viewer, t.doc
     s = v.sel
     if not (s and s.kind == "annot"):
-        win.say("여러 쪽에 적용할 주석을 고르세요"); return
+        win.say("여러 쪽에 적용할 주석 선택 필요"); return
     if not AC.can_apply(s.extra.get("kind", "")):
         win.say("이 주석은 여러 쪽에 적용할 수 없습니다"); return
     from .dlg_apply_pages import ApplyPagesDialog

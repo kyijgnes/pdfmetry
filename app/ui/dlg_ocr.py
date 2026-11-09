@@ -15,7 +15,7 @@ from .dlg_prefs import lang_name
 
 NO_LANG_TEXT = "OCR을 수행할 언어를 선택하십시오."
 MANY_TEXT = "세개 이상의 언어는 인식 속도를 늦출 수 있습니다."
-NONE_INSTALLED = "윈도우 설정 > 언어에서 OCR 언어를 더하세요"
+NONE_INSTALLED = "OCR 언어 없음: Windows 설정 > 언어에서 추가"
 DPIS = (200, 300, 400)
 
 _cache: list[str] | None = None
