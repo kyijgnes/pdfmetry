@@ -107,7 +107,9 @@ def test_right_bar_collapse_and_width(win, folder):
     win.open_path(make_pdf(os.path.join(folder, "c.pdf"))); pump(0.2)
     win.right_action("props"); pump(0.05)
     t = win.cur()
-    assert t.props.isVisible() and abs(t.split.sizes()[2] - SB.RIGHT_W) <= 2
+    # 속성 패널은 글자가 다 보이는 폭에 맞춰 고정된다(RIGHT_W 는 그 아래 한도). 오른쪽 칸은 그 폭 그대로
+    want = max(SB.RIGHT_W, t.props.minimumWidth())
+    assert t.props.isVisible() and abs(t.split.sizes()[2] - want) <= 2
     win.bars.set_right(True); pump(0.05)
     assert win.bars.right_strip.isVisible() and not win.rightstrip.isVisible() and not t.props.isVisible()
     win.on_action("side_right"); pump(0.05)   # Shift+F4 는 펴면서 속성을 연다
