@@ -81,7 +81,7 @@ def _strip(name: str, icon: str, tip: str, fn) -> QWidget:
     w = QWidget(); w.setObjectName(name); w.setFixedWidth(STRIP_W)
     w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
     lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 6); lay.setSpacing(0); lay.addStretch(1)
-    b = QToolButton(); b.setObjectName("stripbtn"); b.setFixedSize(STRIP_W, 32); b.setIcon(icons.icon(icon, 12)); b.setToolTip(tip)
+    b = QToolButton(); b.setObjectName("stripbtn"); b.setFixedSize(STRIP_W, 32); b.setIcon(icons.icon(icon, 12)); b.setToolTip(tip); b.setAccessibleName(tip)
     b.clicked.connect(fn); lay.addWidget(b)
     w.button = b
     w.hide()
@@ -105,7 +105,7 @@ class Bars:
 
     @staticmethod
     def _fold_btn(icon: str, tip: str, fn) -> QToolButton:
-        b = QToolButton(); b.setObjectName("nav"); b.setIcon(icons.icon(icon, 14)); b.setToolTip(tip)
+        b = QToolButton(); b.setObjectName("nav"); b.setIcon(icons.icon(icon, 14)); b.setToolTip(tip); b.setAccessibleName(tip)
         b.clicked.connect(fn)
         return b
 

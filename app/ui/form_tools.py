@@ -73,7 +73,7 @@ def run(win, t, key: str) -> None:
     if key == "tab_order":
         TabOrderMode.get(t).start(items[0][0] if items else v.current); return
     if not items:
-        win.say("양식 칸을 고르세요"); return
+        win.say("양식 칸 선택 필요"); return
     if key in ("field_copy", "field_cut"):
         CB.put("fields", [s for pg, x in items if (s := A.field_spec(d, pg, x))], id(d), items[0][0])
         if key == "field_cut":
@@ -118,7 +118,7 @@ def align(win, t, how: str) -> bool:
         return True
     from ..engine import tools as T
     if how in ("dist_h", "dist_v") and len(items) < 3:
-        win.say("같은 간격으로 벌리려면 칸을 셋 이상 고르세요"); return True
+        win.say("같은 간격으로 벌리려면 칸 셋 이상 선택 필요"); return True
     d.snapshot()
     T.align_widgets(d.fitz, items, how)
     t.changed(sorted({pg for pg, _ in items}))

@@ -30,7 +30,7 @@ TASKS = [
     ("encrypt", "보안", "파일마다 열기·권한 암호 걸기"),
     ("export_data", "데이터 내보내기", "양식 값을 CSV 한 장으로 모으기"),
     ("print", "인쇄", "파일을 차례로 인쇄"),
-    ("blank", "공백 페이지 삭제", "글자·그림이 없는 빈 쪽 지우기"),
+    ("blank", "공백 페이지 삭제", "글자·그림이 없는 빈 페이지 지우기"),
     ("background", "배경", "파일마다 배경 넣기"),
     ("header_footer", "머리글 & 바닥글", "파일마다 머리글·바닥글 넣기"),
 ]
@@ -40,9 +40,9 @@ PDF_FILTER = "PDF 파일 (*.pdf)"
 DATA_NAME = "양식 데이터.csv"
 OUT_STORES = {"convert": ("convert_out", "변환"), "compress": ("compress_out", "압축")}
 BATCH_OUT = ("batch_out", "일괄")
-NO_SECURITY = "보안 설정을 먼저 하세요"
-NO_TEMPLATE = "넣을 템플릿을 고르세요"
-NO_NAME = "파일 이름을 입력하세요"
+NO_SECURITY = "보안 설정 먼저 필요"
+NO_TEMPLATE = "넣을 템플릿 선택 필요"
+NO_NAME = "파일 이름 입력 필요"
 
 
 class _Job(QThread):

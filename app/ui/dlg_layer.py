@@ -42,7 +42,7 @@ class LayerPropsDialog(QDialog):
 
     def accept(self):
         if not self.name.text().strip():
-            QMessageBox.warning(self, self.windowTitle(), "레이어 이름을 넣으십시오.")
+            QMessageBox.warning(self, self.windowTitle(), "레이어 이름을 입력하십시오.")
             return
         super().accept()
 

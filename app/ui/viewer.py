@@ -809,6 +809,10 @@ class PageView(QGraphicsView):
         r = self.page_rect_pt(i)
         vw = self.viewport().width() - 2 * MARGIN - 4
         vh = self.viewport().height() - 2 * MARGIN - 4
+        if self.zoom_mode == "fit_width":
+            vb = self.verticalScrollBar()
+            if not vb.isVisible():   # 맞춘 뒤 세로 막대가 생겨도 가로 막대가 안 생기게 폭을 미리 뺀다
+                vw -= vb.sizeHint().width()
         if self.layout_mode.startswith("facing"):
             vw = (vw - GAP) / 2
         if self.zoom_mode == "fit_width":

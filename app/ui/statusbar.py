@@ -69,21 +69,23 @@ class StatusBar(QWidget):
         sl = QHBoxLayout(self); sl.setContentsMargins(8, 0, 8, 0); sl.setSpacing(4)
         self.size_label = QLabel(""); sl.addWidget(self.size_label)
         self.msg_label = QLabel(""); self.msg_label.setObjectName("dim"); sl.addWidget(self.msg_label)
+        self.msg_label.setContentsMargins(12, 0, 0, 0)   # 쪽 크기와 칸을 나눔
         self.msg_label.setMinimumWidth(1)  # 긴 알림이 창 최소 폭을 밀어 올리지 않게(넘치면 잘리고 툴팁에 원문)
         sl.addStretch()
         self.sb_hand = self._btn("hand", 16, "손", lambda: win.on_tool("hand")); self.sb_hand.setCheckable(True)
         self.sb_sel = self._btn("select", 16, "선택", lambda: win.on_tool("select")); self.sb_sel.setCheckable(True)
         sl.addWidget(self.sb_hand); sl.addWidget(self.sb_sel); sl.addSpacing(8)
-        for key in ("first", "prev"):
-            sl.addWidget(self._btn(key, 14, "", lambda k=key: win.on_action(k)))
+        for key, nm in (("first", "첫 쪽"), ("prev", "이전 쪽")):
+            sl.addWidget(self._btn(key, 14, "", lambda k=key: win.on_action(k), name=nm))
         self.page_edit = _PageEdit(); self.page_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_edit.setAccessibleName("쪽 번호")
         self.page_edit.returnPressed.connect(win._goto_entered); sl.addWidget(self.page_edit)
         self._fit_page_edit()
-        for key in ("next", "last"):
-            sl.addWidget(self._btn(key, 14, "", lambda k=key: win.on_action(k)))
+        for key, nm in (("next", "다음 쪽"), ("last", "마지막 쪽")):
+            sl.addWidget(self._btn(key, 14, "", lambda k=key: win.on_action(k), name=nm))
         self.sb_hist = {}
-        for key, name in (("prev_view", "back"), ("next_view", "forward")):   # 이전 보기 · 다음 보기(Alt+← · Alt+→)
-            b = self._btn(name, 14, "", lambda k=key: win.on_action(k)); sl.addWidget(b); self.sb_hist[key] = b
+        for key, name, nm in (("prev_view", "back", "이전 보기"), ("next_view", "forward", "다음 보기")):   # Alt+← · Alt+→
+            b = self._btn(name, 14, "", lambda k=key: win.on_action(k), name=nm); sl.addWidget(b); self.sb_hist[key] = b
         sl.addSpacing(8)
         self.fit_btn, self.fit_menu = self._drop("맞춤 방식", FITS, "fitwidth")
         self.layout_btn, self.layout_menu = self._drop("보기 방식", LAYOUTS, "continuous")
@@ -93,10 +95,10 @@ class StatusBar(QWidget):
         sl.addStretch()
         sl.addWidget(self._btn("zoomout", 14, "축소", lambda: win.on_action("zoomout")))
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal); self.zoom_slider.setRange(0, len(PageView.STEPS) - 1)
-        self.zoom_slider.setFixedWidth(110); self.zoom_slider.setPageStep(1)
+        self.zoom_slider.setAccessibleName("배율"); self.zoom_slider.setFixedWidth(110); self.zoom_slider.setPageStep(1)
         self.zoom_slider.valueChanged.connect(win._zoom_slider); sl.addWidget(self.zoom_slider)
         sl.addWidget(self._btn("zoomin", 14, "확대", lambda: win.on_action("zoomin")))
-        self.zoom_box = QComboBox(); self.zoom_box.setEditable(True)
+        self.zoom_box = QComboBox(); self.zoom_box.setEditable(True); self.zoom_box.setAccessibleName("배율 값")
         self.zoom_box.addItems([pct_text(z) for z in PageView.STEPS])
         fitwidth.fit(self.zoom_box, fitwidth.combo_texts(self.zoom_box))   # 「1600%」까지 다 보이게
         self.zoom_box.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9.%]*"), self.zoom_box))
@@ -117,15 +119,17 @@ class StatusBar(QWidget):
         self.collapsed = bool(win.settings.get("status_collapsed"))
         self._sync_fold_btn()
 
-    def _btn(self, icon: str, px: int, tip: str, fn) -> QToolButton:
+    def _btn(self, icon: str, px: int, tip: str, fn, name: str = "") -> QToolButton:
         b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(icon, px))
         if tip:
             b.setToolTip(tip)
+        if name or tip:
+            b.setAccessibleName(name or tip)
         b.clicked.connect(fn)
         return b
 
     def _drop(self, tip: str, items, icon: str):
-        b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(icon, 14)); b.setToolTip(tip)
+        b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(icon, 14)); b.setToolTip(tip); b.setAccessibleName(tip)
         b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         m = QMenu(b); grp = QActionGroup(m); grp.setExclusive(True)
         for key, label, ic, mode in items:

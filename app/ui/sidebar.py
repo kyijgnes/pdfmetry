@@ -28,6 +28,7 @@ def panel_head(title: str, buttons=(), more=None, closable: bool = True) -> QWid
     hl = QHBoxLayout(w); hl.setContentsMargins(10, 0, 4, 0); hl.setSpacing(0)
     if more is None:
         t = QLabel(title); t.setObjectName("paneltitle")
+        t.setMinimumWidth(t.fontMetrics().horizontalAdvance(title) + 8)   # 단추에 밀려 「첨부 파9」로 잘리지 않게
     else:
         hl.setContentsMargins(4, 0, 4, 0)
         t = QToolButton(); t.setObjectName("paneltitlebtn"); t.setText(title)
@@ -35,12 +36,12 @@ def panel_head(title: str, buttons=(), more=None, closable: bool = True) -> QWid
         m = QMenu(t); m.aboutToShow.connect(lambda: (m.clear(), more(m))); t.setMenu(m)
     hl.addWidget(t); hl.addStretch()
     for name, tip, fn in buttons:
-        b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(name, 16)); b.setToolTip(tip)
+        b = QToolButton(); b.setObjectName("quick"); b.setIcon(icons.icon(name, 16)); b.setToolTip(tip); b.setAccessibleName(tip)
         b.clicked.connect(fn); hl.addWidget(b)
     if closable:
         # QPushButton: 패널이 머리의 QToolButton 을 세어 쓰므로(썸네일 작게·크게) 다른 종류로
         c = QPushButton(); c.setObjectName("panelclose"); c.setFlat(True); c.setFixedSize(24, 24)
-        c.setIcon(icons.icon("prev", 14)); c.setToolTip("닫기")
+        c.setIcon(icons.icon("prev", 14)); c.setToolTip("닫기"); c.setAccessibleName("패널 닫기")
         def close():
             p = w.parentWidget()
             while p is not None and not hasattr(p, "panel_closed"):
@@ -957,6 +958,8 @@ class AnnotPanel(QWidget):
         self.filter_btn.clicked.connect(self.open_filter)
         row.addWidget(self.group, 1); row.addWidget(self.filter_btn); bl.addLayout(row)
         self.find = QLineEdit(); self.find.setPlaceholderText("내용·작성자 찾기"); self.find.setClearButtonEnabled(True)
+        for cb in self.find.findChildren(QToolButton):
+            cb.setAccessibleName("찾기 칸 지우기")
         self.find.textChanged.connect(self.reload)
         bl.addWidget(self.find)
         row = QHBoxLayout(); row.setSpacing(4)
@@ -981,6 +984,14 @@ class AnnotPanel(QWidget):
         self.empty = QLabel(""); self.empty.setObjectName("dim"); self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty.hide(); lay.addWidget(self.empty)
         self.reload()
+
+    NARROW = 340   # 이보다 좁으면 종류·내용 두 열만
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        narrow = self.width() < self.NARROW
+        for c in (2, 3):
+            self.tree.setColumnHidden(c, narrow)
 
     @staticmethod
     def _day(mod: str) -> str:
@@ -1264,7 +1275,8 @@ class AttachmentPanel(_Prefs, QWidget):
     # ── 목록 ──
     @staticmethod
     def _label(filename: str, size: int, desc: str) -> str:
-        return f"{filename}  ({size / 1024:.0f} KB)" + (f" · {desc}" if desc else "")
+        sz = f"{size} B" if size < 1024 else f"{size / 1024:.0f} KB"
+        return f"{filename}  ({sz})" + (f" · {desc}" if desc else "")
 
     def page_attachments(self) -> list[dict]:
         """쪽에 붙은 첨부(FileAttachment 주석)."""
@@ -1601,11 +1613,15 @@ class FieldPanel(QWidget):
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["이름", "종류", "값"]); _tidy_tree(self.tree, 0)
         self.tree.itemClicked.connect(lambda it, _: self.gotoField.emit(*it.data(0, Qt.ItemDataRole.UserRole)) if it.data(0, Qt.ItemDataRole.UserRole) else None)
         lay.addWidget(self.tree)
+        self.empty = QLabel("이 문서에는 양식 칸이 없습니다"); self.empty.setObjectName("dim")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter); lay.addWidget(self.empty)
         self.reload()
 
     def reload(self):
         self.tree.clear()
-        for f in A.fields(self.doc):
+        fields = A.fields(self.doc)
+        self.empty.setVisible(not fields); self.tree.setVisible(bool(fields))
+        for f in fields:
             it = QTreeWidgetItem([f["name"], A.FIELD_TYPE_KO.get(f["type"].lower().replace("button", "button"), f["type"]), "꺼짐" if str(f["value"]) == "Off" else str(f["value"] or "")])
             it.setData(0, Qt.ItemDataRole.UserRole, (f["page"], f["rect"]))
             self.tree.addTopLevelItem(it)

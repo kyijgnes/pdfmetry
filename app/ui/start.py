@@ -10,7 +10,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
                                QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
-from . import icons, theme
+from . import a11y, icons, theme
 
 QUICK_TOOLS = [
     ("edit", "편집", "파일에서 텍스트와 이미지를 편집합니다."),
@@ -155,6 +155,7 @@ class StartPage(QWidget):
             b = QToolButton(); b.setObjectName("nav"); b.setIcon(icons.icon(name, 16)); b.setText(label)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon); b.setCheckable(True); b.setAutoExclusive(True)
             b.setStyleSheet("QToolButton#nav{border-left:none; padding:6px; text-align:left}")
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)   # 고른 칸 바탕이 목록 폭 끝까지
             b.clicked.connect(lambda _, k=key: self.set_mode(k)); ll.addWidget(b); self.navbtns[key] = b
         self.navbtns["recent"].setChecked(True)
         ll.addStretch()
@@ -186,7 +187,10 @@ class StartPage(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
         rl.addWidget(self.table)
+        self.empty = QLabel(""); self.empty.setObjectName("dim"); self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rl.addWidget(self.empty, 1); self.empty.hide()
         root.addWidget(right, 1)
+        a11y.name_icon_buttons(self)
         self.stats = _Stats(self)
         self.stats.got.connect(self._stat_got)
         self.reload()
@@ -214,6 +218,12 @@ class StartPage(QWidget):
 
     def reload(self):
         rows = self._rows()
+        self.table.setVisible(bool(rows)); self.empty.setVisible(not rows)
+        if not rows:
+            if self.search.text().strip():
+                self.empty.setText("검색 결과 없음")
+            else:
+                self.empty.setText({"recent": "최근 파일 없음", "fav": "즐겨찾기 파일 없음", "folder": "최근 폴더 없음"}[self.mode])
         self.table.setRowCount(len(rows))
         for n, r in enumerate(rows):
             name = QTableWidgetItem(os.path.basename(r["path"]) or r["path"])
