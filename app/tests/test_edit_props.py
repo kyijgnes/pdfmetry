@@ -200,7 +200,7 @@ def test_panel_image_buttons(win):
     cp._size_done(); assert len(t.doc._undo) == 2      # 안 고쳤으면 그대로
     cp.w.set_pt(100); cp.h.set_pt(200); cp._size_done(); pump(0.05)
     assert _near(_img(t.doc)["rect"], (325, 275, 425, 475), tol=0.3)
-    cp.center_both.click(); pump(0.05)
+    t.props.arrange.buttons["page_both"].click(); pump(0.05)   # 쪽 가운데는 「정렬」 카드 한 곳
     pr = t.doc.fitz[0].rect
     r = _img(t.doc)["rect"]
     assert _near(((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2), (pr.width / 2, pr.height / 2))
