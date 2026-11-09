@@ -99,8 +99,8 @@ TABS: list[tuple[str, str, list]] = [
         ("zoom_menu", "actual", "확대 방식", "menu", [("zoom_actual", "실제 페이지 크기에 맞추기"), ("zoom_width", "창 너비에 맞추기"),
                                              ("zoom_height", "창 높이에 맞추기"), ("zoom_page", "창 크기에 맞추기"), MENU_SEP,
                                              ("fullscreen", "전체 화면"), ("zoom_area", "영역 확대")]),
-        ("layout_menu", "continuous", "보기 방식", "menu", [("layout_single", "한 페이지씩 보기"), ("layout_continuous", "스크롤 활성화 상태로 페이지 보기"),
-                                                   ("layout_facing", "양 옆으로 두페이지 보기"), ("layout_facing_continuous", "스크롤 활성화 상태로 양 옆으로 보기"),
+        ("layout_menu", "continuous", "페이지 표시", "menu", [("layout_single", "한 페이지씩 보기"), ("layout_continuous", "스크롤 활성화 상태로 페이지 보기"),
+                                                   ("layout_facing", "양 옆으로 두 페이지 보기"), ("layout_facing_continuous", "스크롤 활성화 상태로 양 옆으로 보기"),
                                                    MENU_SEP, ("layout_cover", "표지 따로 보기")]),
         ("canvas_menu", "background", "배경", "menu", [("canvas_default", "기본"), ("canvas_day", "낮"), ("canvas_eye", "눈 보호"),
                                                    ("canvas_night", "밤"), ("canvas_parchment", "양피지")]), SEP,
@@ -144,9 +144,10 @@ TABS: list[tuple[str, str, list]] = [
                                                 ("align_vcenter", "세로 가운데 맞춤"), MENU_SEP,
                                                 ("align_page_h", "페이지 가로 가운데"), ("align_page_v", "페이지 세로 가운데"),
                                                 ("align_page_both", "페이지 한가운데")]),
-        ("form_more", "more", "더보기", "menu", [("extract_data", "데이터 추출"), ("recognize", "양식 인식"), ("calc_order", "계산 순서"),
-                                                 ("form_export", "데이터 내보내기"), ("form_import", "데이터 가져오기"),
-                                                 ("form_reset", "기본 데이터 복구"), MENU_SEP, ("form_set_default", "지금 값을 기본값으로")]),
+        # 단추로 나온 기본 데이터 복구·양식 인식·데이터 추출은 더보기에 다시 넣지 않는다
+        ("form_more", "more", "더보기", "menu", [("calc_order", "계산 순서"), ("form_export", "데이터 내보내기"),
+                                                 ("form_import", "데이터 가져오기"), MENU_SEP,
+                                                 ("form_set_default", "지금 값을 기본값으로 저장")]),
         ("recognize", "recognize", "양식 인식", "action", None), ("extract_data", "export", "데이터 추출", "action", None),
     ]),
     ("protect", "보안", [
@@ -163,7 +164,7 @@ LABELS = {k: lbl for _, _, items in TABS for it in items if it != SEP for k, lbl
 LABELS.update({"hand": "손", "select": "선택", "zoomin": "확대", "zoomout": "축소", "pencil": "연필", "eraser": "지우개",
                "highlight": "강조", "underline": "밑줄", "typewriter": "타자기", "note": "노트", "rect": "직사각형", "stamp": "스탬프",
                "signature": "서명", "attach": "첨부 파일", "measure": "측정", "show_annots": "주석 보이기", "zoom_menu": "확대 방식",
-               "layout_menu": "보기 방식", "canvas_menu": "배경", "thumb_out": "썸네일 축소", "thumb_in": "썸네일 확대",
+               "layout_menu": "페이지 표시", "canvas_menu": "배경", "thumb_out": "썸네일 축소", "thumb_in": "썸네일 확대",
                "rotate_left": "왼쪽 회전", "rotate_right": "오른쪽 회전", "delete_pages": "페이지 삭제", "ftext": "텍스트 칸",
                "fcheck": "체크 박스", "fradio": "라디오 버튼", "fcombo": "콤보 박스", "flist": "목록 박스", "fbutton": "누름 버튼",
                "fimage": "이미지", "fsign": "디지털 서명 칸", "fdate": "날짜 칸", "areahl": "영역 강조", "strike": "취소선",
@@ -186,6 +187,11 @@ ANNOT_TOOLS = {"highlight", "areahl", "underline", "strike", "squiggly", "caret"
                "cloud", "polygon", "triangle", "cross", "bent_arrow", "balloon", "note", "m_distance", "m_perimeter", "m_area",
                "pencil", "eraser", "stamp", "signature", "typewriter", "textbox", "callout", "attach"}
 KEEP_OFF = {"stamp", "signature", "attach"}   # 처음엔 한 번 쓰고 선택 도구로 돌아가는 것
+
+
+def shown(label: str) -> str:
+    """단추 글자로 넣을 때 「&」 가 단축키 밑줄로 먹히지 않게(「눈금자 & 격자」)."""
+    return label.replace("&", "&&")
 
 
 def keep_tool(settings: dict, key: str) -> bool:
@@ -266,42 +272,47 @@ class Ribbon(QWidget):
         # 리본 아래 옅은 그림자: 리본과 문서 자리가 한 판으로 붙어 밋밋하던 것을 층으로 나눈다
         shade = QWidget(); shade.setObjectName("ribbonshadow"); shade.setFixedHeight(4)
         shade.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True); lay.addWidget(shade)
-        self._widths: dict[str, tuple[int, list[int], list[QToolButton]]] = {}
+        self._widths: dict[str, tuple[int, list[int], list[QToolButton], list[list[int]]]] = {}
         self.current_tab = "home"
         self.folded = False
         self.set_edit_target("all")
         self.set_tab("home")
 
     # 창이 좁으면 단추 이름을 접고(아이콘만) 넓으면 편다. 이름을 늘 다 보이면 창을 1300px 아래로 못 줄였다.
-    # 주석 탭처럼 단추가 많으면 다 펴지 못하므로 왼쪽 단추부터 들어가는 만큼만 이름을 편다.
-    def _measure(self):
-        for key, w in self.pages.items():
-            btns = [b for b in w.findChildren(QToolButton) if b.text()]
-            btns.sort(key=lambda b: w.layout().indexOf(b))
+    # 펴고 접는 것은 구분선으로 나뉜 묶음 단위다. 왼쪽 묶음부터 통째로 들어가면 펴고, 안 들어가는 묶음은
+    # 통째로 아이콘만 두고 다음 묶음을 본다(주석 탭: 글자 표시·그림 묶음은 이름, 남는 묶음은 아이콘).
+    # 남는 폭은 양옆 늘임 칸이 나눠 가져 단추 줄이 늘 가운데에 선다.
+    def _measure(self, keys=None):
+        for key in (keys or list(self.pages)):
+            w = self.pages[key]
             lay = w.layout()
+            btns = [b for b in w.findChildren(QToolButton) if b.text()]
+            btns.sort(key=lambda b: lay.indexOf(b))
+            groups: dict[int, list[int]] = {}
             extra = []
-            for b in btns:
+            for n, b in enumerate(btns):
                 b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly); small = b.sizeHint().width()
                 b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon); extra.append(b.sizeHint().width() - small)
                 b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+                groups.setdefault(int(b.property("grp") or 0), []).append(n)
             lay.invalidate(); compact = lay.minimumSize().width()
-            self._widths[key] = (compact, extra, btns)
+            self._widths[key] = (compact, extra, btns, [groups[g] for g in sorted(groups)])
             w.setMinimumWidth(compact)
         self._fit()
 
     def _fit(self):
         avail = self.stack.width()
-        for compact, extra, btns in self._widths.values():
+        for compact, extra, btns, groups in self._widths.values():
             room = avail - compact
-            for b, x in zip(btns, extra):
-                fits = room >= x
+            for idx in groups:
+                need = sum(extra[i] for i in idx)
+                fits = need <= room
                 if fits:
-                    room -= x
-                else:
-                    room = -1   # 하나가 못 펴지면 그 뒤는 다 접는다(이름이 띄엄띄엄 보이지 않게)
+                    room -= need
                 style = Qt.ToolButtonStyle.ToolButtonTextBesideIcon if fits else Qt.ToolButtonStyle.ToolButtonIconOnly
-                if b.toolButtonStyle() != style:
-                    b.setToolButtonStyle(style)
+                for i in idx:
+                    if btns[i].toolButtonStyle() != style:
+                        btns[i].setToolButtonStyle(style)
 
     def sizeHint(self):
         """창 처음 크기를 리본이 정하지 않게(이름을 다 편 주석 탭은 2700px 쯤 된다)."""
@@ -323,8 +334,10 @@ class Ribbon(QWidget):
         hl.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)  # 최소 폭은 _measure 가 정한다(아이콘만일 때 폭)
         w.setMinimumWidth(1)   # _measure 전에는 이름을 다 편 폭이 창 최소 폭이 되지 않게
         hl.addStretch(1)
+        grp = 0
         for it in items:
             if it == SEP:
+                grp += 1
                 f = QFrame(); f.setObjectName("vsep"); f.setFrameShape(QFrame.Shape.VLine); f.setFixedHeight(18); hl.addWidget(f)
                 continue
             key, icon, label, kind, menu_items, *first = it
@@ -334,8 +347,8 @@ class Ribbon(QWidget):
             b = QToolButton(); b.setObjectName("rb"); b.setIcon(icons.icon(icon, 16)); b.setIconSize(icons.icon_size(16))
             b.setToolTip(LABELS.get(key, label))
             if label:
-                b.setText(label); b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            b.setProperty("key", key); b.setProperty("kind", kind)
+                b.setText(shown(label)); b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setProperty("key", key); b.setProperty("kind", kind); b.setProperty("grp", grp)
             if kind in ("tool", "toggle"):
                 b.setCheckable(True)
             if menu_items:
@@ -420,7 +433,10 @@ class Ribbon(QWidget):
             btn.setProperty("toolkey", key)
             btn.setToolTip(LABELS.get(key, key))
             if btn.text():
-                btn.setText(LABELS.get(key, btn.text()))
+                btn.setText(shown(LABELS.get(key, btn.text())))
+                page = next((k for k, w in self.pages.items() if w.isAncestorOf(btn)), None)
+                if page is not None and page in self._widths:
+                    self._measure([page])   # 이름 길이가 바뀌었으니 그 탭만 다시 잰다
             btn.setChecked(True)
             self.tool.emit(key)
         else:

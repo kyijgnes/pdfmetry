@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from ..engine import annot_shapes as SH
 from ..engine import annot_style as S
 from ..engine import annots as A
+from . import fitwidth
 from .dialogs import ColorButton, from_rgb01
 from .props_arrange import ArrangeBox
 from .props_content import ContentProps
@@ -25,6 +26,9 @@ _TEXT_KEYS = ("textbox", "callout", "typewriter")
 _MEASURE = ("m_distance", "m_perimeter", "m_area")
 _CLOUD_KEYS = ("rect", "oval", "polygon", "cloud")
 _MEASURE_IT = ("/LineDimension", "/PolyLineDimension", "/PolygonDimension")
+PANEL_FLOOR = 260   # 이보다 좁게는 안 줄인다(글꼴이 크거나 배율이 커서 단추 글자가 더 길면 그만큼 넓힌다)
+# 고른 것 종류별 삭제 단추 이름
+DELETE_TEXT = {"annot": "고른 주석 삭제", "widget": "고른 칸 삭제", "block": "고른 개체 삭제", "image": "고른 개체 삭제"}
 
 
 def _pdf_date(s: str) -> str:
@@ -33,6 +37,24 @@ def _pdf_date(s: str) -> str:
     if len(s) < 12 or not s[:12].isdigit():
         return ""
     return f"{s[:4]}-{s[4:6]}-{s[6:8]} {s[8:10]}:{s[10:12]}"
+
+
+def _min_w(it) -> int:
+    """레이아웃 칸 하나가 글자를 다 보이려면 필요한 폭. 숨은 위젯도 잰다(다른 것을 고르면 보이므로)."""
+    w = it.widget()
+    if w is not None:
+        if isinstance(w, QAbstractButton) and w.text():
+            return max(w.sizeHint().width(), w.minimumWidth())
+        if isinstance(w, QLabel) and w.wordWrap():
+            return w.minimumWidth()
+        return max(w.minimumSizeHint().width(), w.minimumWidth())
+    lay = it.layout()
+    if lay is not None:
+        parts = [_min_w(lay.itemAt(k)) for k in range(lay.count())]
+        parts = [p for p in parts if p]
+        m = lay.contentsMargins()
+        return sum(parts) + max(lay.spacing(), 0) * max(len(parts) - 1, 0) + m.left() + m.right()
+    return 0
 
 
 def tool_key(tool: str) -> str | None:
@@ -60,7 +82,6 @@ class PropsPanel(QWidget):
     def __init__(self, props: dict, viewer=None, store: S.StyleStore | None = None, parent=None):
         super().__init__(parent)
         self.setObjectName("proppanel")
-        self.setFixedWidth(260)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.props = props
         self.viewer = viewer
@@ -83,6 +104,7 @@ class PropsPanel(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea, QWidget#propbody { background: transparent; }")
         scroll.viewport().setAutoFillBackground(False)
+        self._body, self._scroll, self._body_lay = body, scroll, lay
         outer.addWidget(scroll, 1)
         head = QHBoxLayout(); head.setSpacing(6)
         self.kind = QLabel(""); self.kind.setObjectName("dim"); self.kind.setWordWrap(True); head.addWidget(self.kind, 1)
@@ -104,7 +126,7 @@ class PropsPanel(QWidget):
         self.border = ColorButton((1, 0, 0), allow_none=True); f.addRow("테두리색", self.border)
         self.fill = ColorButton(None, allow_none=True); f.addRow("채움색", self.fill)
         self.width = QDoubleSpinBox(); self.width.setRange(0.1, 12); self.width.setSingleStep(0.1); self.width.setDecimals(1)
-        f.addRow("두께", self.width)
+        self.width.setSuffix(" pt"); f.addRow("두께", self.width)
         self.dashes = QComboBox(); f.addRow("선 모양", self.dashes)
         self.start = QComboBox(); self.start.addItems(list(S.LINE_ENDS)); f.addRow("시작 모양", self.start)
         self.end = QComboBox(); self.end.addItems(list(S.LINE_ENDS)); f.addRow("끝 모양", self.end)
@@ -136,9 +158,10 @@ class PropsPanel(QWidget):
         self.content.installEventFilter(self)
         from .dlg_redact import RedactProps
         self.redact_props = RedactProps(viewer); lay.addWidget(self.redact_props)   # 교정 도구·교정 표시
-        self.del_btn = QPushButton("고른 주석 삭제"); self.del_btn.clicked.connect(self.deleteSel.emit); lay.addWidget(self.del_btn)
+        self.del_btn = QPushButton(DELETE_TEXT["annot"]); self.del_btn.clicked.connect(self.deleteSel.emit); lay.addWidget(self.del_btn)
         lay.addStretch()
         self._align_labels(body)
+        self._refit()
 
         for w in (self.color, self.border, self.fill):
             w.clicked.connect(self._edited)
@@ -160,6 +183,50 @@ class PropsPanel(QWidget):
         w = max((l.sizeHint().width() for l in labels), default=0)
         for l in labels:
             l.setMinimumWidth(w)
+
+    # ── 폭: 가장 긴 줄(이름 칸 + 단추 글자)이 다 보이게 ─────────────
+    def _need(self) -> int:
+        """숨은 카드·줄까지 모두 재어, 어느 것을 골라도 단추·칸 글자가 잘리지 않는 패널 폭."""
+        body = self._body
+        widest = 0
+        for f in body.findChildren(QFormLayout):
+            hs = f.horizontalSpacing()
+            hs = hs if hs >= 0 else 6
+            lab = fld = span = 0
+            for i in range(f.rowCount()):
+                it = f.itemAt(i, QFormLayout.ItemRole.SpanningRole)
+                if it is not None:   # 한 줄을 다 쓰는 칸(이름 칸 없음)
+                    span = max(span, _min_w(it))
+                    continue
+                it = f.itemAt(i, QFormLayout.ItemRole.LabelRole)
+                lab = max(lab, _min_w(it)) if it is not None else lab
+                it = f.itemAt(i, QFormLayout.ItemRole.FieldRole)
+                fld = max(fld, _min_w(it)) if it is not None else fld
+            row = max(lab + hs + fld if fld else lab, span)
+            # 카드 테두리·안쪽 여백(본문까지 올라가며 더함)
+            w = f.parentWidget()
+            while w is not None and w is not body:
+                m = w.contentsMargins(); row += m.left() + m.right()
+                lm = w.layout().contentsMargins() if w.layout() is not None else None
+                if lm is not None:
+                    row += lm.left() + lm.right()
+                if isinstance(w, QFrame):
+                    row += 2 * w.frameWidth()
+                w = w.parentWidget()
+            widest = max(widest, row)
+        for i in range(self._body_lay.count()):   # 카드 밖 줄: 기본값 단추 줄·삭제 단추
+            it = self._body_lay.itemAt(i)
+            widest = max(widest, _min_w(it))
+        bm = self._body_lay.contentsMargins()
+        bar = self._scroll.verticalScrollBar().sizeHint().width()
+        return widest + bm.left() + bm.right() + bar + 2 * self._scroll.frameWidth() + 1   # 1: 패널 왼쪽 선
+
+    def _refit(self):
+        fitwidth._keep(self, [], PANEL_FLOOR, lambda _w, _t: self._need())
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._refit()
 
     def eventFilter(self, obj, e):
         if obj is self.content and e.type() == QEvent.Type.FocusOut:
@@ -190,7 +257,9 @@ class PropsPanel(QWidget):
         tool = self._tool()
         tkey = self._tool_key()
         self._measure = None
-        self.del_btn.setVisible(sel is not None and sel.kind in ("annot", "widget", "block", "image"))
+        self.del_btn.setVisible(sel is not None and sel.kind in DELETE_TEXT)
+        if sel is not None and sel.kind in DELETE_TEXT:
+            self.del_btn.setText(DELETE_TEXT[sel.kind])
         if annot and tkey is None:
             self.sel = sel
             a = self._annot()
@@ -231,7 +300,7 @@ class PropsPanel(QWidget):
         for w, on in rows.items():
             self.look.setRowVisible(w, on)
         if main:
-            self.look.labelForField(self.color).setText({"color": "색", "stroke": "선 색", "text_color": "글자색"}[main])
+            self.look.labelForField(self.color).setText({"color": "색", "stroke": "선색", "text_color": "글자색"}[main])
         if self.key in _TEXT_KEYS:
             self.look.labelForField(self.width).setText("테두리 두께")
             self.look.labelForField(self.fill).setText("바탕색")
@@ -244,6 +313,7 @@ class PropsPanel(QWidget):
         self.reset_btn.setVisible(self.sel is None and self.key in S.DEFAULTS)
         self.default_btn.setVisible(self.sel is not None and self.key in S.DEFAULTS)
         self.info_box.setVisible(self.sel is not None)
+        self._refit()   # 이름 칸 글자(테두리 두께·지시선 끝 등)가 바뀌었을 수 있다
 
     def _set_lock(self, on: bool):
         self.lock.blockSignals(True)

@@ -4,8 +4,10 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QIconEngine, QPainter, QPen, QPixmap
+import math
+
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QIconEngine, QPainter, QPainterPath, QPen, QPixmap
 
 from . import theme
 
@@ -28,7 +30,7 @@ GLYPH = {
     "thumbs": 0xE7C3, "bookmark": 0xE8A4, "comments": 0xE90A, "attach": 0xE723, "layers": 0xE81E,
     "fields": 0xE8E9, "signature": 0xEE56, "props": 0xE90F,
     # 주석
-    "highlight": 0xE7E6, "underline": 0xE8DC, "strike": 0xEDE0, "squiggly": 0xE8DD, "areahl": 0xEF20,
+    "highlight": 0xE7E6, "underline": 0xE8DC, "strike": 0xEDE0, "areahl": 0xEF20,
     "caret": 0xE78B, "rect": 0xE739, "oval": 0xEA3A, "line": 0xE8EC, "arrow": 0xE8E2, "polygon": 0xE8F1,
     "polyline": 0xEE97, "cloudshape": 0xE753, "note": 0xE70B, "typewriter": 0xE8D2, "textbox": 0xE8A1,
     "callout": 0xE8F2, "pencil": 0xEE56, "eraser": 0xED60, "stamp": 0xE8B6, "measure": 0xED5E,
@@ -54,6 +56,8 @@ GLYPH = {
     "hidden": 0xED1A, "cert": 0xEB95, "validate": 0xE73E, "clearsig": 0xE74D,
 }
 
+DISABLED_ALPHA = 0.45   # 꺼진 단추 아이콘: 흐린 글자색을 이만큼만 칠해 켜진 단추와 한눈에 갈리게
+
 _FONT_NAME = None
 _cache: dict[tuple, QIcon] = {}
 
@@ -71,13 +75,40 @@ def _font_name() -> str:
     return _FONT_NAME
 
 
+def _squiggly(p: QPainter, rect: QRectF, col: QColor):
+    """구불구불한 선: 글자 「가」 아래 물결 밑줄(글꼴에 맞는 모양이 없어 그린다)."""
+    size = min(rect.width(), rect.height())
+    x0, y0 = rect.center().x() - size / 2, rect.center().y() - size / 2
+    f = QFont(theme.FONT)
+    f.setPixelSize(max(1, round(size * 0.58)))
+    p.setFont(f)
+    p.setPen(col)
+    p.drawText(QRectF(x0, y0, size, size * 0.68), Qt.AlignmentFlag.AlignCenter, "가")
+    path = QPainterPath()
+    left, right = x0 + size * 0.1, x0 + size * 0.9
+    mid, amp, waves = y0 + size * 0.84, size * 0.07, 3
+    path.moveTo(left, mid)
+    steps = 24
+    for k in range(1, steps + 1):
+        t = k / steps
+        path.lineTo(QPointF(left + (right - left) * t, mid - amp * math.sin(t * waves * 2 * math.pi)))
+    p.setPen(QPen(col, max(1.0, size / 14), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(path)
+
+
+DRAWN = {"squiggly": _squiggly}   # 글꼴 글자 대신 직접 그리는 아이콘
+
+
 def _draw(p: QPainter, rect: QRectF, name: str, col: QColor):
     """글자 아이콘 하나를 rect 에 그린다(장치 픽셀로 그려 고해상도 화면에서도 또렷하게)."""
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
     size = min(rect.width(), rect.height())
     code = GLYPH.get(name)
-    if code:
+    if name in DRAWN:
+        DRAWN[name](p, rect, col)
+    elif code:
         f = QFont(_font_name())
         f.setPixelSize(max(1, round(size * 0.82)))
         p.setFont(f)
@@ -94,7 +125,7 @@ def _draw(p: QPainter, rect: QRectF, name: str, col: QColor):
 
 
 class _GlyphEngine(QIconEngine):
-    """그릴 때마다 지금 테마 색을 쓴다: 보통은 글자색, 꺼진 단추는 흐린 색, 켜진(눌린) 단추는 강조 빨강.
+    """그릴 때마다 지금 테마 색을 쓴다: 보통은 글자색, 꺼진 단추는 흐린 색을 더 옅게, 켜진(눌린) 단추는 강조 빨강.
     전에는 밝은 테마 검정으로 미리 그려 두어 「어두운 화면」 에서 아이콘이 거의 안 보였다."""
 
     def __init__(self, name: str, color: str | None):
@@ -103,7 +134,9 @@ class _GlyphEngine(QIconEngine):
 
     def _color(self, mode, state) -> QColor:
         if mode == QIcon.Mode.Disabled:
-            return QColor(theme.CUR["TEXT_DIM"])
+            c = QColor(theme.CUR["TEXT_DIM"])
+            c.setAlphaF(DISABLED_ALPHA)
+            return c
         if self.color:
             return QColor(self.color)
         if state == QIcon.State.On:

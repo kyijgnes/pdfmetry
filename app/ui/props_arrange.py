@@ -5,15 +5,16 @@
 """
 from __future__ import annotations
 
-from PySide6.QtWidgets import QGridLayout, QPushButton, QWidget
+from PySide6.QtWidgets import QGridLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 from .sidebar import group_card
 
-ROWS = (("순서", (("front", "맨 앞으로"), ("back", "맨 뒤로"), ("forward", "앞으로"), ("backward", "뒤로"))),
-        ("맞춤", (("left", "왼쪽"), ("hcenter", "가로 가운데"), ("right", "오른쪽"),
-                 ("top", "위쪽"), ("vcenter", "세로 가운데"), ("bottom", "아래쪽"))),
-        ("쪽 가운데", (("page_h", "가로"), ("page_v", "세로"), ("page_both", "한가운데"))),
-        ("분배", (("dist_h", "가로"), ("dist_v", "세로"))))
+# (줄 이름, 칸 수, 단추들). 단추는 왼쪽에서 오른쪽, 칸이 차면 다음 줄. 맞춤은 왼쪽 칸이 가로, 오른쪽 칸이 세로.
+ROWS = (("순서", 2, (("front", "맨 앞으로"), ("back", "맨 뒤로"), ("forward", "앞으로"), ("backward", "뒤로"))),
+        ("맞춤", 2, (("left", "왼쪽"), ("top", "위쪽"), ("hcenter", "가로 가운데"), ("vcenter", "세로 가운데"),
+                    ("right", "오른쪽"), ("bottom", "아래쪽"))),
+        ("쪽 가운데", 3, (("page_h", "가로"), ("page_v", "세로"), ("page_both", "한가운데"))),
+        ("분배", 2, (("dist_h", "가로"), ("dist_v", "세로"))))
 ORDER = ("front", "back", "forward", "backward")
 
 
@@ -32,15 +33,17 @@ class ArrangeBox(QWidget):
         self.box, f = group_card("정렬")
         lay.addWidget(self.box)
         self.buttons: dict[str, QPushButton] = {}
-        for label, items in ROWS:
+        # 줄 이름은 단추 위 한 줄에 두고 단추는 카드 폭을 다 쓴다(이름 칸 옆에 세 칸을 두면 좁은 패널에서 잘렸다).
+        for label, cols, items in ROWS:
             w = QWidget(); g = QGridLayout(w); g.setContentsMargins(0, 0, 0, 0); g.setSpacing(4)
-            cols = 2 if label in ("순서", "분배") else 3
             for n, (how, text) in enumerate(items):
-                b = QPushButton(text)
+                b = QPushButton(text); b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
                 b.clicked.connect(lambda _=False, h=how: self._run(h))
                 g.addWidget(b, n // cols, n % cols)
                 self.buttons[how] = b
-            f.addRow(label, w)
+            for c in range(cols):
+                g.setColumnStretch(c, 1)
+            f.addRow(QLabel(label)); f.addRow(w)
         self.hide()
 
     def _run(self, how: str):

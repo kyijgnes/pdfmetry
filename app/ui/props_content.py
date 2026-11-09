@@ -1,13 +1,13 @@
 """속성 패널의 편집 개체 칸: 고른 글자 덩어리(글꼴·크기·색·굵게·기울임·밑줄·취소선·정렬·줄 간격·문자 간격)와 그림(돌리기·뒤집기·불투명도·크기·바꾸기).
 
-바꾸는 즉시 쪽에 적용하고 한 번 바꿀 때마다 실행 취소 한 걸음이 된다. 「쪽 가운데」 정렬 셋은 둘 다 쓴다.
+바꾸는 즉시 쪽에 적용하고 한 번 바꿀 때마다 실행 취소 한 걸음이 된다. 쪽 가운데 맞추기는 「정렬」 카드(props_arrange) 한 곳에만 둔다.
 """
 from __future__ import annotations
 
 import fitz
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-                               QSlider, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+                               QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from ..engine import annots as A
 from ..engine import fonts as F
@@ -18,17 +18,21 @@ from .sidebar import group_card
 ALIGNS = ("왼쪽", "가운데", "오른쪽", "양쪽")   # insert_textbox 의 align 0~3
 
 
-def _row(*ws) -> QWidget:
-    """단추 여럿을 한 줄에 같은 폭으로(패널 폭을 넘지 않게)."""
-    w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
-    for x in ws:
-        x.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed); x.setMinimumWidth(0)
-        h.addWidget(x)
+def _row(*ws, cols: int = 0) -> QWidget:
+    """단추 여럿을 같은 폭 칸에 놓는다(cols 칸마다 줄을 바꿈, 0 이면 한 줄).
+    단추는 글자가 다 보이는 폭 아래로 줄지 않는다. 그 폭은 패널이 재어 패널 폭을 넓힌다(props._need)."""
+    w = QWidget(); g = QGridLayout(w); g.setContentsMargins(0, 0, 0, 0); g.setHorizontalSpacing(4); g.setVerticalSpacing(4)
+    cols = cols or len(ws)
+    for n, x in enumerate(ws):
+        x.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        g.addWidget(x, n // cols, n % cols)
+    for c in range(cols):
+        g.setColumnStretch(c, 1)
     return w
 
 
 def _toggle(text: str) -> QToolButton:
-    b = QToolButton(); b.setText(text); b.setCheckable(True)
+    b = QToolButton(); b.setObjectName("fmt"); b.setText(text); b.setCheckable(True)   # 색은 테마의 QToolButton#fmt
     return b
 
 
@@ -56,17 +60,16 @@ class ContentProps(QWidget):
         f.addRow("크기", self.size)
         self.color = ColorButton((0, 0, 0)); f.addRow("글자색", self.color)
         self.bold, self.italic = _toggle("굵게"), _toggle("기울임")
-        f.addRow("모양", _row(self.bold, self.italic))
         self.underline, self.strike = _toggle("밑줄"), _toggle("취소선")
         for b, attr in ((self.bold, "setBold"), (self.italic, "setItalic"), (self.underline, "setUnderline"),
                         (self.strike, "setStrikeOut")):
             fo = b.font(); getattr(fo, attr)(True); b.setFont(fo)
-        f.addRow("", _row(self.underline, self.strike))
+        f.addRow("모양", _row(self.bold, self.italic, self.underline, self.strike, cols=2))
         self.align = QButtonGroup(self)
         btns = []
         for n, t in enumerate(ALIGNS):
             b = _toggle(t); self.align.addButton(b, n); btns.append(b)
-        f.addRow("정렬", QWidget()); f.addRow(_row(*btns))
+        f.addRow("정렬", _row(*btns, cols=2))
         self.line_height = QDoubleSpinBox(); self.line_height.setRange(0, 5); self.line_height.setDecimals(2)
         self.line_height.setSingleStep(0.1); self.line_height.setSpecialValueText("기본"); self.line_height.setSuffix(" 배")
         f.addRow("줄 간격", self.line_height)
@@ -91,11 +94,6 @@ class ContentProps(QWidget):
         f.addRow("너비", self.w); f.addRow("높이", self.h)
         self.replace_btn = QPushButton("그림 바꾸기"); f.addRow(self.replace_btn)
 
-        # 쪽 가운데
-        self.place_box, f = group_card("쪽 가운데 맞추기"); lay.addWidget(self.place_box)
-        self.center_h, self.center_v, self.center_both = QPushButton("가로"), QPushButton("세로"), QPushButton("한가운데")
-        f.addRow(_row(self.center_h, self.center_v, self.center_both))
-
         self.family.activated.connect(self._edited)
         self.family.lineEdit().editingFinished.connect(self._edited)
         self.size.valueChanged.connect(self._edited)
@@ -111,9 +109,6 @@ class ContentProps(QWidget):
         self.opacity.valueChanged.connect(self._opacity_moved); self.opacity.sliderReleased.connect(self._opacity_done)
         self.w.editingFinished.connect(self._size_done); self.h.editingFinished.connect(self._size_done)
         self.replace_btn.clicked.connect(lambda: self.viewer.requestDialog.emit("replace_image", self.sel))
-        self.center_h.clicked.connect(lambda: self._center(True, False))
-        self.center_v.clicked.connect(lambda: self._center(False, True))
-        self.center_both.clicked.connect(lambda: self._center(True, True))
 
     # ── 보이기 ────────────────────────────────────────────────
     def _unit(self) -> str:
@@ -227,15 +222,3 @@ class ContentProps(QWidget):
         w = v.width if self.w.value() == self._wh[0] else self.w.pt()
         h = v.height if self.h.value() == self._wh[1] else self.h.pt()
         self.viewer.place_content(self._unvisible(fitz.Rect(v.x0, v.y0, v.x0 + w, v.y0 + h)))
-
-    # ── 쪽 가운데 ─────────────────────────────────────────────
-    def _center(self, horiz: bool, vert: bool):
-        if self.sel is None:
-            return
-        v = self._visible(self.sel.rect)
-        page = self._page().rect          # 보이는 쪽 크기(회전 반영)
-        dx = (page.width - v.width) / 2 - v.x0 if horiz else 0
-        dy = (page.height - v.height) / 2 - v.y0 if vert else 0
-        if abs(dx) < 0.01 and abs(dy) < 0.01:
-            return
-        self.viewer.place_content(self._unvisible(v + (dx, dy, dx, dy)))
