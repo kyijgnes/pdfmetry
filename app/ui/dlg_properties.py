@@ -120,11 +120,12 @@ class PropertiesDialog(QDialog):
         """on_security(kind): 「보안 정책」을 바꿨을 때 부른다(kind = "password" · "none"). 끝나면 다시 읽는다."""
         super().__init__(parent)
         self.doc, self.current, self.settings, self.on_security = doc, current, settings, on_security
-        self.setWindowTitle("속성"); self.setFixedSize(720, 560)
+        self.setWindowTitle("속성"); self.resize(720, 560)
         self.md = doc.metadata()
         self.view0 = doc.initial_view()
         lay = QVBoxLayout(self)
-        row = QHBoxLayout(); lay.addLayout(row, 1)
+        inner = QWidget(); row = QHBoxLayout(inner); row.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(D.FitScroll(inner), 1)   # 작은 화면에서는 몸통만 스크롤
         left = QVBoxLayout(); left.setSpacing(2); row.addLayout(left)
         self.stack = QStackedWidget(); row.addWidget(self.stack, 1)
         self.group = nav_buttons(self, PAGES, left)

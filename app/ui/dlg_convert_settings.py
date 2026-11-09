@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QFormLay
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from .dlg_convert import IMAGE_KEYS, FormatFields, ocr_languages
+from .dialogs import settle_default
 
 # (단추 이름, 형식 키)
 PAGES = [("Word", "docx"), ("Excel", "xlsx"), ("PowerPoint", "pptx"), ("이미지", "png"), ("텍스트", "txt"),
@@ -45,6 +46,7 @@ class ConvertSettingsDialog(QDialog):
             ll.list.itemChanged.connect(lambda _it, src=ll: self._share_langs(src))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         ok = bb.button(QDialogButtonBox.StandardButton.Ok); ok.setText("적용"); ok.setDefault(True)
+        settle_default(self, ok)
         bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         lay.addWidget(bb)

@@ -179,6 +179,7 @@ class SplitPageDialog(QDialog):
 
         self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok = self.bb.button(QDialogButtonBox.StandardButton.Ok); self.ok.setText("적용")
+        D.settle_default(self, self.ok)
         self.bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         self.bb.accepted.connect(self._apply); self.bb.rejected.connect(self.reject)
         lay.addWidget(self.bb)

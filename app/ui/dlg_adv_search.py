@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFileDialog, QH
 from ..engine import search_multi as SM
 from . import icons
 from .search_panel import PREFIX_ROLE, FoundDelegate
+from .dialogs import settle_default
 
 KEY = "adv_search"
 DEFAULTS = {"case": False, "whole": False, "comments": False, "bookmarks": False, "attach": False,
@@ -72,7 +73,7 @@ class AdvancedSearchDialog(QDialog):
         super().__init__(win, Qt.WindowType.Tool)
         self.win = win
         self.setWindowTitle("고급 검색")
-        self.resize(300, 560); self.setMinimumSize(288, 500)
+        self.resize(300, 560); self.setMinimumSize(288, 360)
         self.worker: _Worker | None = None
         self.results: list[SM.FileResult] = []   # 결과가 있는 파일만
         self.failed: list[SM.FileResult] = []
@@ -108,6 +109,7 @@ class AdvancedSearchDialog(QDialog):
         v.addStretch()
         bl = QHBoxLayout(); bl.addStretch()
         self.go = QPushButton("검색"); self.go.setDefault(True); self.go.clicked.connect(self.start); bl.addWidget(self.go)
+        settle_default(self, self.go)
         cancel = QPushButton("취소"); cancel.clicked.connect(self.close); bl.addWidget(cancel)
         v.addLayout(bl)
         for s in (self.where.idToggled, ):
@@ -118,7 +120,7 @@ class AdvancedSearchDialog(QDialog):
     def _pick_folder(self):
         d = QFileDialog.getExistingDirectory(self, "폴더 고르기", self.folder.text())
         if d:
-            self.folder.setText(d); self.r_dir.setChecked(True)
+            self.folder.setText(os.path.normpath(d)); self.r_dir.setChecked(True)
 
     def _sync_cond(self):
         has = bool(self.win.tabs)
@@ -393,7 +395,7 @@ class AdvancedSearchDialog(QDialog):
     def _pick_repl_dir(self):
         d = QFileDialog.getExistingDirectory(self, "저장할 폴더", self.rep_dir.text())
         if d:
-            self.rep_dir.setText(d)
+            self.rep_dir.setText(os.path.normpath(d))
 
     ALL = "모든 문서"
 

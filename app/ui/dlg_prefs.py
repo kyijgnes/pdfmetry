@@ -35,6 +35,12 @@ BLANK_SIZES_MM = (("Letter", 215.9, 279.4), ("Tabloid", 279.4, 431.8), ("Legal",
 BLANK_NAME = "제목 없음"
 MM = 72 / 25.4
 
+
+def _native(path: str) -> str:
+    """화면에 보이는 경로는 윈도우 표기(역슬래시)로."""
+    return os.path.normpath(path) if path else ""
+
+
 EDIT_FONT = {"font": "맑은 고딕", "style": "normal", "size": 14, "color": [0, 0, 0]}
 COMMENT_FONT = {"font": "Malgun Gothic", "size": 14, "color": [1, 0, 0]}   # font: 글꼴 이름(fonts.font_families)
 GRID = {"w": 72 / 2.54, "h": 72 / 2.54, "left": 0.0, "top": 0.0, "sub": 3, "color": [1, 0, 0]}
@@ -110,7 +116,7 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.prefs = settings.setdefault("prefs", {})
-        self.setWindowTitle("환경 설정"); self.setMinimumSize(720, 530); self.resize(720, 530)
+        self.setWindowTitle("환경 설정"); self.setMinimumSize(560, 360); self.resize(720, 530)
         lay = QVBoxLayout(self)
         row = QHBoxLayout(); lay.addLayout(row, 1)
         left = QVBoxLayout(); left.setSpacing(2); row.addLayout(left)
@@ -162,8 +168,9 @@ class PreferencesDialog(QDialog):
         self.smooth = QCheckBox("부드러운 스크롤 효과 사용"); self.smooth.setChecked(p.get("smooth_scroll", True)); f.addRow(self.smooth)
         sd = QHBoxLayout()
         self.save_dir_on = QCheckBox("새 PDF의 위치 저장"); self.save_dir_on.setChecked(p.get("save_dir_on", False))
-        self.save_dir = QLineEdit(p.get("save_dir") or os.path.join(os.path.expanduser("~"), "Documents"))
-        pick = QPushButton("…"); pick.setFixedWidth(32)
+        self.save_dir = QLineEdit(os.path.normpath(p.get("save_dir") or os.path.join(os.path.expanduser("~"), "Documents")))
+        pick = QPushButton("찾아보기"); pick.setAutoDefault(False)
+        self.save_dir.setAccessibleName("새 PDF의 위치")
         pick.clicked.connect(lambda: self._pick_dir(self.save_dir))
         self.save_dir_on.toggled.connect(lambda on: (self.save_dir.setEnabled(on), pick.setEnabled(on)))
         self.save_dir.setEnabled(self.save_dir_on.isChecked()); pick.setEnabled(self.save_dir_on.isChecked())
@@ -172,13 +179,14 @@ class PreferencesDialog(QDialog):
         au = QHBoxLayout()
         self.autosave = QCheckBox("모든 파일 자동 저장"); self.autosave.setChecked(p.get("autosave", True))
         self.autosave_min = QSpinBox(); self.autosave_min.setRange(1, 20); self.autosave_min.setValue(int(p.get("autosave_min", 10)))
+        self.autosave_min.setAccessibleName("자동 저장 간격 (분)")
         self.autosave.toggled.connect(self.autosave_min.setEnabled); self.autosave_min.setEnabled(self.autosave.isChecked())
         au.addWidget(self.autosave); au.addWidget(self.autosave_min); au.addWidget(QLabel("분")); au.addStretch(1)
         f.addRow(au)
         self.restore = QCheckBox(f"{APP_NAME} 실행 중 마지막 세션에서 PDF 열기"); self.restore.setChecked(p.get("restore", False)); f.addRow(self.restore)
         self.confirm_many = QCheckBox("여러 탭을 닫기 전에 확인"); self.confirm_many.setChecked(p.get("confirm_close_many", True)); f.addRow(self.confirm_many)
         self.same_window = QCheckBox("동일한 창에서 새 탭으로 문서 열기"); self.same_window.setChecked(p.get("same_window", True)); f.addRow(self.same_window)
-        self.autosave_style = QCheckBox("마지막으로 고친 주석 모양을 기본값으로")
+        self.autosave_style = QCheckBox("마지막으로 고친 주석 모양을 기본값으로 사용")
         self.autosave_style.setChecked(p.get("annot_autosave_style", True)); f.addRow(self.autosave_style)
         # 알PDF 에 없는 우리 칸
         self.author = QLineEdit(p.get("author", "")); f.addRow("주석 작성자 이름", self.author)
@@ -186,8 +194,8 @@ class PreferencesDialog(QDialog):
         self.winsize = self._combo((("last", "마지막으로 닫은 크기"), ("max", "화면 가득"), ("normal", "보통 크기")),
                                    p.get("window_size", "last"))
         f.addRow("열 때 창 크기", self.winsize)
-        self.share_dir = QLineEdit(p.get("share_dir", "")); f.addRow("공유폴더", self.share_dir)
-        self.default_dir = QLineEdit(p.get("default_dir", "")); f.addRow("변환 저장 폴더", self.default_dir)
+        self.share_dir = QLineEdit(_native(p.get("share_dir", ""))); f.addRow("공유폴더", self.share_dir)
+        self.default_dir = QLineEdit(_native(p.get("default_dir", ""))); f.addRow("변환 저장 폴더", self.default_dir)
         if os.name == "nt":
             pr = QHBoxLayout()
             self.printer_state = QLabel(); self.printer_btn = QPushButton()

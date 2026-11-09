@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout
 
 from ..engine import pages as P
 from .file_list import FileListPanel, OutputPanel, unique_path
+from .dialogs import settle_default
 
 SUFFIX = "_합치기"
 CLOSE_TIPS = "파일을 종료하시겠습니까?"
@@ -63,6 +64,7 @@ class PreviewDialog(QDialog):
         back = bb.addButton("수정으로 돌아가기", QDialogButtonBox.ButtonRole.RejectRole)
         ok = bb.addButton("적용", QDialogButtonBox.ButtonRole.AcceptRole)
         ok.setDefault(True); back.setAutoDefault(False)
+        settle_default(self, ok)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
@@ -93,6 +95,7 @@ class MergeDialog(QDialog):
         bb = QHBoxLayout(); bb.addStretch()
         self.preview_btn = QPushButton("미리 보기"); self.preview_btn.clicked.connect(self.preview)
         self.apply_btn = QPushButton("적용"); self.apply_btn.setDefault(True); self.apply_btn.clicked.connect(self.apply)
+        settle_default(self, self.apply_btn)
         bb.addWidget(self.preview_btn); bb.addWidget(self.apply_btn); lay.addLayout(bb)
         self.files.changed.connect(self._sync)
         self._sync()

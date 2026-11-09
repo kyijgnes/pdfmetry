@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QKeySequence
-from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QKeySequenceEdit, QLabel, QLineEdit, QPushButton, QTableWidget,
+from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QKeySequenceEdit, QLabel, QLineEdit, QPushButton, QStyle, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from . import theme
+from . import fitwidth, theme
 
 MAX_KEYS = 3  # 한 동작에 키 조합 셋까지
 
@@ -167,7 +167,7 @@ class ShortcutEditor(QWidget):
         self.filter = QLineEdit(); self.filter.setPlaceholderText("동작이나 키로 찾기")
         self.filter.textChanged.connect(self._filter); top.addWidget(self.filter, 1)
         self.clash_label = QLabel(""); self.clash_label.setObjectName("dim"); top.addWidget(self.clash_label)
-        reset = QPushButton("모두 기본값으로"); reset.clicked.connect(self.reset); top.addWidget(reset)
+        reset = QPushButton("모두 기본값으로 되돌리기"); reset.clicked.connect(self.reset); top.addWidget(reset)
         lay.addLayout(top)
         self.table = QTableWidget(len(TABLE), 2 + MAX_KEYS)
         self.table.setHorizontalHeaderLabels(["묶음", "동작"] + [f"키 {n + 1}" for n in range(MAX_KEYS)])
@@ -191,9 +191,23 @@ class ShortcutEditor(QWidget):
                 e.keySequenceChanged.connect(lambda _s, e=e: _no_hint(e))
                 self.table.setCellWidget(row, 2 + n, e); eds.append(e)
             self.edits[k] = eds
+        self._fit_key_columns()
         self.table.setMinimumSize(560, 360)
         lay.addWidget(self.table, 1)
         self._fill()
+
+    def _fit_key_columns(self):
+        """키 칸 폭을 가장 긴 키 글자(지금 키·기본 키·「Ctrl+Shift+Tab」)가 다 보이게 잡는다."""
+        e = next(iter(self.edits.values()))[0]
+        le = e.findChild(QLineEdit)
+        if le is None:
+            return
+        texts = ["Ctrl+Shift+Tab"] + [QKeySequence(s).toString(QKeySequence.SequenceFormat.NativeText)
+                                      for seqs in self.keys.values() for s in seqs]
+        clear = le.style().pixelMetric(QStyle.PixelMetric.PM_SmallIconSize) + 8   # 지우기(×) 단추 자리
+        w = max(118, fitwidth.need(le, texts) + clear + 6)
+        for c in range(2, 2 + MAX_KEYS):
+            self.table.setColumnWidth(c, w)
 
     def _fill(self):
         for k, eds in self.edits.items():

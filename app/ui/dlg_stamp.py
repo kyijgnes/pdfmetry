@@ -188,7 +188,7 @@ class CustomStampDialog(QDialog):
 
     def _show(self):
         if not self._png:
-            self.preview.show_png(None, "파일을 고르세요")
+            self.preview.show_png(None, "고른 파일 없음")
             self.bb.buttons()[0].setEnabled(False)
             return
         self.bb.buttons()[0].setEnabled(True)
@@ -309,6 +309,9 @@ class DynamicStampDialog(QDialog):
         super().accept()
 
 
+EMPTY_STAMPS = "저장한 스탬프 없음 · 추가로 만들기"
+
+
 class StampManageDialog(QDialog):
     """사용자 스탬프 목록 · 이름 · 미리보기 · 추가(사용자 지정·동적) · 고치기 · 삭제.
     바꾼 것은 저장소에 바로 들어가지만 「취소」하면 창을 열 때로 되돌린다(stamps.json 과 그림 파일)."""
@@ -393,8 +396,10 @@ class StampManageDialog(QDialog):
             self.list.addItem(it)
             if e["id"] == select:
                 self.list.setCurrentItem(it)
+        if not self.list.count():   # 빈 목록은 왼쪽 칸 안에서 상태를 말한다
+            empty = QListWidgetItem(EMPTY_STAMPS); empty.setFlags(Qt.ItemFlag.NoItemFlags); self.list.addItem(empty)
         self.list.blockSignals(False)
-        if self.list.currentRow() < 0 and self.list.count():
+        if self.list.currentRow() < 0 and self.st.custom():
             self.list.setCurrentRow(0)
         self._pick()
 
@@ -407,7 +412,7 @@ class StampManageDialog(QDialog):
         on = sid is not None
         self.edit_btn.setEnabled(on); self.del_btn.setEnabled(on); self.name.setEnabled(on)
         if not on:
-            self.name.clear(); self.preview.show_png(None, "저장한 스탬프 없음")
+            self.name.clear(); self.preview.show_png(None, "")
             return
         self.name.setText(self.st.get_custom(sid).get("name", ""))
         try:

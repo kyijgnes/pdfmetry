@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
 
 from ..engine import annots as A
 from ..engine.document import Document
-from .dialogs import ColorButton
+from .dialogs import ColorButton, settle_default
 
 RECENT_MAX = 10
 LINES = [("solid", "실선"), ("dash", "대시"), ("underline", "밑줄")]
@@ -54,6 +54,7 @@ class PagePickDialog(QDialog):
         self.label = QLabel(); lay.addWidget(self.label)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         ok = bb.button(QDialogButtonBox.StandardButton.Ok); ok.setText("선택"); ok.setDefault(True)
+        settle_default(self, ok)
         bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         lay.addWidget(bb)
@@ -142,6 +143,7 @@ class LinkDialog(QDialog):
 
         self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok = self.bb.button(QDialogButtonBox.StandardButton.Ok); self.ok.setText("적용"); self.ok.setDefault(True)
+        settle_default(self, self.ok)
         self.bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         self.bb.accepted.connect(self.accept); self.bb.rejected.connect(self.reject)
         lay.addWidget(self.bb)

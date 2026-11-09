@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBo
                                QMessageBox, QProgressDialog, QPushButton, QVBoxLayout)
 
 from ..engine import tools as T
+from .dialogs import settle_default
 
 REDACT_TIP = ("선택한 민감한 텍스트 및 이미지를 검은색으로 완전히 가릴 수 있습니다. 교정에는 두 단계가 필요합니다:",
               ["1. 교정하기를 원하는 영역 선택", "2. 「적용」 을 선택하여 교정 적용"])
@@ -43,6 +44,7 @@ class TipDialog(QDialog):
         self.never = QCheckBox("다시 보지 않기"); lay.addWidget(self.never)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         bb.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        settle_default(self, bb.button(QDialogButtonBox.StandardButton.Ok))
         bb.accepted.connect(self.accept); lay.addWidget(bb)
 
 
@@ -66,6 +68,7 @@ class RedactApplyDialog(QDialog):
         self.meta = QCheckBox("파일에서 메타데이터 삭제"); self.meta.setChecked(meta); lay.addWidget(self.meta)
         bb = QDialogButtonBox()
         bb.addButton("계속", QDialogButtonBox.ButtonRole.AcceptRole); bb.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
+        settle_default(self, bb.buttons()[0])
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject); lay.addWidget(bb)
 
 
@@ -188,9 +191,10 @@ class HiddenDataDialog(QDialog):
         self.cbs = {}
         for key, label in HIDDEN_ITEMS:
             cb = QCheckBox(label); cb.setChecked(bool(chosen.get(key, True))); self.cbs[key] = cb; lay.addWidget(cb)
-        self.overlap = QCheckBox("겹치는 개체"); self.overlap.setEnabled(False); lay.addWidget(self.overlap)
+        self.overlap = QCheckBox("겹치는 개체 (지원 안 함)"); self.overlap.setEnabled(False); lay.addWidget(self.overlap)
         bb = QDialogButtonBox()
         self.ok = bb.addButton("적용", QDialogButtonBox.ButtonRole.AcceptRole)
+        settle_default(self, self.ok)
         bb.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject); lay.addWidget(bb)
         for cb in self.cbs.values():

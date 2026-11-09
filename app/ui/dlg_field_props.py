@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFil
 from ..engine import annots as A
 from ..engine import form_calc as C
 from ..engine import form_props as P
-from .dialogs import ColorButton, FormDialog
+from .dialogs import ColorButton, FormDialog, settle_default
 
 TAB_NAMES = (("general", "일반"), ("design", "디자인"), ("options", "옵션"), ("actions", "동작"), ("format", "서식"),
              ("validate", "유효성 검사"), ("calc", "계산"), ("selchange", "선택 변경"), ("signed", "서명됨"))
@@ -256,6 +256,7 @@ class FieldPropsDialog(QDialog):
         self.lock = QCheckBox("잠금"); self.lock.setChecked(any(p.get("locked") for p in self.props))
         self.lock.toggled.connect(self._lock)
         close = QPushButton("닫기"); close.setDefault(True); close.clicked.connect(self.accept)
+        settle_default(self, close)
         foot.addWidget(self.lock); foot.addStretch(1); foot.addWidget(close)
         lay.addLayout(foot)
         self._lock_panels(self.lock.isChecked())

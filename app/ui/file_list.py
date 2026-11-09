@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import theme
+from .dialogs import settle_default
 
 EMPTY_TEXT = "PDF 파일을 여기로 끌어다 놓습니다."
 CLEAR_TIPS = "모든 파일을 지우시겠습니까?"
@@ -253,6 +254,7 @@ class FileListPanel(QWidget):
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.button(QDialogButtonBox.StandardButton.Ok).setText("확인"); bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); vl.addWidget(bb)
+        settle_default(dlg, bb.button(QDialogButtonBox.StandardButton.Ok))
         if dlg.exec():
             for cb, p, pw in boxes:
                 if cb.isChecked():
@@ -327,7 +329,7 @@ def open_in_explorer(path: str) -> None:
 def default_folder(sub: str) -> str:
     """지정 폴더 기본: 바탕화면\\PDFmetry\\<sub>."""
     desk = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation) or os.path.join(os.path.expanduser("~"), "Desktop")
-    return os.path.join(desk, "PDFmetry", sub)
+    return os.path.normpath(os.path.join(desk, "PDFmetry", sub))
 
 
 class OutputPanel(QWidget):
@@ -340,8 +342,8 @@ class OutputPanel(QWidget):
         super().__init__(parent)
         self.store = store
         self.default = default_folder(default_sub)
-        self.origin = origin
-        self._custom_text = store.get("folder") or self.default
+        self.origin = os.path.normpath(origin) if origin else origin
+        self._custom_text = os.path.normpath(store.get("folder") or self.default)
         lay = QVBoxLayout(self) if vertical else QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.label = QLabel("저장 위치")
@@ -365,7 +367,7 @@ class OutputPanel(QWidget):
             self._custom_text = text
 
     def set_origin(self, origin: str | None):
-        self.origin = origin
+        self.origin = os.path.normpath(origin) if origin else origin
         self._sync()
 
     def _sync(self):
