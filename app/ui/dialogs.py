@@ -6,12 +6,12 @@ import traceback
 from typing import Callable
 
 import fitz
-from PySide6.QtCore import QEvent, QRegularExpression, QThread, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, QRegularExpression, QSize, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QRegularExpressionValidator
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout,
+                               QPushButton, QRadioButton, QScrollArea, QSpinBox, QToolButton, QVBoxLayout,
                                QWidget)
 
 from ..engine import annots as A
@@ -54,7 +54,10 @@ class ColorButton(QToolButton):
             bg = ("qlineargradient(x1:0,y1:1,x2:1,y2:0, stop:0 white, stop:0.47 white, stop:0.49 #E8383D, "
                   "stop:0.51 #E8383D, stop:0.53 white, stop:1 white)")
         else:
-            bg = from_rgb01(self.color).name()
+            c = from_rgb01(self.color)
+            bg = c.name()
+            if c.lightnessF() > 0.9:   # 흰 견본은 빈 칸처럼 보여 테두리를 진하게
+                line = theme.CUR["TEXT_DIM"]
         self.setStyleSheet(f"QToolButton{{border:1px solid {line}; border-radius:4px; background:{bg};}}"
                            f"QToolButton:hover{{border-color:{theme.ACCENT};}}")
 
@@ -99,6 +102,8 @@ class PageRangeEdit(QWidget):
         self.edit.setEnabled(False)
         self.rng.toggled.connect(self._toggled)
         row.addWidget(self.rng); row.addWidget(self.edit, 1); row.addWidget(QLabel(f"/ {total}"))
+        self.all.setAccessibleName("페이지 거르기"); self.which.setAccessibleName("모든·짝수·홀수 페이지")
+        self.edit.setAccessibleName("사용자 지정 페이지 범위")
         lay.addLayout(top); lay.addLayout(row)
         # 옛 호출부(「지금 쪽」 을 고르던 곳) 호환: 고르면 사용자 지정에 지금 쪽 번호를 넣는다
         self.cur = QRadioButton(self); self.cur.hide()
@@ -145,12 +150,104 @@ class PageRangeEdit(QWidget):
             self.edit.setFocus(); self.edit.selectAll()
 
 
+def settle_default(dlg: QDialog, ok: QPushButton | None = None) -> None:
+    """Enter 가 확인 단추로만 가게 한다. Qt 는 대화상자의 QPushButton 을 모두 autoDefault 로 두어
+    초점을 받은 「찾아보기」·「삭제」가 기본 단추(강조색)로 바뀌고 Enter 도 그리 간다.
+    ok 를 안 주면 이미 setDefault 한 단추를 확인 단추로 본다. 처음 보일 때 한 번 더 돌아 나중에 붙은 단추도 거둔다."""
+    if ok is not None:
+        dlg._settle_ok = ok
+    target = getattr(dlg, "_settle_ok", None)
+    buttons = dlg.findChildren(QPushButton)
+    if target is None:
+        target = next((b for b in buttons if b.isDefault()), None)
+    for b in buttons:
+        if b is target:
+            continue
+        b.setAutoDefault(False)
+        if b.isDefault():
+            b.setDefault(False)
+    if target is not None:
+        target.setAutoDefault(True); target.setDefault(True)
+    if not getattr(dlg, "_settle_hooked", False):
+        dlg._settle_hooked = True
+        dlg.installEventFilter(_SETTLE)
+
+
+class _SettleOnShow(QObject):
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Show and isinstance(obj, QDialog):
+            try:
+                settle_default(obj)
+                fit_screen(obj)
+            except Exception:  # noqa: BLE001  모양 다듬기가 창 열기를 막지 않게
+                pass
+        return False
+
+
+# ── 작은 화면(배율 200% · 1366×768 노트북 150%) ─────────────────
+TITLE_H = 32   # 창 제목줄 높이(논리 px). 창틀을 아직 모를 때 이만큼 비워 둔다
+
+
+class FitScroll(QScrollArea):
+    """대화상자 몸통. 보통 화면에서는 내용 크기 그대로라 모양이 같고, 창이 화면보다 작아질 때만 스크롤이 생긴다."""
+    def __init__(self, inner: QWidget, parent=None):
+        super().__init__(parent)
+        self.setObjectName("fitbody")
+        self.setWidgetResizable(True); self.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.setWidget(inner)
+        self.viewport().setAutoFillBackground(False); inner.setAutoFillBackground(False)   # 창 바탕 그대로
+
+    def sizeHint(self) -> QSize:
+        w = self.widget()
+        return w.sizeHint().expandedTo(w.minimumSizeHint()) if w else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(160, 120)
+
+
+def available_rect(w: QWidget) -> QRect:
+    """창을 둘 수 있는 화면 칸(작업 표시줄 뺀 것). 시험에서 바꿔 끼운다."""
+    scr = w.screen() or QApplication.primaryScreen()
+    return scr.availableGeometry() if scr else QRect(0, 0, 1 << 15, 1 << 15)
+
+
+def fit_screen(dlg: QWidget) -> None:
+    """대화상자가 화면보다 크면 화면 안으로 줄이고 옮긴다. 아래 단추 줄이 늘 보이게 한다."""
+    if dlg.isMaximized() or dlg.isFullScreen():
+        return
+    avail = available_rect(dlg)
+    title = dlg.frameGeometry().height() - dlg.geometry().height()
+    title = title if title > 0 else TITLE_H
+    side = max(0, (dlg.frameGeometry().width() - dlg.geometry().width()) // 2)
+    max_w, max_h = avail.width() - 2 * side, avail.height() - title - side
+    mn = dlg.minimumSize()
+    if mn.width() > max_w or mn.height() > max_h:
+        dlg.setMinimumSize(min(mn.width(), max_w), min(mn.height(), max_h))
+    w, h = dlg.width(), dlg.height()
+    if not getattr(dlg, "_fit_once", False) and dlg.findChild(FitScroll) is not None:
+        # 처음 열 때: Qt 는 창을 화면의 2/3 로 자르니(몸통이 스크롤이라 최소 크기가 작다) 내용 크기까지 되살린다
+        dlg._fit_once = True
+        hint = dlg.sizeHint()
+        w, h = max(w, hint.width()), max(h, hint.height())
+    w, h = min(w, max_w), min(h, max_h)
+    if (w, h) != (dlg.width(), dlg.height()):
+        QWidget.resize(dlg, w, h)
+    x = min(max(dlg.x(), avail.left()), avail.left() + avail.width() - dlg.width() - 2 * side)
+    y = min(max(dlg.y(), avail.top()), avail.top() + avail.height() - dlg.height() - title - side)
+    if (x, y) != (dlg.x(), dlg.y()):
+        QWidget.move(dlg, x, y)   # FileListDialog 처럼 move 를 다른 뜻으로 쓰는 창이 있다
+
+
+_SETTLE = _SettleOnShow()
+
+
 def _buttons(dlg: QDialog, ok_text: str = "확인") -> QDialogButtonBox:
     bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
     ok = bb.button(QDialogButtonBox.StandardButton.Ok)
     ok.setText(ok_text); ok.setDefault(True)  # 하는 일 단추는 강조색으로
     bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
     bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+    settle_default(dlg, ok)
     return bb
 
 
@@ -235,7 +332,7 @@ class FieldAlignDialog(FormDialog):
     """한 쪽의 양식 칸을 여럿 골라 맞춘다. 뷰어에서 고른 칸은 미리 체크해 둔다."""
     HOWS = [("left", "왼쪽 맞춤"), ("right", "오른쪽 맞춤"), ("top", "위쪽 맞춤"), ("bottom", "아래쪽 맞춤"),
             ("hcenter", "가로 가운데"), ("vcenter", "세로 가운데"), ("dist_h", "가로로 같은 간격"), ("dist_v", "세로로 같은 간격"),
-            ("page_h", "쪽 가로 가운데"), ("page_v", "쪽 세로 가운데"), ("page_both", "쪽 한가운데")]
+            ("page_h", "페이지 가로 가운데"), ("page_v", "페이지 세로 가운데"), ("page_both", "페이지 한가운데")]
 
     def __init__(self, parent, page_no: int, widgets: list[tuple[int, str, str]], picked: set[int], how: str):
         super().__init__(f"양식 칸 맞추기 · {page_no + 1}쪽", parent, "맞추기")

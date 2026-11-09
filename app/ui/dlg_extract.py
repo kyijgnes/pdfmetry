@@ -33,7 +33,7 @@ class ExtractDialog(QDialog):
         self.more.toggled.connect(self._more)
         lay.addWidget(self.more); lay.addWidget(self.delete_after)
         lay.addStretch(1)
-        lay.addWidget(_buttons(self, "예"))
+        lay.addWidget(_buttons(self, "내보내기"))
         self._pages: list[int] = []
 
     def _more(self, on: bool):

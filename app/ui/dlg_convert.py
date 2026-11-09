@@ -58,14 +58,14 @@ def label_of(key: str) -> str:
 def default_folder(path: str | None) -> str:
     """원본이 있는 폴더, 새 문서면 내 문서."""
     if path and os.path.isdir(os.path.dirname(path)):
-        return os.path.dirname(path)
-    return QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or os.path.expanduser("~")
+        return os.path.normpath(os.path.dirname(path))
+    return os.path.normpath(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or os.path.expanduser("~"))
 
 
 def default_custom_folder() -> str:
     """「폴더 지정」 처음 값: 바탕 화면\\PDFmetry\\변환."""
     desk = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation) or os.path.expanduser("~")
-    return os.path.join(desk, OUT_SUB)
+    return os.path.normpath(os.path.join(desk, OUT_SUB))
 
 
 def unique_stem(folder: str, stem: str, ext: str, multi: bool = False) -> str:

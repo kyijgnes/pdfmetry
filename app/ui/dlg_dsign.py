@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
                                QPushButton, QRadioButton, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from ..engine import dsign as G
+from .dialogs import settle_default
 
 TITLE = "디지털 서명"
 MSG_MULTI = "이 문서에는 서명할 수 있는 서명 칸이 여러 개 있습니다. 서명할 칸을 눌러 시작하세요."
@@ -99,6 +100,7 @@ class CertInfoDialog(QDialog):
         for lb in self.findChildren(QLabel):
             lb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(self.reject)
+        settle_default(self, bb.button(QDialogButtonBox.StandardButton.Close))
         f.addRow(bb)
 
 
@@ -177,6 +179,7 @@ class AppearanceDialog(QDialog):
         self.w = AppearanceWidget(st); v.addWidget(self.w)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject); v.addWidget(bb)
+        settle_default(self, bb.button(QDialogButtonBox.StandardButton.Ok))
 
     def value(self) -> dict:
         return self.w.value()
@@ -231,6 +234,7 @@ class AddIdWizard(QDialog):
         self.back = QPushButton("< 이전"); self.next = QPushButton("다음 >"); self.cancel = QPushButton("취소")
         bar.addWidget(self.back); bar.addWidget(self.next); bar.addWidget(self.cancel)
         self.back.clicked.connect(self.go_back); self.next.clicked.connect(self.go_next); self.cancel.clicked.connect(self.reject)
+        settle_default(self, self.next)
         self._sync()
 
     def _pick_import(self):
@@ -329,6 +333,7 @@ class CertManagerDialog(QDialog):
         col3.addStretch(1)
         self.tabs.addTab(p3, "신뢰할 수 있는 인증서")
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); bb.rejected.connect(self.close_save); v.addWidget(bb)
+        settle_default(self, bb.button(QDialogButtonBox.StandardButton.Close))
         self.b_add.clicked.connect(self.add_id); self.b_info.clicked.connect(self.info_id)
         self.b_export.clicked.connect(self.export_id); self.b_del.clicked.connect(self.delete_id)
         self.b_refresh.clicked.connect(self.fill)
@@ -442,6 +447,7 @@ class SignDialog(QDialog):
         self.lock = QCheckBox("서명 후 문서 잠금"); self.lock.setChecked(bool(pr.get("dsign_lock", False))); f.addRow("", self.lock)
         bb = QDialogButtonBox(); self.ok = bb.addButton("서명", QDialogButtonBox.ButtonRole.AcceptRole)
         bb.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
+        settle_default(self, self.ok)
         bb.accepted.connect(self.try_accept); bb.rejected.connect(self.reject); f.addRow(bb)
         self.style = style(win)
         self.fill_ids()
@@ -555,6 +561,7 @@ class SigPropsDialog(QDialog):
         bar.addStretch(1); bar.addWidget(self.again); bar.addWidget(close)
         close.clicked.connect(self.accept)
         self.again.clicked.connect(self.revalidate)
+        settle_default(self, close)
         self.cert_btn.clicked.connect(lambda: self.state.cert is not None and _exec(CertInfoDialog(self, self.state.cert)))
         self.show_state()
 
@@ -587,6 +594,7 @@ class ValidateAllDialog(QDialog):
         bar.addStretch(1); bar.addWidget(self.props); bar.addWidget(close)
         close.clicked.connect(self.accept)
         self.props.clicked.connect(self._props)
+        settle_default(self, close)
         if states:
             self.list.setCurrentRow(0)
 

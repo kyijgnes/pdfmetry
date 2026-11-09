@@ -24,7 +24,7 @@ from ..engine import fonts as F
 from ..engine import pages as P
 from ..engine.document import Document
 from . import fitwidth
-from .dialogs import ColorButton, PageRangeEdit, _buttons
+from .dialogs import ColorButton, FitScroll, PageRangeEdit, _buttons
 from .dlg_pagebox import BAD_RANGE, UNITS, UnitBox, _watch
 
 FILE_NOT_EXIST = "이 파일이 존재하지 않습니다."
@@ -55,9 +55,12 @@ class FontRow(QWidget):
         val = QDoubleValidator(1, 1638, 1, self.size); val.setNotation(QDoubleValidator.Notation.StandardNotation)
         self.size.setValidator(val)
         top.addWidget(self.family, 1); top.addWidget(self.size)
+        self.family.setAccessibleName("글꼴"); self.size.setAccessibleName("글꼴 크기")
         low = QHBoxLayout(); low.setSpacing(4)
         self.bold, self.italic, self.underline = (self._toggle(t, k) for t, k in (("B", "bold"), ("I", "italic"), ("U", "underline")))
-        self.color = ColorButton(color)
+        self.color = ColorButton(color); self.color.setAccessibleName("글자 색")
+        for w, name in ((self.bold, "굵게"), (self.italic, "기울임"), (self.underline, "밑줄")):
+            w.setAccessibleName(name)
         for w in (self.bold, self.italic, self.underline):
             low.addWidget(w)
         low.addSpacing(6); low.addWidget(self.color); low.addStretch(1)
@@ -100,14 +103,16 @@ class PositionGrid(QWidget):
     """3×3 자리 단추. cells=6 이면 가운데 줄을 끈다(머리글/바닥글·페이지 번호)."""
     changed = Signal()
     MARKS = ("◤", "▲", "◥", "◀", "●", "▶", "◣", "▼", "◢")
+    NAMES = ("왼쪽 위", "위 가운데", "오른쪽 위", "왼쪽 가운데", "가운데", "오른쪽 가운데", "왼쪽 아래", "아래 가운데", "오른쪽 아래")
 
     def __init__(self, cells: int = 9, value: str = "center", parent=None):
         super().__init__(parent)
         g = QGridLayout(self); g.setContentsMargins(0, 0, 0, 0); g.setSpacing(2)
         self.group = QButtonGroup(self); self.group.setExclusive(True)
         self.btns: dict[str, QToolButton] = {}
-        for k, (cell, mark) in enumerate(zip(E.CELLS9, self.MARKS)):
+        for k, (cell, mark, name) in enumerate(zip(E.CELLS9, self.MARKS, self.NAMES)):
             b = QToolButton(); b.setObjectName("orient"); b.setText(mark); b.setCheckable(True); b.setFixedSize(28, 24)
+            b.setAccessibleName(name)
             b.setEnabled(cells == 9 or cell in E.CELLS6)
             self.group.addButton(b); g.addWidget(b, k // 3, k % 3); self.btns[cell] = b
         self.set_value(value)
@@ -124,20 +129,27 @@ class PositionGrid(QWidget):
 class LookRow(QWidget):
     """회전(-45° · 0° · 45° 빠른 단추 + -360~360) · 불투명도(밀대 0~100 과 % 칸이 같이 움직임)."""
     changed = Signal()
+    QUICK = (-45, 0, 45)
 
     def __init__(self, rotate: float = 0, opacity: float = 1.0, parent=None):
         super().__init__(parent)
         g = QGridLayout(self); g.setContentsMargins(0, 0, 0, 0); g.setHorizontalSpacing(6)
         row = QHBoxLayout(); row.setSpacing(4)
-        for deg in (-45, 0, 45):
-            b = QPushButton(f"{deg}°"); b.setFixedWidth(48); b.clicked.connect(lambda _, v=deg: self.rotate.setValue(v))
-            row.addWidget(b)
-        self.rotate = QSpinBox(); self.rotate.setRange(-360, 360); self.rotate.setSuffix("°")
+        self.quick: dict[int, QToolButton] = {}   # 지금 각도와 같은 단추는 눌린 모양
+        labels = [f"{deg}°" for deg in self.QUICK]
+        for deg, text in zip(self.QUICK, labels):
+            b = QToolButton(); b.setObjectName("orient"); b.setText(text); b.setCheckable(True); b.setFixedHeight(24)
+            fitwidth.fit(b, labels, floor=b.fontMetrics().horizontalAdvance(max(labels, key=len)) + 16)
+            b.clicked.connect(lambda _, v=deg: self.rotate.setValue(v))
+            row.addWidget(b); self.quick[deg] = b
+        self.rotate = QSpinBox(); self.rotate.setRange(-360, 360); self.rotate.setSuffix("°"); self.rotate.setAccessibleName("회전")
         row.addWidget(self.rotate); row.addStretch(1)
+        self.rotate.valueChanged.connect(self._mark_quick)
         g.addWidget(QLabel("회전"), 0, 0); g.addLayout(row, 0, 1)
         self.slider = QSlider(Qt.Orientation.Horizontal); self.slider.setRange(0, 100)
         self.opacity = QSpinBox(); self.opacity.setRange(0, 100); self.opacity.setSuffix(" %")
         self.slider.valueChanged.connect(self.opacity.setValue); self.opacity.valueChanged.connect(self.slider.setValue)
+        self.slider.setAccessibleName("불투명도"); self.opacity.setAccessibleName("불투명도 (%)")
         orow = QHBoxLayout(); orow.addWidget(self.slider, 1); orow.addWidget(self.opacity)
         g.addWidget(QLabel("불투명도"), 1, 0); g.addLayout(orow, 1, 1)
         self.set_value(rotate, opacity)
@@ -148,6 +160,12 @@ class LookRow(QWidget):
 
     def set_value(self, rotate: float, opacity: float):
         self.rotate.setValue(int(round(rotate))); self.opacity.setValue(int(round(opacity * 100)))
+        self._mark_quick()
+
+    def _mark_quick(self, *_):
+        v = self.rotate.value()
+        for deg, b in self.quick.items():
+            b.setChecked(deg == v)
 
 
 class ScaleRow(QWidget):
@@ -160,7 +178,7 @@ class ScaleRow(QWidget):
         self.page = QRadioButton("페이지 비율"); self.max = QRadioButton("최대 척도")
         self.page_pct, self.max_pct = QSpinBox(), QSpinBox()
         for k, (r, sb, v) in enumerate(((self.page, self.page_pct, page_pct), (self.max, self.max_pct, max_pct))):
-            sb.setRange(1, 1600); sb.setSuffix(" %"); sb.setValue(int(v))
+            sb.setRange(1, 1600); sb.setSuffix(" %"); sb.setValue(int(v)); sb.setAccessibleName(f"{r.text()} (%)")
             g.addWidget(r, k, 0); g.addWidget(sb, k, 1)
             sb.valueChanged.connect(self.changed)
         (self.page if mode == "page" else self.max).setChecked(True)
@@ -191,11 +209,13 @@ class FileRow(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
         row = QHBoxLayout()
         self.path = QLineEdit(); self.path.setPlaceholderText("파일 경로")
-        b = QPushButton("찾아보기"); b.clicked.connect(self._pick)
+        b = QPushButton("찾아보기"); b.setAutoDefault(False); b.clicked.connect(self._pick)
         row.addWidget(self.path, 1); row.addWidget(b)
+        self.path.setAccessibleName("파일 경로")
         self.page_row = QWidget(); pr = QHBoxLayout(self.page_row); pr.setContentsMargins(0, 0, 0, 0)
         self.page = QSpinBox(); self.page.setRange(1, 1); self.of = QLabel("/ 1")
-        pr.addWidget(QLabel("페이지")); pr.addWidget(self.page); pr.addWidget(self.of); pr.addStretch(1)
+        plb = QLabel("페이지"); plb.setBuddy(self.page)
+        pr.addWidget(plb); pr.addWidget(self.page); pr.addWidget(self.of); pr.addStretch(1)
         lay.addLayout(row); lay.addWidget(self.page_row)
         self.page_row.hide()
         self.path.textChanged.connect(self._path_changed); self.page.valueChanged.connect(self.changed)
@@ -259,6 +279,7 @@ class MarginGrid(QWidget):
         for k, (side, label) in enumerate(self.NAMES):
             sb = UnitBox(unit, 1000); sb.setMinimum(-1000)
             g.addWidget(QLabel(label), k // 2, (k % 2) * 2); g.addWidget(sb, k // 2, (k % 2) * 2 + 1)
+            sb.setAccessibleName(f"{label} 여백")
             self.spins[side] = sb
             sb.valueChanged.connect(self.changed)
         self.set_value(margins or E.ZERO_MARGINS)
@@ -286,6 +307,7 @@ class DecoPreview(QWidget):
         lay.addWidget(self.view)
         row = QHBoxLayout()
         self.prev = QToolButton(); self.prev.setText("◀"); self.next = QToolButton(); self.next.setText("▶")
+        self.prev.setAccessibleName("이전 페이지"); self.next.setAccessibleName("다음 페이지")
         self.where = QLabel(); self.where.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addStretch(1); row.addWidget(self.prev); row.addWidget(self.where); row.addWidget(self.next); row.addStretch(1)
         lay.addLayout(row); lay.addStretch(1)
@@ -346,7 +368,8 @@ class DecoDialog(QDialog):
         self.doc, self.unit, self.hide = doc, unit if unit in UNITS else "cm", tuple(hide)
         self._ready = False
         outer = QVBoxLayout(self); outer.setContentsMargins(16, 14, 16, 12); outer.setSpacing(10)
-        body = QHBoxLayout(); body.setSpacing(16); outer.addLayout(body)
+        inner = QWidget(); body = QHBoxLayout(inner); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(16)
+        outer.addWidget(FitScroll(inner), 1)   # 작은 화면에서는 몸통만 스크롤, 아래 단추 줄은 그대로
         self.left = QVBoxLayout(); self.left.setSpacing(10); body.addLayout(self.left)
         self.preview = DecoPreview(doc.page_count); body.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignTop)
         self.build()
@@ -357,7 +380,8 @@ class DecoDialog(QDialog):
         bottom = QHBoxLayout()
         self.to_template = QCheckBox("템플릿에 추가")
         self.tpl_name = QLineEdit(); self.tpl_name.setPlaceholderText("템플릿 이름"); self.tpl_name.setMaxLength(64)
-        self.tpl_name.setFixedWidth(180); self.tpl_name.setEnabled(False)
+        fitwidth.fit(self.tpl_name, ["가나다라마바사아자차카타"], floor=180); self.tpl_name.setEnabled(False)
+        self.tpl_name.setAccessibleName("템플릿 이름")
         self.to_template.toggled.connect(self.tpl_name.setEnabled)
         self.tpl_id: str | None = None   # 템플릿 창에서 고치는 템플릿
         self.saved: dict | None = None   # 적용하며 저장한 템플릿
@@ -370,6 +394,7 @@ class DecoDialog(QDialog):
         self.preview.set_pages(list(range(doc.page_count)), current)
         self._ready = True
         self.changed()
+        self._timer.stop(); self.refresh()   # 첫 미리보기는 열 때 바로 그린다(회색 빈 칸으로 뜨지 않게)
 
     # 하위 클래스가 채우는 것
     def build(self):
@@ -396,6 +421,8 @@ class DecoDialog(QDialog):
         r = QHBoxLayout(); r.setSpacing(6)
         if label:
             lb = QLabel(label); lb.setMinimumWidth(64); r.addWidget(lb)
+            if widgets:
+                lb.setBuddy(widgets[0])   # 화면 읽기가 옆 글자를 칸 이름으로 읽는다
         for w in widgets:
             r.addWidget(w)
         r.addStretch(1)

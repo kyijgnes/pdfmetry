@@ -153,7 +153,10 @@ class SignatureDialog(QDialog):
             it = QListWidgetItem(QIcon(QPixmap(self.st.image_path(e["file"]))), "")
             it.setData(Qt.ItemDataRole.UserRole, e["id"]); it.setSizeHint(QSize(160, 70))
             self.list.addItem(it)
-        if self.list.count():
+        if not self.list.count():
+            empty = QListWidgetItem("저장한 서명 없음"); empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            empty.setSizeHint(QSize(160, 70)); self.list.addItem(empty)
+        else:
             self.list.setCurrentRow(self.list.count() - 1)
         self._sync()
 

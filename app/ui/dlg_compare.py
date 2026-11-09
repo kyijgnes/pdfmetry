@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QGridLayo
 
 from ..engine import compare as C
 from . import icons
+from .dialogs import settle_default
 
 SAME_DOC = "비교할 두 가지 문서를 선택하십시오."
 PDF_FILTER = "PDF 파일 (*.pdf)"
@@ -50,6 +51,7 @@ class CompareSelectDialog(QDialog):
         self.go = bb.addButton("비교", QDialogButtonBox.ButtonRole.AcceptRole)
         cancel = bb.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject); cancel.setAutoDefault(False)
+        settle_default(self, self.go)
         lay.addWidget(bb)
         if current is not None:
             name, path, tab = current

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
 from ..engine import tools as T
 from . import icons
 from .file_list import FileListPanel, OutputPanel, open_in_explorer, unique_path
+from .dialogs import settle_default
 
 LEVEL_NAMES = {"high": "높음", "medium": "중간", "low": "낮음"}
 SUFFIX = "_압축"
@@ -67,6 +68,7 @@ class CustomDialog(QDialog):
             lay.addWidget(g)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         bb.button(QDialogButtonBox.StandardButton.Ok).setText("확인")
+        settle_default(self, bb.button(QDialogButtonBox.StandardButton.Ok))
         bb.accepted.connect(self.accept); lay.addWidget(bb)
 
     def values(self) -> dict:
@@ -149,6 +151,7 @@ class CompressDialog(QDialog):
         self.out = OutputPanel(self, self.settings.setdefault("compress_out", {}), "압축")
         side.addWidget(self.out)
         self.apply_btn = QPushButton("적용"); self.apply_btn.setDefault(True); self.apply_btn.clicked.connect(self.apply)
+        settle_default(self, self.apply_btn)
         hl = QHBoxLayout(); hl.addStretch(); hl.addWidget(self.apply_btn)
         side.addLayout(hl)
         root.addLayout(side, 1)

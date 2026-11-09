@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 from . import fitwidth, icons, print_vector as PV, theme
 from .dlg_pagebox import FINE, UNITS
+from .dialogs import FitScroll, available_rect, settle_default
 
 FITS = [("fit", "맞춤"), ("actual", "실제 크기"), ("custom", "사용자 지정 배율")]
 SUBSETS = [("all", "모든 페이지"), ("odd", "홀수 페이지"), ("even", "짝수 페이지")]
@@ -699,8 +700,8 @@ class PrintDialog(QDialog):
         n = len(doc)
 
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
-        body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0)
-        root.addLayout(body, 1)
+        inner = QWidget(); body = QHBoxLayout(inner); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0)
+        root.addWidget(FitScroll(inner), 1)   # 작은 화면(배율 200%)에서는 몸통만 스크롤, 아래 인쇄 단추 줄은 그대로
 
         # ── 왼쪽 칸 ──
         left = self._column("printcol"); lv = left.layout()
@@ -713,7 +714,7 @@ class PrintDialog(QDialog):
         if want in names:
             self.printer.setCurrentText(want)
         self.props_btn = QToolButton(); self.props_btn.setObjectName("printprops"); self.props_btn.setIcon(icons.icon("settings", 14))
-        self.props_btn.clicked.connect(self._printer_props)
+        self.props_btn.clicked.connect(self._printer_props); self.props_btn.setAccessibleName("프린터 속성")
         prow.addWidget(self.printer, 1); prow.addWidget(self.props_btn)
         lv.addLayout(prow)
         self.gray = QCheckBox("흑백 인쇄"); self.gray.setChecked(not r.get("color", True)); lv.addWidget(self.gray)
@@ -724,8 +725,9 @@ class PrintDialog(QDialog):
         self.source_size = QCheckBox("소스 파일의 페이지 크기"); self.source_size.setChecked(r.get("source_size", False))
         lv.addWidget(self.source_size)
         crow = QHBoxLayout(); crow.setSpacing(6)
-        cic = QLabel(); cic.setPixmap(icons.icon("copy", 16).pixmap(16, 16)); crow.addWidget(cic)
-        self.copies = QSpinBox(); self.copies.setRange(1, self.MAX_COPIES); self.copies.setFixedWidth(64); crow.addWidget(self.copies)
+        cic = QLabel("매수"); crow.addWidget(cic)
+        self.copies = QSpinBox(); self.copies.setRange(1, self.MAX_COPIES); crow.addWidget(self.copies)
+        fitwidth.fit(self.copies, fitwidth.spin_texts(self.copies), floor=64); cic.setBuddy(self.copies)
         crow.addStretch(); lv.addLayout(crow)
         self.collate = QCheckBox("정렬 인쇄"); self.collate.setChecked(True); lv.addWidget(self.collate)  # 열 때마다 켠다
         irow = QHBoxLayout(); irow.setSpacing(6)
@@ -743,7 +745,8 @@ class PrintDialog(QDialog):
         self.portrait_btn, self.landscape_btn = QToolButton(), QToolButton()
         for b, land in ((self.portrait_btn, False), (self.landscape_btn, True)):
             b.setObjectName("orient"); b.setCheckable(True); b.setIcon(_page_icon(land, theme.CUR["TEXT"]))
-            b.setFixedSize(26, 24); self.orient_group.addButton(b); orow.addWidget(b)
+            b.setText("가로" if land else "세로"); b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setFixedHeight(24); self.orient_group.addButton(b); orow.addWidget(b)
         orow.addStretch(); lv.addLayout(orow)
         (self.landscape_btn if PrintDialog._last_landscape else self.portrait_btn).setChecked(True)
 
@@ -774,7 +777,7 @@ class PrintDialog(QDialog):
         self.c_doc = QCheckBox("문서"); self.c_annot = QCheckBox("주석"); self.c_form = QCheckBox("양식")
         for b, key in ((self.c_doc, "content"), (self.c_annot, "annots"), (self.c_form, "forms")):
             b.setChecked(r.get(key, True)); mv.addWidget(b)
-        self._head(mv, "페이지 범위")
+        self._head(mv, "홀수·짝수·역순")
         self.subset = QComboBox()
         for k, label in SUBSETS:
             self.subset.addItem(label, k)
@@ -885,15 +888,26 @@ class PrintDialog(QDialog):
         self.err = QLabel(""); self.err.setStyleSheet(f"color:{theme.ACCENT};"); bh.addWidget(self.err, 1)
         self.ok = QPushButton("인쇄"); self.ok.setObjectName("accent"); self.ok.setDefault(True); self.ok.setFixedSize(88, 32); self.ok.clicked.connect(self._accept)
         cancel = QPushButton("취소"); cancel.setAutoDefault(False); cancel.setFixedSize(88, 32); cancel.clicked.connect(self.reject)
+        settle_default(self, self.ok)
         bh.addWidget(self.ok); bh.addWidget(cancel)
         root.addWidget(bottom)
+
+        # 화면 읽기 이름(옆 글자와 묶이지 않은 칸)
+        for w, name in ((self.printer, "프린터"), (self.duplex, "양면 인쇄"), (self.paper, "용지"), (self.copies, "매수"),
+                        (self.dpi, "이미지 해상도"), (self.range_edit, "사용자 정의 페이지 범위"), (self.subset, "홀수·짝수"),
+                        (self.scale, "배율 (%)"), (self.poster_scale, "타일 스케일"), (self.overlap, "겹침"),
+                        (self.nup, "시트 당 페이지"), (self.nup_cols, "열 수"), (self.nup_rows, "행 수"), (self.nup_order, "페이지 순서"),
+                        (self.booklet_subset, "소책자 서브셋"), (self.b_from, "시작 시트"), (self.b_to, "끝 시트"),
+                        (self.pos, "미리보기 페이지"), (self.first_btn, "첫 페이지"), (self.prev_btn, "이전 페이지"),
+                        (self.next_btn, "다음 페이지"), (self.last_btn, "마지막 페이지")):
+            w.setAccessibleName(name)
 
         # ── 처음 값·연결 ──
         self._idx = 0
         self._sheets: list[Sheet] = []
         self._pages: list[int] = []
         self._cdoc_key, self._cdoc = None, doc
-        self._advanced = bool(r.get("advanced", True))
+        self._advanced = self._adv_saved = bool(r.get("advanced", True))
         mode0 = r.get("mode") if r.get("mode") in self.mode_btns else "size"
         self.mode_btns[mode0].setChecked(True); self.stack.setCurrentIndex([k for k, _ in MODES].index(mode0))
         self._printer_changed()
@@ -913,8 +927,10 @@ class PrintDialog(QDialog):
         self.first_btn.clicked.connect(lambda: self._go(0)); self.last_btn.clicked.connect(lambda: self._go(10 ** 9))
         self.prev_btn.clicked.connect(lambda: self._go(self._idx - 1)); self.next_btn.clicked.connect(lambda: self._go(self._idx + 1))
         self.pos.editingFinished.connect(self._pos_entered)
-        self._set_advanced(self._advanced, adjust=False)
         self.left_w = self._fit_left(left)
+        if self._advanced and available_rect(self).width() < self.left_w + self.COL_W + 300 + 32:
+            self._advanced = False   # 좁은 화면은 고급 설정을 접고 연다(기억해 둔 값은 그대로)
+        self._set_advanced(self._advanced, adjust=False)
         self.resize(self.left_w + (self.COL_W if self._advanced else 0) + 525, 637)
         self._refresh()
 
@@ -963,6 +979,7 @@ class PrintDialog(QDialog):
     # ── 고급 설정 접기 ──
     def _toggle_advanced(self):
         self._set_advanced(not self._advanced)
+        self._adv_saved = self._advanced
 
     def _set_advanced(self, on: bool, adjust: bool = True):
         self._advanced = on
@@ -1206,7 +1223,7 @@ class PrintDialog(QDialog):
         o = self.options()
         return {"printer": o.printer, "paper": o.paper, "duplex": o.duplex, "color": o.color, "source_size": o.source_size,
                 "as_image": o.as_image, "dpi": o.dpi, "content": o.content, "annots": o.annots, "forms": o.forms,
-                "fit": o.fit, "scale": o.scale, "auto_rotate": o.auto_rotate, "center": o.center, "advanced": self._advanced,
+                "fit": o.fit, "scale": o.scale, "auto_rotate": o.auto_rotate, "center": o.center, "advanced": self._adv_saved,
                 "mode": o.mode, "reverse": self.reverse.isChecked(), "subset": self.subset.currentData() or "all",
                 "poster_scale": o.poster_scale, "overlap_mm": round(o.overlap * 10, 2), "cut_marks": o.cut_marks, "labels": o.labels,
                 "nup": o.nup, "nup_cols": o.nup_cols, "nup_rows": o.nup_rows, "nup_order": o.nup_order,

@@ -28,7 +28,7 @@ RANGE_EMPTY = "유효한 페이지 범위를 입력하십시오."
 
 def default_split_folder() -> str:
     desk = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation) or os.path.expanduser("~")
-    return os.path.join(desk, "PDF메트리", "Split")
+    return os.path.normpath(os.path.join(desk, "PDF메트리", "Split"))
 
 
 def check_folder(path: str) -> str | None:
@@ -69,7 +69,7 @@ class SplitDialog(QDialog):
         self.total, self.file_size, self.has_bookmarks, self.src_dir = total, file_size, has_bookmarks, src_dir
         lay = QVBoxLayout(self); lay.setContentsMargins(16, 14, 16, 12); lay.setSpacing(10)
 
-        box = QGroupBox("분할 유형"); g = QGridLayout(box); g.setColumnStretch(2, 1)
+        box = QGroupBox("분할 유형"); g = QGridLayout(box); g.setColumnStretch(2, 1); g.setHorizontalSpacing(14)
         self.group = QButtonGroup(self); self.radios = {}
         for row, (key, text) in enumerate(self.MODES):
             r = QRadioButton(text); self.group.addButton(r, row); self.radios[key] = r
@@ -92,7 +92,7 @@ class SplitDialog(QDialog):
         self.dir = QLineEdit(); self.pick = QPushButton("폴더"); self.pick.clicked.connect(self._pick)
         hl.addWidget(self.where); hl.addWidget(self.dir, 1); hl.addWidget(self.pick)
         lay.addWidget(out)
-        self.custom_dir = custom_dir or default_split_folder(); self._showing_custom = False
+        self.custom_dir = os.path.normpath(custom_dir or default_split_folder()); self._showing_custom = False
         self.where.setCurrentIndex(1 if custom else 0)
 
         self.bb = D._buttons(self, "확인"); self.bb.accepted.disconnect(); self.bb.accepted.connect(self._ok)
@@ -165,6 +165,7 @@ class SplitResultDialog(QDialog):
         if over and on_compress:
             b = QPushButton("압축"); b.clicked.connect(lambda: (self.accept(), on_compress(over))); row.addWidget(b)
         b = QPushButton("폴더 열기"); b.setDefault(True); b.clicked.connect(lambda: (self.accept(), open_folder(folder))); row.addWidget(b)
+        D.settle_default(self, b)
         c = QPushButton("닫기"); c.clicked.connect(self.reject); row.addWidget(c)
         lay.addLayout(row)
 

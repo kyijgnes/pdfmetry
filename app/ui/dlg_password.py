@@ -13,6 +13,7 @@ from typing import Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QRadioButton, QVBoxLayout)
+from .dialogs import settle_default
 
 MAX_PRESETS = 3
 _ENTROPY = b"PDFmetry preset password"
@@ -104,6 +105,7 @@ class PresetEditor(QDialog):
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.button(QDialogButtonBox.StandardButton.Ok).setText("확인"); bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject); lay.addWidget(bb)
+        settle_default(self, bb.button(QDialogButtonBox.StandardButton.Ok))
 
     @staticmethod
     def _first_key(e: QLineEdit):
@@ -158,9 +160,10 @@ class PasswordDialog(QDialog):
         row.addStretch(); lay.addLayout(row)
         self.err = QLabel(""); self.err.setStyleSheet("color: #d23c3c;"); lay.addWidget(self.err)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.Cancel)
-        bb.button(QDialogButtonBox.StandardButton.Yes).setText("예")
+        bb.button(QDialogButtonBox.StandardButton.Yes).setText("열기")
         bb.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         bb.accepted.connect(self.try_open); bb.rejected.connect(self.reject)
+        settle_default(self, bb.button(QDialogButtonBox.StandardButton.Yes))
         lay.addWidget(bb)
         self.edit.setFocus()
 
