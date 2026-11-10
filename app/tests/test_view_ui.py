@@ -190,6 +190,30 @@ def test_visible_pages_matches_full_scan(win, pdf, layout):
         assert v.visible_pages() == full, (val, full)
 
 
+@pytest.mark.parametrize("layout", ["continuous", "facing_continuous"])
+def test_visible_pages_at_page_edges(win, pdf, layout):
+    """화면 위·아래 끝이 쪽 사이 틈, 그림자, 쪽 끝에 닿는 자리마다 1px 씩 움직여도 전체 훑기와 같다."""
+    win.open_path(pdf); pump(0.2)
+    v = win.cur().viewer
+    v.set_layout_mode(layout); v.zoom_mode = "fixed"; v.set_zoom(0.6); pump(0.05)
+    sb = v.verticalScrollBar()
+    vh = v.viewport().height()
+    tops = sorted({it.sceneBoundingRect().top() for it in v.items if it.isVisible()})
+    bots = sorted({it.sceneBoundingRect().bottom() for it in v.items if it.isVisible()})
+    base = v.mapToScene(v.viewport().rect()).boundingRect().top() - sb.value()   # 스크롤 값과 장면 y 의 차이
+    vals = set()
+    for edge in tops + bots:
+        for d in range(-16, 17):
+            vals.add(int(edge - base) + d)            # 화면 위 끝이 그 끝 근처
+            vals.add(int(edge - base - vh) + d)       # 화면 아래 끝이 그 끝 근처
+    vals = sorted(x for x in vals if 0 <= x <= sb.maximum())
+    for val in vals + [sb.maximum()]:
+        sb.setValue(val)
+        vr = v.mapToScene(v.viewport().rect()).boundingRect()
+        full = [it.index for it in v.items if it.isVisible() and it.sceneBoundingRect().intersects(vr)]
+        assert v.visible_pages() == full, (val, full)
+
+
 def test_zoom_steps(win, pdf):
     win.open_path(pdf); pump(0.2)
     v = win.cur().viewer
