@@ -84,6 +84,8 @@ class AdvancedSearchDialog(QDialog):
         self.pages = QStackedWidget()
         v = QVBoxLayout(self); v.setContentsMargins(10, 10, 10, 10); v.addWidget(self.pages)
         self._build_cond(); self._build_result(); self._build_replace()
+        (self.r_cur if self.win.tabs else self.r_dir).setChecked(True)   # 문서가 있으면 현재 문서, 없으면 폴더
+        self._sync_cond()
         self.timer = QTimer(self); self.timer.setInterval(500); self.timer.timeout.connect(self._progress)
 
     # ── 조건 화면 ─────────────────────────────────────────────

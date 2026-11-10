@@ -124,3 +124,61 @@ def covers(path: str, text: str) -> bool:
     """글꼴 파일이 text 의 글자를 다 가졌는지(빈칸·줄바꿈 빼고)."""
     f = font_object(path)
     return all(f.has_glyph(ord(c)) for c in text if not c.isspace())
+
+
+# ── 화면에 보일 글꼴 이름 ──────────────────────────────────────────────
+# 레지스트리 이름은 영어(「Malgun Gothic」)라, 글꼴 파일의 이름 표(name)에서 한국어 집안 이름(「맑은 고딕」)을 읽어
+# 환경 설정 두 글꼴 칸에 같은 이름으로 보인다. 저장하는 값은 그대로 레지스트리 이름이다.
+_SHOWN: dict[str, str] = {}
+_KO = 0x0412   # 윈도우 언어 번호: 한국어
+
+
+def _korean_family(path: str) -> str:
+    """글꼴 파일 이름 표의 한국어 집안 이름(없으면 빈 글). .ttc 는 첫 글꼴."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+            base = 0
+            if head[:4] == b"ttcf":
+                f.seek(12); base = struct.unpack(">I", f.read(4))[0]
+                f.seek(base); head = f.read(12)
+            n = struct.unpack(">H", head[4:6])[0]
+            dirs = f.read(16 * n)
+            for k in range(n):
+                tag, _sum, off, _len = struct.unpack(">4sIII", dirs[16 * k:16 * k + 16])
+                if tag != b"name":
+                    continue
+                f.seek(off); _fmt, count, strs = struct.unpack(">HHH", f.read(6))
+                recs = f.read(12 * count)
+                best = {}
+                for r in range(count):
+                    plat, enc, lang, nid, ln, so = struct.unpack(">HHHHHH", recs[12 * r:12 * r + 12])
+                    if plat == 3 and lang == _KO and nid in (1, 16):
+                        f.seek(off + strs + so)
+                        best[nid] = f.read(ln).decode("utf-16-be", "ignore").strip()
+                return best.get(1) or best.get(16) or ""
+    except (OSError, struct.error):
+        pass
+    return ""
+
+
+def display_names() -> dict[str, str]:
+    """글꼴 이름(레지스트리) → 화면 이름(한국어 이름이 있으면 그것)."""
+    if not _SHOWN:
+        for fam, styles in _load_families().items():
+            _SHOWN[fam] = _korean_family(styles[(False, False)]) or fam
+    return _SHOWN
+
+
+def display_name(family: str) -> str:
+    return display_names().get(family, family)
+
+
+def family_of(text: str) -> str:
+    """화면 이름이나 레지스트리 이름 → 레지스트리 이름(모르면 빈 글)."""
+    t = (text or "").strip().lower()
+    for fam, shown in display_names().items():
+        if t in (fam.lower(), shown.lower()):
+            return fam
+    return ""

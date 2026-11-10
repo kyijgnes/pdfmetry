@@ -9,9 +9,9 @@ import os
 import re
 
 from PySide6.QtCore import QLocale, QRegularExpression, Qt
-from PySide6.QtGui import QColor, QFont, QRegularExpressionValidator
+from PySide6.QtGui import QColor, QRegularExpressionValidator
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-                               QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox,
                                QStackedWidget, QVBoxLayout, QWidget)
 
@@ -41,8 +41,8 @@ def _native(path: str) -> str:
     return os.path.normpath(path) if path else ""
 
 
-EDIT_FONT = {"font": "맑은 고딕", "style": "normal", "size": 14, "color": [0, 0, 0]}
-COMMENT_FONT = {"font": "Malgun Gothic", "size": 14, "color": [1, 0, 0]}   # font: 글꼴 이름(fonts.font_families)
+EDIT_FONT = {"font": "Malgun Gothic", "style": "normal", "size": 14, "color": [0, 0, 0]}
+COMMENT_FONT = {"font": "Malgun Gothic", "size": 14, "color": [1, 0, 0]}   # font: 글꼴 이름(fonts.font_families), 두 칸 같음
 GRID = {"w": 72 / 2.54, "h": 72 / 2.54, "left": 0.0, "top": 0.0, "sub": 3, "color": [1, 0, 0]}
 BLANK = {"name": BLANK_NAME, "count": 1, "size": "A4", "w": 210 * MM, "h": 297 * MM, "landscape": False}
 
@@ -255,10 +255,36 @@ class PreferencesDialog(QDialog):
             c.addItem(f"{s:g}")
         return c
 
+    @staticmethod
+    def _font_combo() -> QComboBox:
+        """글꼴 칸(두 칸 같음): 한국어 이름이 있으면 그 이름으로 보이고, 값은 글꼴 이름(fonts.font_families)."""
+        from ..engine import fonts as F
+        c = QComboBox(); c.setEditable(True); c.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        shown = F.display_names()
+        for fam in sorted(F.font_families(), key=lambda f: shown.get(f, f).lower()):
+            c.addItem(shown.get(fam, fam), fam)
+        return c
+
+    @staticmethod
+    def font_of(c: QComboBox, dflt: str) -> str:
+        """글꼴 칸의 글꼴 이름(친 글이 모르는 이름이면 dflt)."""
+        from ..engine import fonts as F
+        return F.family_of(c.currentText()) or dflt
+
+    @staticmethod
+    def set_font(c: QComboBox, name: str):
+        from ..engine import fonts as F
+        fam = F.family_of(name) or F.family_of(F.DEFAULT_FAMILY)
+        k = c.findData(fam)
+        if k >= 0:
+            c.setCurrentIndex(k)
+        else:
+            c.setEditText(name)
+
     def _build_font(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
         g1 = QGroupBox("텍스트 글꼴 편집"); f1 = QFormLayout(g1)
-        self.ef_font = QFontComboBox(); f1.addRow("글꼴", self.ef_font)
+        self.ef_font = self._font_combo(); f1.addRow("글꼴", self.ef_font)
         self.ef_style = QComboBox()
         for data, text in (("normal", "일반"), ("bold", "굵게"), ("italic", "기울임꼴")):
             self.ef_style.addItem(text, data)
@@ -268,10 +294,7 @@ class PreferencesDialog(QDialog):
         r1 = QPushButton("기본 재설정"); r1.clicked.connect(lambda: self._fill_edit_font(EDIT_FONT)); f1.addRow(r1)
         v.addWidget(g1)
         g2 = QGroupBox("주석 텍스트 박스 글꼴"); f2 = QFormLayout(g2)
-        from ..engine import fonts as F
-        self.cf_font = QComboBox(); self.cf_font.setEditable(True)
-        self.cf_font.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.cf_font.addItems(F.font_families()); f2.addRow("글꼴", self.cf_font)
+        self.cf_font = self._font_combo(); f2.addRow("글꼴", self.cf_font)
         self.cf_size = self._size_combo(); f2.addRow("크기", self.cf_size)
         self.cf_color = D.ColorButton(); f2.addRow("색상", self.cf_color)
         r2 = QPushButton("기본 재설정"); r2.clicked.connect(lambda: self._fill_comment_font(COMMENT_FONT)); f2.addRow(r2)
@@ -281,13 +304,13 @@ class PreferencesDialog(QDialog):
         return w
 
     def _fill_edit_font(self, d: dict):
-        self.ef_font.setCurrentFont(QFont(d["font"]))
+        self.set_font(self.ef_font, d.get("font") or EDIT_FONT["font"])
         self.ef_style.setCurrentIndex(max(0, self.ef_style.findData(d["style"])))
         self.ef_size.setEditText(f"{float(d['size']):g}")
         self.ef_color.color = tuple(d["color"]); self.ef_color._paint()
 
     def _fill_comment_font(self, d: dict):
-        self.cf_font.setCurrentText(d.get("font") or COMMENT_FONT["font"])
+        self.set_font(self.cf_font, d.get("font") or COMMENT_FONT["font"])
         self.cf_size.setEditText(f"{float(d['size']):g}")
         self.cf_color.color = tuple(d["color"]); self.cf_color._paint()
 
@@ -299,11 +322,9 @@ class PreferencesDialog(QDialog):
             return dflt
 
     def _save_font(self):
-        self.prefs["edit_font"] = {"font": self.ef_font.currentFont().family(), "style": self.ef_style.currentData(),
+        self.prefs["edit_font"] = {"font": self.font_of(self.ef_font, EDIT_FONT["font"]), "style": self.ef_style.currentData(),
                                    "size": self._size_val(self.ef_size, 14), "color": list(self.ef_color.color)}
-        from ..engine import fonts as F
-        fam = self.cf_font.currentText().strip()
-        self.prefs["comment_font"] = {"font": fam if fam in F.font_families() else COMMENT_FONT["font"],
+        self.prefs["comment_font"] = {"font": self.font_of(self.cf_font, COMMENT_FONT["font"]),
                                       "size": self._size_val(self.cf_size, 14), "color": list(self.cf_color.color)}
 
     # ── OCR ──────────────────────────────────────────────────────

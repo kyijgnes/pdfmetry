@@ -122,8 +122,8 @@ def test_prefs_comment_font_saved_and_used(win, pdf):
     fam = _alt()
     dlg = DP.PreferencesDialog(win, win.settings)
     dlg.show_page(next(n for n, p in enumerate(DP.PAGES) if p[0] == "font"))
-    assert dlg.cf_font.currentText() == F.DEFAULT_FAMILY
-    dlg.cf_font.setCurrentText(fam)
+    assert dlg.font_of(dlg.cf_font, "") == F.DEFAULT_FAMILY
+    dlg.set_font(dlg.cf_font, fam)
     dlg.accept()
     assert win.prefs["comment_font"]["font"] == fam
     win.open_path(pdf); pump(0.2)

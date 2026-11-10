@@ -295,7 +295,7 @@ class FormatFields:
     def error(self) -> tuple[str, QWidget] | None:
         """확인 전에 막을 것: (문구, 초점 둘 칸)."""
         if self.cover_on is not None and self.cover_on.isChecked() and not os.path.isfile(self.cover_path.text().strip()):
-            return "표지 그림 파일을 골라 주세요", self.cover_path
+            return "표지 그림 파일 선택 필요", self.cover_path
         if self.lang is not None and self.ocr.currentData() != "off" and self.lang.avail and not self.lang.langs():
             return LANG_NONE, self.lang.list
         return None
