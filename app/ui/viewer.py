@@ -33,6 +33,7 @@ from . import theme
 
 GAP = 12  # 쪽 사이 간격(px)
 MARGIN = 20
+SHADOW_UP, SHADOW_DOWN = 4, 10   # 쪽 그림자가 쪽 위·아래로 나가는 폭(px). 쪽 칸(boundingRect)에 들어간다
 ZOOM_MIN, ZOOM_MAX = 0.05, 16.0   # 확대 범위 5%~1600%
 RENDER_MAX_PX = 48e6   # 쪽 그림 한 장 화소 상한. 넘으면 이 크기로 그려 늘려 보인다(1600% 면 A4 한 장이 1억 화소를 넘는다)
 RULER = 18             # 눈금자 두께(px)
@@ -278,7 +279,7 @@ class PageItem(QGraphicsItem):
 
     def boundingRect(self) -> QRectF:
         # 그림자까지 넣어야 다시 그릴 때 그림자 자리가 지워지지 않는다(쪽 자리는 page_rect)
-        return QRectF(-6, -4, self.w + 13, self.h + 14)
+        return QRectF(-6, -SHADOW_UP, self.w + 13, self.h + SHADOW_UP + SHADOW_DOWN)
 
     def page_rect(self) -> QRectF:
         return QRectF(0, 0, self.w, self.h)
@@ -911,8 +912,10 @@ class PageView(QGraphicsView):
         if len(self._tops) != len(self._shown):
             return [it.index for it in self.items if it.isVisible()]
         # 쪽은 위아래로 겹치지 않으니 화면 위 끝보다 위에서 시작한 쪽은 마지막 줄(두 쪽 보기면 둘)만 걸칠 수 있다
+        # (아래 그림자 SHADOW_DOWN 이 GAP 보다 짧아 그 앞 줄까지는 안 닿는다).
+        # 판정은 그림자까지 넣은 쪽 칸으로 하니, 위 끝이 화면 아래 끝보다 그림자 폭(SHADOW_UP) 안쪽 아래에 있는 쪽도 넣는다
         lo = max(0, bisect.bisect_right(self._tops, vr.top()) - 2)
-        hi = bisect.bisect_right(self._tops, vr.bottom())
+        hi = bisect.bisect_right(self._tops, vr.bottom() + SHADOW_UP)
         return self._shown[lo:hi]
 
     def visible_pages(self) -> list[int]:
