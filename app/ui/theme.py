@@ -237,16 +237,16 @@ def qss(dark: bool = False) -> str:
     QToolButton#filetab:hover {{ color: {c['ACCENT_TEXT']}; }}
 
     /* 리본 단추 */
-    QToolButton#rb {{ background: transparent; border: 2px solid transparent; border-radius: 4px; padding: 2px 5px; }}
+    QToolButton#rb {{ background: transparent; border: 2px solid transparent; border-radius: 4px; padding: 2px 3px; }}
     QToolButton#rb:hover {{ background: {c['HOVER']}; }}
     QToolButton#rb:pressed {{ background: {c['PRESSED']}; }}
     QToolButton#rb:checked {{ background: {c['SELECT_BG']}; color: {c['ACCENT_TEXT']}; }}
     QToolButton#rb:disabled {{ color: {c['TEXT_OFF']}; }}
-    QToolButton#rb[drop="true"] {{ padding-right: 16px; }}
+    QToolButton#rb[drop="true"] {{ padding-right: 14px; }}
     QToolButton#rb::menu-indicator {{ image: {down}; subcontrol-origin: padding; subcontrol-position: right center;
-        right: 4px; width: 10px; height: 6px; }}
-    QToolButton#rb[split="true"] {{ padding-right: 18px; }}
-    QToolButton#rb::menu-button {{ border: none; background: transparent; width: 16px;
+        right: 3px; width: 10px; height: 6px; }}
+    QToolButton#rb[split="true"] {{ padding-right: 15px; }}
+    QToolButton#rb::menu-button {{ border: none; background: transparent; width: 14px;
         border-top-right-radius: 4px; border-bottom-right-radius: 4px; }}
     QToolButton#rb::menu-button:hover {{ background: {c['PRESSED']}; }}
     QToolButton#rb::menu-arrow {{ image: {down}; width: 10px; height: 6px; }}
