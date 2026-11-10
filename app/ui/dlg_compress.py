@@ -1,4 +1,4 @@
-"""PDF 압축 창: 파일 목록(지금 문서가 들어감) · 높음/중간/낮음 · 사용자 지정 설정 · 저장 위치 · [적용].
+"""PDF 압축 창: 파일 목록(지금 문서가 들어감) · 높음/중간/낮음 · 사용자 지정 설정 · 저장 위치 · [적용](도는 동안 [취소]).
 
 결과는 「원래이름_압축.pdf」(있으면 「_압축_1」), 원본은 덮어쓰지 않는다. 못 줄인 파일은 그 줄 상태 칸에 실패로 남고,
 하나라도 줄였으면 「압축 성공!」 창에 평균 감소율을 보인다. 단계 · 사용자 지정 값 · 저장 위치는 기억한다.
@@ -20,6 +20,7 @@ from .dialogs import settle_default
 LEVEL_NAMES = {"high": "높음", "medium": "중간", "low": "낮음"}
 SUFFIX = "_압축"
 SUCCESS_TITLE = "압축 성공!"
+APPLY, CANCEL, CANCELLING = "적용", "취소", "취소 중…"   # 단추 하나: 도는 동안 「취소」(알PDF 와 같게)
 PDF_FILTER = "PDF 파일 (*.pdf)"
 CHECKS = (("dedupe", "중복 리소스 제거"), ("streams", "스트림 콘텐츠 압축"))
 REMOVES = (("bookmarks", "북마크 삭제"), ("attach", "첨부 파일 삭제"), ("meta", "문서 정보 및 메타데이터 삭제"),
@@ -83,9 +84,15 @@ class _Job(QThread):
     def __init__(self, tasks: list[dict], level: str, custom: dict):
         super().__init__()
         self.tasks, self.level, self.custom = tasks, level, custom
+        self.stopped = False   # 「취소」: 지금 파일까지 끝내고 멈춤
 
     def run(self):
         for k, t in enumerate(self.tasks):
+            if self.stopped:
+                for rest in self.tasks[k:]:
+                    if rest.get("doc") is not None:
+                        rest["doc"].close()
+                return
             self.rowStarted.emit(k)
             src = t.get("doc")
             own = src is None
@@ -131,10 +138,12 @@ class CompressDialog(QDialog):
         self.sources = {os.path.normcase(k): v for k, v in (sources or {}).items()}
         self.origins = {os.path.normcase(k): v for k, v in (origins or {}).items()}
         self.results: list[dict] = []
-        self.setWindowTitle("PDF 압축"); self.resize(900, 520)
-        root = QHBoxLayout(self)
+        self.job: _Job | None = None
+        self.setWindowTitle("PDF 압축"); self.resize(900, 440)
+        root = QVBoxLayout(self)
+        top = QHBoxLayout()
         self.files = FileListPanel(self, "압축", PDF_FILTER, paths=paths, passwords=passwords)
-        root.addWidget(self.files, 1)
+        top.addWidget(self.files, 1)
         side = QVBoxLayout()
         g = QGroupBox("압축 옵션"); gl = QVBoxLayout(g)
         self.group = QButtonGroup(self)
@@ -148,15 +157,28 @@ class CompressDialog(QDialog):
         gl.addWidget(self.gear)
         side.addWidget(g)
         side.addStretch()
-        self.out = OutputPanel(self, self.settings.setdefault("compress_out", {}), "압축")
-        side.addWidget(self.out)
-        self.apply_btn = QPushButton("적용"); self.apply_btn.setDefault(True); self.apply_btn.clicked.connect(self.apply)
+        top.addLayout(side, 1)
+        root.addLayout(top, 1)
+        self.out = OutputPanel(self, self.settings.setdefault("compress_out", {}), "압축")   # 저장 위치: 창 전체 폭
+        root.addWidget(self.out)
+        self.apply_btn = QPushButton(APPLY); self.apply_btn.setDefault(True); self.apply_btn.clicked.connect(self._apply_or_cancel)
         settle_default(self, self.apply_btn)
         hl = QHBoxLayout(); hl.addStretch(); hl.addWidget(self.apply_btn)
-        side.addLayout(hl)
-        root.addLayout(side, 1)
+        root.addLayout(hl)
         self.files.changed.connect(lambda: self.apply_btn.setEnabled(self.files.count() > 0))
         self.apply_btn.setEnabled(self.files.count() > 0)
+
+    def _apply_or_cancel(self):
+        if self.job is not None:
+            self.cancel()
+        else:
+            self.apply()
+
+    def cancel(self):
+        """도는 압축을 지금 파일까지 끝내고 멈춘다."""
+        if self.job is not None:
+            self.job.stopped = True
+            self.apply_btn.setText(CANCELLING); self.apply_btn.setEnabled(False)
 
     def level(self) -> str:
         return next(k for k, rb in self.radios.items() if rb.isChecked())
@@ -199,7 +221,7 @@ class CompressDialog(QDialog):
                 tasks[-1]["doc"].authenticate(pw)
         self.files.clear_status()
         self.results = [{"ok": False, "text": ""} for _ in tasks]
-        job = _Job(tasks, lv, custom_for(self.prefs, lv))
+        job = self.job = _Job(tasks, lv, custom_for(self.prefs, lv))
         loop = QEventLoop()
         job.rowStarted.connect(lambda k: self.files.set_status(k, "압축 중", True))
         job.rowDone.connect(self._row_done)
@@ -209,6 +231,7 @@ class CompressDialog(QDialog):
         if job.isRunning():
             loop.exec()
         job.wait()
+        self.job = None
         self._busy(False)
         ok = [r for r in self.results if r["ok"]]
         if ok:
@@ -226,10 +249,10 @@ class CompressDialog(QDialog):
         self.files.set_status(k, text, good)
 
     def _busy(self, on: bool):
-        for w in (self.files, self.gear, self.out, self.apply_btn, *self.radios.values()):
+        for w in (self.files, self.gear, self.out, *self.radios.values()):
             w.setEnabled(not on)
-        if not on:
-            self.apply_btn.setEnabled(self.files.count() > 0)
+        self.apply_btn.setText(CANCEL if on else APPLY)
+        self.apply_btn.setEnabled(on or self.files.count() > 0)
 
     def success(self, n: int, pct: int) -> str | None:
         """「압축 성공!」 창. "folder"(폴더 열기, 기본) · "open"(파일 열기) · None(닫음)."""
@@ -241,6 +264,11 @@ class CompressDialog(QDialog):
         box.exec()
         c = box.clickedButton()
         return "folder" if c is folder else "open" if c is opener else None
+
+    def reject(self):
+        if self.job is not None:   # 도는 중 닫기·Esc 는 취소로
+            self.cancel(); return
+        super().reject()
 
     def done(self, r):
         for d in self.sources.values():
