@@ -24,7 +24,7 @@ from PySide6.QtWidgets import QAbstractButton, QApplication, QToolButton, QWidge
 
 app = QApplication.instance() or QApplication(sys.argv[:1])
 
-from app.ui import icons, ribbon  # noqa: E402
+from app.ui import icons, ribbon, theme  # noqa: E402
 from app.ui.window import MainWindow  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -174,3 +174,58 @@ def test_squiggly_icon_has_wave():
     im = icons.pixmap("squiggly", 32).toImage()
     rows = [sum(im.pixelColor(x, y).alpha() > 60 for x in range(32)) for y in range(32)]
     assert sum(rows[:20]) > 0 and sum(rows[24:]) > 0   # 위에 글자, 아래에 물결
+
+
+# 라운드 24: 단추 여백을 줄여 주석 탭 이름을 더 편다. 창 너비별 이름 보이는 단추 수(배율 1.0, 맑은 고딕).
+# 줄이기 전(0.2.26)에는 1456 에서 10개, 다 펴려면 2264px 였다. 지금은 1456 에서 16개, 다 펴려면 1926px.
+COMMENT_NAMED_AT = {1100: 7, 1280: 12, 1456: 16, 1700: 20, 1920: 22}
+
+
+def ribbon_counts(widths) -> dict:
+    """리본만 띄워 너비마다 탭별 (이름 보이는 단추 수, 묶음별 펴짐) 을 잰다. 잘린 이름도 모은다."""
+    app.setStyleSheet(theme.qss(False))   # 창이 거는 라이트 스킨(여백 규칙이 여기 있다)
+    rb = ribbon.Ribbon(); rb.resize(1456, 120); rb.show(); pump(0.2)
+    out: dict = {"named": {}, "groups": {}, "clipped": [], "full": {}}
+    for key, (compact, extra, btns, groups) in rb._widths.items():
+        out["full"][key] = compact + sum(extra)
+    for wd in widths:
+        rb.resize(wd, 120); pump(0.08)
+        for key, (compact, extra, btns, groups) in rb._widths.items():
+            on = [b.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon for b in btns]
+            out["named"].setdefault(key, {})[wd] = sum(on)
+            out["groups"].setdefault(key, {})[wd] = [on[g[0]] for g in groups]
+            if wd != 1456:
+                continue
+            rb.set_tab(key); pump(0.05)
+            for b, o in zip(btns, on):
+                if o and b.width() < b.sizeHint().width():
+                    out["clipped"].append((key, b.text(), b.width(), b.sizeHint().width()))
+                # 이름 칸 = 단추 폭 - 아이콘만일 때 폭 - Qt 의 아이콘·글자 사이 4px. 이름 글자 폭보다 좁으면 잘린다
+                if o:
+                    b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly); icon_only = b.sizeHint().width()
+                    b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+                    room = b.width() - icon_only - 4
+                    need = b.fontMetrics().horizontalAdvance(b.text().replace("&&", "&"))
+                    if room < need:
+                        out["clipped"].append((key, b.text(), room, need))
+    rb.close()
+    return out
+
+
+def test_ribbon_names_by_width():
+    res = ribbon_counts(sorted(COMMENT_NAMED_AT))
+    assert res["clipped"] == [], res["clipped"]
+    got = res["named"]["comment"]
+    print("comment named by width", got, "full", res["full"])
+    assert got[1456] > 10, got   # 줄이기 전 10개
+    for wd, n in COMMENT_NAMED_AT.items():   # 글꼴 차이로 한 묶음 어긋나는 것까지는 넘어간다
+        assert abs(got[wd] - n) <= 6, (wd, got)
+    assert res["full"]["comment"] < 2264
+    ws = sorted(got)
+    assert all(got[a] <= got[b] for a, b in zip(ws, ws[1:])), got   # 넓을수록 이름이 줄지 않는다
+    # 1456 에서 주석 탭은 앞 묶음부터 펴진다(글자 표시·그리기·그림 묶음), 다른 탭(양식 빼고)은 다 편다
+    g = res["groups"]["comment"][1456]
+    assert g[:3] == [True, True, True], g
+    for key, gs in res["groups"].items():
+        if key not in ("comment", "form"):
+            assert all(gs[1456]), (key, gs[1456])

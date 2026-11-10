@@ -211,6 +211,18 @@ COMMENT_ANNOT_KEYS = [it[0] for t, _, items in TABS if t == "comment" for it in 
                       if it != SEP and it[0] not in ("show_annots", "snapshot")]
 
 
+class RibbonButton(QToolButton):
+    """리본 단추. Qt 는 아이콘 옆 이름 뒤에 빈칸 두 개 폭을 더 잡아 단추마다 오른쪽이 비었다.
+    그 자리를 TEXT_GAP 만 남기고 줄여 주석 탭처럼 단추가 많은 탭에서 이름을 더 편다(라운드 24)."""
+    TEXT_GAP = 2
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        if self.text() and self.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon:
+            s.setWidth(s.width() - 2 * self.fontMetrics().horizontalAdvance(" ") + self.TEXT_GAP)
+        return s
+
+
 class Ribbon(QWidget):
     action = Signal(str)          # action·menu 항목
     tool = Signal(str)            # 뷰어 도구 바뀜
@@ -330,7 +342,7 @@ class Ribbon(QWidget):
             self._fit()
 
     def _build(self, items) -> QWidget:
-        w = QWidget(); hl = QHBoxLayout(w); hl.setContentsMargins(8, 3, 8, 4); hl.setSpacing(2)
+        w = QWidget(); hl = QHBoxLayout(w); hl.setContentsMargins(6, 3, 6, 4); hl.setSpacing(0)
         hl.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)  # 최소 폭은 _measure 가 정한다(아이콘만일 때 폭)
         w.setMinimumWidth(1)   # _measure 전에는 이름을 다 편 폭이 창 최소 폭이 되지 않게
         hl.addStretch(1)
@@ -344,7 +356,7 @@ class Ribbon(QWidget):
             if kind == "range":
                 hl.addWidget(self._range_combo())
                 continue
-            b = QToolButton(); b.setObjectName("rb"); b.setIcon(icons.icon(icon, 16)); b.setIconSize(icons.icon_size(16))
+            b = RibbonButton(); b.setObjectName("rb"); b.setIcon(icons.icon(icon, 16)); b.setIconSize(icons.icon_size(16))
             b.setToolTip(LABELS.get(key, label))
             if label:
                 b.setText(shown(label)); b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
