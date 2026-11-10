@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QRect, Qt
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, Signal
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QStyle, QStyleOptionComboBox, QStyleOptionFrame,
                                QStyleOptionSpinBox, QStylePainter, QWidget)
 
@@ -174,7 +174,9 @@ def distinct_elide(text: str, others, fm, width: int) -> str:
 
 class NameCombo(QComboBox):
     """긴 이름(프린터 등)을 고르는 목록. 펼친 목록은 가장 긴 이름이 다 보이게 넓히고(화면 폭까지),
-    닫힌 칸이 좁으면 이름끼리 다른 부분이 남도록 줄여 그린다."""
+    닫힌 칸이 좁으면 이름끼리 다른 부분이 남도록 줄여 그린다. 칸 폭이 바뀌면 resized 를 낸다(줄였는지 다시 볼 때)."""
+
+    resized = Signal()
 
     def names(self) -> list[str]:
         return [self.itemText(i) for i in range(self.count())]
@@ -184,6 +186,14 @@ class NameCombo(QComboBox):
         if width is None:
             width = self._label_width()
         return distinct_elide(self.currentText(), self.names(), self.fontMetrics(), width)
+
+    def is_elided(self) -> bool:
+        """닫힌 칸 글자를 줄여 그리는지."""
+        return self.shown_text() != self.currentText()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.resized.emit()
 
     def _label_width(self) -> int:
         opt = QStyleOptionComboBox(); self.initStyleOption(opt)

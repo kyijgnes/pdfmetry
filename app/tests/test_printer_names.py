@@ -62,22 +62,33 @@ def test_elide_untouched_when_fits():
         assert FW.distinct_elide(t, NAMES, fm, 10 ** 4) == t
 
 
-def test_dialog_shows_whole_name(fake_printers):
+def test_dialog_left_column_keeps_width_and_shows_full_name(fake_printers):
     d = fitz.open(); d.new_page()
     dlg = PR.PrintDialog(None, d, 0, None)
     dlg.show(); pump()
     try:
         c = dlg.printer
         assert isinstance(c, FW.NameCombo)
-        assert dlg.left_w > dlg.COL_W           # 긴 이름에 맞춰 왼쪽 열이 넓어진다
-        fm, room = c.fontMetrics(), c._label_width()
+        left = c.parentWidget()
+        assert left.width() == dlg.COL_W           # 긴 이름이 있어도 왼쪽 열은 원래 폭
+        assert not hasattr(dlg, "left_w")
         shown = []
         for t in NAMES:
             c.setCurrentText(t); pump()
             shown.append(c.shown_text())
-            if fm.horizontalAdvance(t) <= room:    # 열 폭 상한 안이면 이름 전체
+            if c.is_elided():                      # 줄였으면 칸 아래 전체 이름 줄과 툴팁
+                assert dlg.printer_full.isVisible() and dlg.printer_full.text() == t
+                assert c.toolTip() == t
+            else:                                  # 다 보이면 줄을 숨기고 툴팁도 없다
                 assert shown[-1] == t
-        assert len(set(shown)) == len(NAMES), shown   # 상한에 걸려 줄여도 서로 구분된다
+                assert not dlg.printer_full.isVisible() and c.toolTip() == ""
+        assert len(set(shown)) == len(NAMES), shown   # 줄여도 서로 구분된다
+        c.setCurrentText(NAMES[3]); pump(); a = c.shown_text()
+        c.setCurrentText(NAMES[4]); pump(); b = c.shown_text()
+        assert c.is_elided() and a != b and a.endswith("(69)") and b.endswith("(68)")
+        assert dlg.printer_full.isVisible()
+        c.setCurrentText(NAMES[0]); pump()         # 짧은 이름이면 줄이 숨는다
+        assert not c.is_elided() and not dlg.printer_full.isVisible()
     finally:
         dlg.close(); d.close()
 

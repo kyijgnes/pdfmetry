@@ -717,6 +717,9 @@ class PrintDialog(QDialog):
         self.props_btn.clicked.connect(self._printer_props); self.props_btn.setAccessibleName("프린터 속성")
         prow.addWidget(self.printer, 1); prow.addWidget(self.props_btn)
         lv.addLayout(prow)
+        self.printer_full = QLabel(); self.printer_full.setObjectName("dim"); self.printer_full.setWordWrap(True)
+        f = self.printer_full.font(); f.setPointSizeF(max(7.0, f.pointSizeF() - 1)); self.printer_full.setFont(f)
+        self.printer_full.hide(); lv.addWidget(self.printer_full)   # 칸이 이름을 줄였을 때만 전체 이름
         self.gray = QCheckBox("흑백 인쇄"); self.gray.setChecked(not r.get("color", True)); lv.addWidget(self.gray)
 
         self._head(lv, "인쇄 설정")
@@ -912,6 +915,8 @@ class PrintDialog(QDialog):
         self.mode_btns[mode0].setChecked(True); self.stack.setCurrentIndex([k for k, _ in MODES].index(mode0))
         self._printer_changed()
         self.printer.currentTextChanged.connect(self._printer_changed)
+        self.printer.currentTextChanged.connect(self._show_full_name)
+        self.printer.resized.connect(self._show_full_name)
         for w in (self.duplex, self.paper, self.dpi, self.subset, self.nup, self.nup_order, self.booklet_subset):
             w.currentIndexChanged.connect(self._refresh)
         for w in (self.gray, self.collate, self.source_size, self.as_image, self.c_doc, self.c_annot, self.c_form, self.reverse,
@@ -927,11 +932,11 @@ class PrintDialog(QDialog):
         self.first_btn.clicked.connect(lambda: self._go(0)); self.last_btn.clicked.connect(lambda: self._go(10 ** 9))
         self.prev_btn.clicked.connect(lambda: self._go(self._idx - 1)); self.next_btn.clicked.connect(lambda: self._go(self._idx + 1))
         self.pos.editingFinished.connect(self._pos_entered)
-        self.left_w = self._fit_left(left)
-        if self._advanced and available_rect(self).width() < self.left_w + self.COL_W + 300 + 32:
-            self._advanced = False   # 좁은 화면은 고급 설정을 접고 연다(기억해 둔 값은 그대로)
+        if self._advanced and available_rect(self).width() < 2 * self.COL_W + 525:
+            self._advanced = False   # 고급 설정을 편 기본 크기가 화면에 안 들어가면 접고 연다(기억해 둔 값은 그대로)
         self._set_advanced(self._advanced, adjust=False)
-        self.resize(self.left_w + (self.COL_W if self._advanced else 0) + 525, 637)
+        self.resize(self.COL_W * (2 if self._advanced else 1) + 525, 637)
+        self._show_full_name()
         self._refresh()
 
     # ── 짓는 도우미 ──
@@ -941,15 +946,12 @@ class PrintDialog(QDialog):
         v = QVBoxLayout(w); v.setContentsMargins(24, 18, 18, 14); v.setSpacing(8)
         return w
 
-    def _fit_left(self, left: QWidget) -> int:
-        """왼쪽 열을 가장 긴 프린터 이름이 다 보이는 폭으로 넓힌다(원래 폭의 1.5배와 화면 폭의 1/4 가운데 큰 것까지). 정한 폭을 돌려준다."""
-        m = left.layout().contentsMargins()
-        row = (m.left() + m.right() + fitwidth.need(self.printer, self.printer.names())
-               + 6 + self.props_btn.sizeHint().width())
-        scr = (self.screen() or QApplication.primaryScreen()).availableGeometry()
-        w = max(self.COL_W, min(row, max(self.COL_W * 3 // 2, scr.width() // 4)))
-        left.setFixedWidth(w)
-        return w
+    def _show_full_name(self, *_):
+        """닫힌 프린터 칸이 이름을 줄였으면 칸 아래에 전체 이름을 보이고 칸에 같은 툴팁을 단다. 다 보이면 숨긴다."""
+        cut = self.printer.is_elided()
+        name = self.printer.currentText() if cut else ""
+        self.printer_full.setText(name); self.printer_full.setVisible(cut)
+        self.printer.setToolTip(name)
 
     def _head(self, lay, text: str, first: bool = False):
         if not first:
