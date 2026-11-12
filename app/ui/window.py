@@ -734,12 +734,12 @@ class MainWindow(QMainWindow):
             pl = doc_pl
             if view and view.get("layout") == iv["layout"]:   # 문서 값을 물려받아 적어 둔 것이면 다시 따르지 않는다
                 view = dict(view, layout=pl)
-        if zm == "auto":   # 자동: 문서가 정한 배율, 없으면 너비 맞춤
+        if zm == "auto":   # 자동: 문서가 정한 배율, 없으면 창 맞추기(쪽 하나가 한눈에, 11-12 사용자: 너비 맞춤은 화면 꽉 차 안 들어옴)
             z = iv["zoom"]
             zm, last = (("fixed", {"zoom": z}) if isinstance(z, float) else
-                        (z if z != "default" else "fit_width", last))
+                        (z if z != "default" else "fit_page", last))
         elif zm == "last":   # 마지막으로 쓴 확대: 맞추기였으면 그 맞추기, 직접 고른 배율이면 그 배율
-            zm = last.get("mode", "fit_width")
+            zm = last.get("mode", "fit_page")
         elif re.fullmatch(r"p\d+", zm):   # 고정 배율(p10 … p600)
             zm, last = "fixed", {"zoom": int(zm[1:]) / 100}
         if view and view.get("layout") in ("single", "continuous", "facing", "facing_continuous"):
